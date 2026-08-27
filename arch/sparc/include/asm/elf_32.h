@@ -64,6 +64,13 @@
 #define HWCAP_SPARC_MULDIV      8
 #define HWCAP_SPARC_V9		16
 #define HWCAP_SPARC_ULTRA3	32
+/* The kernel performs a compare-and-swap on request; see
+   Documentation/arch/sparc/cas-trap.rst.  A caller that finds the bit clear
+   must not issue the trap - on sparc64, where a 32-bit process gets this word
+   from elf_64.h, that instruction is the old 64-bit system call - and has to
+   fall back to whatever it can do itself, or report the operation
+   unsupported.  */
+#define HWCAP_SPARC_CASTRAP	0x10000000
 
 #define CORE_DUMP_USE_REGSET
 
@@ -121,7 +128,8 @@ typedef struct {
 
 /* Most sun4m's have them all.  */
 #define ELF_HWCAP	(HWCAP_SPARC_FLUSH | HWCAP_SPARC_STBAR | \
-			 HWCAP_SPARC_SWAP | HWCAP_SPARC_MULDIV)
+			 HWCAP_SPARC_SWAP | HWCAP_SPARC_MULDIV | \
+			 HWCAP_SPARC_CASTRAP)
 
 /* This yields a string that ld.so will use to load implementation
    specific libraries for optimization.  This is more specific in
