@@ -8,10 +8,10 @@
  * illegal_instruction, which the exception table entry below turns into
  * -EFAULT, so the same entry serves both the probe and a faulting address.
  *
- * The helper is laid out for the LEON atomic errata: GRLIB-TN-0011 wants the
- * atomic 16-byte aligned, or an instruction TLB miss can release the bus lock
- * before the store, and GRLIB-TN-0010 forbids reaching one directly from a
- * load or a control transfer - which a call with a load in its delay slot
+ * Both helpers are laid out for the LEON atomic errata: GRLIB-TN-0011 wants
+ * the atomic 16-byte aligned, or an instruction TLB miss can release the bus
+ * lock before the store, and GRLIB-TN-0010 forbids reaching one directly from
+ * a load or a control transfer - which a call with a load in its delay slot
  * does.  A nop at the entry and nop padding up to the boundary cover both, for
  * less than runtime detection would cost.
  *
@@ -43,6 +43,20 @@ ENTRY(__sparc32_casa)
 	 clr	%o0
 ENDPROC(__sparc32_casa)
 
+/*
+ * The same on a user address.  ASI 0x0a is user data, which is what a binary
+ * built for such a cpu uses itself, so the kernel and userspace operate on the
+ * word the same way.
+ */
+ENTRY(__sparc32_casa_user)
+	nop
+	.balignl 16, 0x01000000
+4:	casa	[%o0] 0x0a, %o1, %o2
+	st	%o2, [%o3]
+	retl
+	 clr	%o0
+ENDPROC(__sparc32_casa_user)
+
 	.section .fixup,#alloc,#execinstr
 	.align	4
 2:	retl
@@ -52,4 +66,5 @@ ENDPROC(__sparc32_casa)
 	.section __ex_table,#alloc
 	.align	4
 	.word	1b, 2b
+	.word	4b, 2b
 	.previous
