@@ -171,6 +171,8 @@ void do_data_store_error(struct pt_regs *regs, unsigned long mfar,
 void do_illegal_instruction(struct pt_regs *regs, unsigned long pc, unsigned long npc,
 			    unsigned long psr)
 {
+	unsigned int insn;
+
 	if (psr & PSR_PS) {
 		const struct exception_table_entry *entry;
 
@@ -190,6 +192,11 @@ void do_illegal_instruction(struct pt_regs *regs, unsigned long pc, unsigned lon
 	printk("Ill instr. at pc=%08lx instruction is %08lx\n",
 	       regs->pc, *(unsigned long *)regs->pc);
 #endif
+
+	if (!get_user(insn, (unsigned int __user *)pc)) {
+		if (try_emulate_casa(regs, insn))
+			return;
+	}
 
 	send_sig_fault(SIGILL, ILL_ILLOPC, (void __user *)pc, current);
 }

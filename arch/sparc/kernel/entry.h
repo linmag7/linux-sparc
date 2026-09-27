@@ -16,6 +16,7 @@ void do_data_store_error(struct pt_regs *regs, unsigned long mfar,
 			 unsigned long mfsr);
 void do_illegal_instruction(struct pt_regs *regs, unsigned long pc,
                             unsigned long npc, unsigned long psr);
+int try_emulate_casa(struct pt_regs *regs, unsigned int insn);
 
 void do_priv_instruction(struct pt_regs *regs, unsigned long pc,
                          unsigned long npc, unsigned long psr);
