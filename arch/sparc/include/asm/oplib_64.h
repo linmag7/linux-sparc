@@ -72,7 +72,7 @@ char *prom_getbootargs(void);
 /* Miscellaneous routines, don't really fit in any category per se. */
 
 /* Reboot the machine with the command line passed. */
-void prom_reboot(const char *boot_command);
+void prom_reboot(const char *boot_command, bool capture);
 
 /* Evaluate the forth string passed. */
 void prom_feval(const char *forth_string);

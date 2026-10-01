@@ -49,13 +49,19 @@ void prom_sun4v_guest_soft_state(void)
 }
 
 /* Reset and reboot the machine with the command 'bcommand'. */
-void prom_reboot(const char *bcommand)
+void prom_reboot(const char *bcommand, bool capture)
 {
 	unsigned long args[4];
+	unsigned long flags;
 
 #ifdef CONFIG_SUN_LDOMS
 	if (ldom_domaining_enabled)
 		ldom_reboot(bcommand);
+#endif
+	local_irq_save(flags);
+#ifdef CONFIG_SMP
+	if (capture)
+		smp_capture();
 #endif
 	args[0] = (unsigned long) "boot";
 	args[1] = 1;
@@ -63,6 +69,11 @@ void prom_reboot(const char *bcommand)
 	args[3] = (unsigned long) bcommand;
 
 	p1275_cmd_direct(args);
+#ifdef CONFIG_SMP
+	if (capture)
+		smp_release();
+#endif
+	local_irq_restore(flags);
 }
 
 /* Forth evaluate the expression contained in 'fstring'. */
