@@ -3673,14 +3673,15 @@ mpt_downloadboot(MPT_ADAPTER *ioc, MpiFwHeader_t *pFwHeader, int sleepFlag)
 	u32			 fwSize;
 	u32			 diag0val;
 	int			 count;
-	u32			*ptrFw;
+	__le32			*ptrFw;
 	u32			 diagRwData;
 	u32			 nextImage;
 	u32			 load_addr;
 	u32 			 ioc_state=0;
 
 	ddlprintk(ioc, printk(MYIOC_s_DEBUG_FMT "downloadboot: fw size 0x%x (%d), FW Ptr %p\n",
-				ioc->name, pFwHeader->ImageSize, pFwHeader->ImageSize, pFwHeader));
+				ioc->name, le32_to_cpu(pFwHeader->ImageSize),
+				le32_to_cpu(pFwHeader->ImageSize), pFwHeader));
 
 	CHIPREG_WRITE32(&ioc->chip->WriteSequence, 0xFF);
 	CHIPREG_WRITE32(&ioc->chip->WriteSequence, MPI_WRSEQ_1ST_KEY_VALUE);
@@ -3733,8 +3734,8 @@ mpt_downloadboot(MPT_ADAPTER *ioc, MpiFwHeader_t *pFwHeader, int sleepFlag)
 	/* Set the DiagRwEn and Disable ARM bits */
 	CHIPREG_WRITE32(&ioc->chip->Diagnostic, (MPI_DIAG_RW_ENABLE | MPI_DIAG_DISABLE_ARM));
 
-	fwSize = (pFwHeader->ImageSize + 3)/4;
-	ptrFw = (u32 *) pFwHeader;
+	fwSize = (le32_to_cpu(pFwHeader->ImageSize) + 3)/4;
+	ptrFw = (__le32 *) pFwHeader;
 
 	/* Write the LoadStartAddress to the DiagRw Address Register
 	 * using Programmed IO
@@ -3742,42 +3743,49 @@ mpt_downloadboot(MPT_ADAPTER *ioc, MpiFwHeader_t *pFwHeader, int sleepFlag)
 	if (ioc->errata_flag_1064)
 		pci_enable_io_access(ioc->pcidev);
 
-	CHIPREG_PIO_WRITE32(&ioc->pio_chip->DiagRwAddress, pFwHeader->LoadStartAddress);
+	CHIPREG_PIO_WRITE32(&ioc->pio_chip->DiagRwAddress,
+			   le32_to_cpu(pFwHeader->LoadStartAddress));
 	ddlprintk(ioc, printk(MYIOC_s_DEBUG_FMT "LoadStart addr written 0x%x \n",
-		ioc->name, pFwHeader->LoadStartAddress));
+		ioc->name, le32_to_cpu(pFwHeader->LoadStartAddress)));
 
 	ddlprintk(ioc, printk(MYIOC_s_DEBUG_FMT "Write FW Image: 0x%x bytes @ %p\n",
 				ioc->name, fwSize*4, ptrFw));
 	while (fwSize--) {
-		CHIPREG_PIO_WRITE32(&ioc->pio_chip->DiagRwData, *ptrFw++);
+		CHIPREG_PIO_WRITE32(&ioc->pio_chip->DiagRwData,
+				   le32_to_cpu(*ptrFw++));
 	}
 
-	nextImage = pFwHeader->NextImageHeaderOffset;
+	nextImage = le32_to_cpu(pFwHeader->NextImageHeaderOffset);
 	while (nextImage) {
 		pExtImage = (MpiExtImageHeader_t *) ((char *)pFwHeader + nextImage);
 
-		load_addr = pExtImage->LoadStartAddress;
+		load_addr = le32_to_cpu(pExtImage->LoadStartAddress);
 
-		fwSize = (pExtImage->ImageSize + 3) >> 2;
-		ptrFw = (u32 *)pExtImage;
+		fwSize = (le32_to_cpu(pExtImage->ImageSize) + 3) >> 2;
+		ptrFw = (__le32 *)pExtImage;
 
 		ddlprintk(ioc, printk(MYIOC_s_DEBUG_FMT "Write Ext Image: 0x%x (%d) bytes @ %p load_addr=%x\n",
 						ioc->name, fwSize*4, fwSize*4, ptrFw, load_addr));
 		CHIPREG_PIO_WRITE32(&ioc->pio_chip->DiagRwAddress, load_addr);
 
 		while (fwSize--) {
-			CHIPREG_PIO_WRITE32(&ioc->pio_chip->DiagRwData, *ptrFw++);
+			CHIPREG_PIO_WRITE32(&ioc->pio_chip->DiagRwData,
+				   le32_to_cpu(*ptrFw++));
 		}
-		nextImage = pExtImage->NextImageHeaderOffset;
+		nextImage = le32_to_cpu(pExtImage->NextImageHeaderOffset);
 	}
 
 	/* Write the IopResetVectorRegAddr */
-	ddlprintk(ioc, printk(MYIOC_s_DEBUG_FMT "Write IopResetVector Addr=%x! \n", ioc->name, 	pFwHeader->IopResetRegAddr));
-	CHIPREG_PIO_WRITE32(&ioc->pio_chip->DiagRwAddress, pFwHeader->IopResetRegAddr);
+	ddlprintk(ioc, printk(MYIOC_s_DEBUG_FMT "Write IopResetVector Addr=%x! \n",
+		ioc->name, le32_to_cpu(pFwHeader->IopResetRegAddr)));
+	CHIPREG_PIO_WRITE32(&ioc->pio_chip->DiagRwAddress,
+			   le32_to_cpu(pFwHeader->IopResetRegAddr));
 
 	/* Write the IopResetVectorValue */
-	ddlprintk(ioc, printk(MYIOC_s_DEBUG_FMT "Write IopResetVector Value=%x! \n", ioc->name, pFwHeader->IopResetVectorValue));
-	CHIPREG_PIO_WRITE32(&ioc->pio_chip->DiagRwData, pFwHeader->IopResetVectorValue);
+	ddlprintk(ioc, printk(MYIOC_s_DEBUG_FMT "Write IopResetVector Value=%x! \n",
+		ioc->name, le32_to_cpu(pFwHeader->IopResetVectorValue)));
+	CHIPREG_PIO_WRITE32(&ioc->pio_chip->DiagRwData,
+			   le32_to_cpu(pFwHeader->IopResetVectorValue));
 
 	/* Clear the internal flash bad bit - autoincrementing register,
 	 * so must do two writes.
