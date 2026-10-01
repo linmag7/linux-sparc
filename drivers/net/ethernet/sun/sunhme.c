@@ -586,6 +586,12 @@ no_response:
 	return 1;
 }
 
+static bool is_dp83843_phy(struct happy_meal *hp)
+{
+	return hp->sw_physid1 == 0x2000 &&
+	       (hp->sw_physid2 & 0xfff0) == 0x5c10;
+}
+
 static int is_lucent_phy(struct happy_meal *hp)
 {
 	void __iomem *tregs = hp->tcvregs;
@@ -659,6 +665,15 @@ happy_meal_begin_auto_negotiation(struct happy_meal *hp,
 		hp->sw_bmcr |= BMCR_ANRESTART;
 		happy_meal_tcvr_write(hp, tregs, MII_BMCR, hp->sw_bmcr);
 
+		/*
+		 * DP83843 may retain ANRESTART beyond the short busy poll.
+		 * Let the existing bounded link timer observe completion.
+		 */
+		if (is_dp83843_phy(hp)) {
+			hp->timer_state = arbwait;
+			goto start_timer;
+		}
+
 		/* BMCR_ANRESTART self clears when the process has begun. */
 
 		timeout = 64;  /* More than enough. */
@@ -700,7 +715,7 @@ force_link:
 		}
 		happy_meal_tcvr_write(hp, tregs, MII_BMCR, hp->sw_bmcr);
 
-		if (!is_lucent_phy(hp)) {
+		if (!is_dp83843_phy(hp) && !is_lucent_phy(hp)) {
 			/* OK, seems we need do disable the transceiver for the first
 			 * tick to make sure we get an accurate link state at the
 			 * second tick.
@@ -714,6 +729,7 @@ force_link:
 		hp->timer_state = ltrywait;
 	}
 
+start_timer:
 	hp->timer_ticks = 0;
 	hp->happy_timer.expires = jiffies + (12 * HZ)/10;  /* 1.2 sec. */
 	add_timer(&hp->happy_timer);
@@ -742,7 +758,7 @@ static void happy_meal_timer(struct timer_list *t)
 			hp->sw_bmcr = BMCR_SPEED100;
 			happy_meal_tcvr_write(hp, tregs, MII_BMCR, hp->sw_bmcr);
 
-			if (!is_lucent_phy(hp)) {
+			if (!is_dp83843_phy(hp) && !is_lucent_phy(hp)) {
 				/* OK, seems we need do disable the transceiver for the first
 				 * tick to make sure we get an accurate link state at the
 				 * second tick.
@@ -816,7 +832,7 @@ static void happy_meal_timer(struct timer_list *t)
 		hp->sw_bmsr = happy_meal_tcvr_read(hp, tregs, MII_BMSR);
 		hp->sw_csconfig = happy_meal_tcvr_read(hp, tregs, DP83840_CSCONFIG);
 		if (hp->timer_ticks == 1) {
-			if (!is_lucent_phy(hp)) {
+			if (!is_dp83843_phy(hp) && !is_lucent_phy(hp)) {
 				/* Re-enable transceiver, we'll re-enable the transceiver next
 				 * tick, then check link state on the following tick.
 				 */
@@ -828,7 +844,7 @@ static void happy_meal_timer(struct timer_list *t)
 			break;
 		}
 		if (hp->timer_ticks == 2) {
-			if (!is_lucent_phy(hp)) {
+			if (!is_dp83843_phy(hp) && !is_lucent_phy(hp)) {
 				hp->sw_csconfig &= ~(CSCONFIG_TCVDISAB);
 				happy_meal_tcvr_write(hp, tregs,
 						      DP83840_CSCONFIG, hp->sw_csconfig);
@@ -859,7 +875,7 @@ static void happy_meal_timer(struct timer_list *t)
 					happy_meal_begin_auto_negotiation(hp, tregs, NULL);
 					goto out;
 				}
-				if (!is_lucent_phy(hp)) {
+				if (!is_dp83843_phy(hp) && !is_lucent_phy(hp)) {
 					hp->sw_csconfig = happy_meal_tcvr_read(hp, tregs,
 									       DP83840_CSCONFIG);
 					hp->sw_csconfig |= CSCONFIG_TCVDISAB;
@@ -1028,8 +1044,17 @@ static int happy_meal_tcvr_reset(struct happy_meal *hp, void __iomem *tregs)
 		}
 	}
 
+	/* Identify the selected PHY before reset changes its register state. */
+	hp->sw_physid1 = happy_meal_tcvr_read(hp, tregs, MII_PHYSID1);
+	hp->sw_physid2 = happy_meal_tcvr_read(hp, tregs, MII_PHYSID2);
+	if (is_dp83843_phy(hp))
+		tries = 128;
+
 	ASD("BMCR_RESET...\n");
 	happy_meal_tcvr_write(hp, tregs, MII_BMCR, BMCR_RESET);
+	/* DP83843 SNLS021, section 5.3: no serial MII access for 500 us. */
+	if (is_dp83843_phy(hp))
+		udelay(500);
 
 	while (--tries) {
 		result = happy_meal_tcvr_read(hp, tregs, MII_BMCR);
@@ -1070,7 +1095,7 @@ static int happy_meal_tcvr_reset(struct happy_meal *hp, void __iomem *tregs)
 		return -1;
 	}
 	ASD("SUCCESS and CSCONFIG_DFBYPASS\n");
-	if (!is_lucent_phy(hp)) {
+	if (!is_dp83843_phy(hp) && !is_lucent_phy(hp)) {
 		result = happy_meal_tcvr_read(hp, tregs,
 					      DP83840_CSCONFIG);
 		happy_meal_tcvr_write(hp, tregs,
