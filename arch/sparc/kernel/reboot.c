@@ -9,6 +9,7 @@
 #include <linux/pm.h>
 #include <linux/of.h>
 
+#include <asm/emergency-restart.h>
 #include <asm/oplib.h>
 #include <asm/prom.h>
 #include <asm/setup.h>
@@ -38,7 +39,7 @@ void machine_halt(void)
 	panic("Halt failed!");
 }
 
-void machine_restart(char *cmd)
+static void sparc_restart(char *cmd, bool capture)
 {
 	char *p;
 
@@ -46,10 +47,20 @@ void machine_restart(char *cmd)
 	if (p)
 		*p = 0;
 	if (cmd)
-		prom_reboot(cmd);
+		prom_reboot(cmd, capture);
 	if (*reboot_command)
-		prom_reboot(reboot_command);
-	prom_reboot("");
+		prom_reboot(reboot_command, capture);
+	prom_reboot("", capture);
 	panic("Reboot failed!");
 }
 
+void machine_restart(char *cmd)
+{
+	sparc_restart(cmd, true);
+}
+
+void machine_emergency_restart(void)
+{
+	/* Emergency restart cannot wait for other CPUs to respond. */
+	sparc_restart(NULL, false);
+}
