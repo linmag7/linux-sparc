@@ -480,6 +480,8 @@ typedef struct _mpt_ioctl_events {
 /* #define MPT_SCSICFG_BLK_NEGO		0x10	   WriteSDP1 with WDTR and SDTR disabled */
 
 typedef	struct _SpiCfgData {
+	void		*port_page1_buf;
+	dma_addr_t	 port_page1_dma;
 	u32		 PortFlags;
 	int		*nvram;			/* table of device NVRAM values */
 	IOCPage4_t	*pIocPg4;		/* SEP devices addressing */
