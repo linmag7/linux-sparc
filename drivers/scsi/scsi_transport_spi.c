@@ -720,10 +720,15 @@ spi_dv_device_compare_inquiry(struct scsi_device *sdev, u8 *buffer,
 	};
 
 	for (r = 0; r < retries; r++) {
-		memset(ptr, 0, len);
+		int retry_count = ptr == buffer ? DV_RETRIES : 0;
 
-		result = spi_execute(sdev, spi_inquiry, REQ_OP_DRV_IN,
-				     ptr, len, NULL);
+		/* Retry only the reference read at narrow asynchronous settings. */
+		do {
+			memset(ptr, 0, len);
+			result = spi_execute(sdev, spi_inquiry, REQ_OP_DRV_IN,
+					     ptr, len, NULL);
+		} while (result == (DID_SOFT_ERROR << 16) && retry_count-- &&
+			 scsi_device_online(sdev));
 		
 		if(result || !scsi_device_online(sdev)) {
 			scsi_device_set_state(sdev, SDEV_QUIESCE);
