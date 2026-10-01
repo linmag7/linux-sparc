@@ -54,6 +54,7 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/pci.h>
+#include <linux/of.h>
 #include <linux/kdev_t.h>
 #include <linux/blkdev.h>
 #include <linux/delay.h>
@@ -3314,6 +3315,112 @@ GetPortFacts(MPT_ADAPTER *ioc, int portnum, int sleepFlag)
 }
 
 /*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=*/
+/* Use the polled doorbell while reset still owns the disabled port. */
+static int mpt_primepower_config(MPT_ADAPTER *ioc, ConfigPageHeader_t *hdr,
+				u8 action, int sleepFlag)
+{
+	Config_t req = { };
+	ConfigReply_t reply = { };
+	u32 flags;
+	int ret;
+
+	req.Function = MPI_FUNCTION_CONFIG;
+	req.Action = action;
+	req.Header = *hdr;
+	req.Header.PageType &= MPI_CONFIG_PAGETYPE_MASK;
+	flags = action == MPI_CONFIG_ACTION_PAGE_WRITE_CURRENT ?
+		MPT_SGE_FLAGS_SSIMPLE_WRITE : MPT_SGE_FLAGS_SSIMPLE_READ;
+	if (action != MPI_CONFIG_ACTION_PAGE_HEADER)
+		flags |= hdr->PageLength * 4;
+	ioc->add_sge((char *)&req.PageBufferSGE, flags,
+		    action == MPI_CONFIG_ACTION_PAGE_HEADER ? (dma_addr_t)-1 :
+		    ioc->spi_data.port_page1_dma);
+	ret = mpt_handshake_req_reply_wait(ioc, sizeof(req), (u32 *)&req,
+					 sizeof(reply), (u16 *)&reply, 10,
+					 sleepFlag);
+	if (ret || reply.MsgLength * 4 < sizeof(reply) ||
+	    reply.Function != MPI_FUNCTION_CONFIG ||
+	    (le16_to_cpu(reply.IOCStatus) & MPI_IOCSTATUS_MASK) !=
+	    MPI_IOCSTATUS_SUCCESS || reply.Header.PageNumber != 1 ||
+	    (reply.Header.PageType & MPI_CONFIG_PAGETYPE_MASK) !=
+	    MPI_CONFIG_PAGETYPE_SCSI_PORT)
+		return -EIO;
+	if (action == MPI_CONFIG_ACTION_PAGE_HEADER)
+		*hdr = reply.Header;
+	return 0;
+}
+
+static int mpt_primepower_port_setup(MPT_ADAPTER *ioc, int sleepFlag)
+{
+	struct device_node *np;
+	ConfigPageHeader_t hdr = { };
+	SCSIPortPage1_t *pg;
+	u32 id = U32_MAX, value, expected, timer;
+	int ret;
+
+	if (ioc->pcidev->vendor != PCI_VENDOR_ID_LSI_LOGIC ||
+	    ioc->pcidev->device != MPI_MANUFACTPAGE_DEVID_53C1030 ||
+	    !of_machine_is_compatible("sun4us") ||
+	    of_property_match_string(of_root, "name", "FJSV,GPUZC-M") < 0 ||
+	    of_property_match_string(of_root, "model", "250") < 0 ||
+	    !of_device_is_compatible(ioc->pcidev->dev.of_node, "fjulsa"))
+		return 0;
+	for (np = of_node_get(ioc->pcidev->dev.of_node); np;
+	     np = of_get_next_parent(np)) {
+		if (!of_property_read_u32(np, "scsi-initiator-id", &id)) {
+			of_node_put(np);
+			break;
+		}
+	}
+	if (id >= 16)
+		return -EINVAL;
+
+	/* Retain the DMA buffer across resets, including handshake timeouts. */
+	if (!ioc->spi_data.port_page1_buf) {
+		ioc->spi_data.port_page1_buf = dmam_alloc_coherent(
+			&ioc->pcidev->dev, U8_MAX * 4,
+			&ioc->spi_data.port_page1_dma,
+			sleepFlag == CAN_SLEEP ? GFP_KERNEL : GFP_ATOMIC);
+		if (!ioc->spi_data.port_page1_buf)
+			return -ENOMEM;
+	}
+	pg = ioc->spi_data.port_page1_buf;
+	hdr.PageNumber = 1;
+	hdr.PageType = MPI_CONFIG_PAGETYPE_SCSI_PORT;
+	ret = mpt_primepower_config(ioc, &hdr, MPI_CONFIG_ACTION_PAGE_HEADER,
+				   sleepFlag);
+	if (ret)
+		return ret;
+	if (hdr.PageLength * 4 < offsetof(SCSIPortPage1_t, TargetConfig))
+		return -EINVAL;
+	ret = mpt_primepower_config(ioc, &hdr,
+				   MPI_CONFIG_ACTION_PAGE_READ_CURRENT, sleepFlag);
+	if (ret)
+		return ret;
+	value = le32_to_cpu(pg->Configuration);
+	timer = le32_to_cpu(pg->OnBusTimerValue);
+	expected = (value & ~(MPI_SCSIPORTPAGE1_CFG_PORT_SCSI_ID_MASK |
+			     MPI_SCSIPORTPAGE1_CFG_PORT_RESPONSE_ID_MASK)) |
+		   id | (1U << (id + MPI_SCSIPORTPAGE1_CFG_SHIFT_PORT_RESPONSE_ID));
+	if (value != expected) {
+		pg->Configuration = cpu_to_le32(expected);
+		ret = mpt_primepower_config(ioc, &hdr,
+				MPI_CONFIG_ACTION_PAGE_WRITE_CURRENT, sleepFlag);
+		if (ret)
+			return ret;
+		memset(pg, 0, hdr.PageLength * 4);
+		ret = mpt_primepower_config(ioc, &hdr,
+				MPI_CONFIG_ACTION_PAGE_READ_CURRENT, sleepFlag);
+		if (ret)
+			return ret;
+		if (le32_to_cpu(pg->Configuration) != expected ||
+		    le32_to_cpu(pg->OnBusTimerValue) != timer)
+			return -EIO;
+	}
+	ioc->pfacts[0].PortSCSIID = id;
+	return 0;
+}
+
 /**
  *	SendIocInit - Send IOCInit request to MPT adapter.
  *	@ioc: Pointer to MPT_ADAPTER structure
@@ -3397,6 +3504,13 @@ SendIocInit(MPT_ADAPTER *ioc, int sleepFlag)
 	/* No need to byte swap the multibyte fields in the reply
 	 * since we don't even look at its contents.
 	 */
+
+	r = mpt_primepower_port_setup(ioc, sleepFlag);
+	if (r) {
+		dev_err(&ioc->pcidev->dev,
+			"Cannot configure firmware SCSI initiator ID: %d\n", r);
+		return r;
+	}
 
 	dhsprintk(ioc, printk(MYIOC_s_DEBUG_FMT "Sending PortEnable (req @ %p)\n",
 			ioc->name, &ioc_init));
