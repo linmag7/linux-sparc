@@ -615,6 +615,10 @@ unsigned int build_irq(int inofixup, unsigned long iclr, unsigned long imap)
 	BUG_ON(tlb_type == hypervisor);
 
 	ino = (upa_readq(imap) & (IMAP_IGN | IMAP_INO)) + inofixup;
+	if ((unsigned int)ino >= nr_ivec) {
+		prom_printf("IRQ: interrupt vector %d is out of range.\n", ino);
+		prom_halt();
+	}
 	bucket = &ivector_table[ino];
 	irq = bucket_get_irq(__pa(bucket));
 	if (!irq) {
