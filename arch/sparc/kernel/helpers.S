@@ -64,3 +64,129 @@ real_hard_smp_processor_id:
 #endif
 	.size		real_hard_smp_processor_id,.-real_hard_smp_processor_id
 EXPORT_SYMBOL_GPL(real_hard_smp_processor_id)
+
+	.align 32
+	.globl sparc64_vii_ecc_trap
+sparc64_vii_ecc_trap:
+	TRAP(sparc64_vii_ecc_error)
+	.globl sparc64_vii_ecc_trap_tl1
+sparc64_vii_ecc_trap_tl1:
+	TRAPTL1(sparc64_vii_ecc_error)
+
+	.align 32
+	.globl sparc64_vii_fatal_trap
+sparc64_vii_fatal_trap:
+	wrpr %g0, 15, %pil
+	sethi %hi(sparc64_vii_fault_record), %g1
+	or %g1, %lo(sparc64_vii_fault_record), %g1
+	rdpr %tpc, %g2
+	stx %g2, [%g1 + 8]
+	rdpr %tnpc, %g2
+	stx %g2, [%g1 + 16]
+	rdpr %tstate, %g2
+	stx %g2, [%g1 + 24]
+	rdpr %tl, %g2
+	stx %g2, [%g1 + 32]
+	rdpr %tt, %g2
+	stx %g2, [%g1 + 40]
+	/* VII Appendix P: state-change error information, read-only here. */
+	mov 0x18, %g2
+	ldxa [%g2] 0x4c, %g2
+	stx %g2, [%g1 + 48]
+	set 0x56494900, %g2
+	stx %g2, [%g1]
+	membar #Sync
+1:	ba,pt %xcc, 1b
+	 nop
+
+	.data
+	.align 64
+	.globl sparc64_vii_fault_record
+sparc64_vii_fault_record:
+	.xword 0, 0, 0, 0, 0, 0, 0, 0
+	.previous
+
+/*
+ * Require disabled shared-context/prefetch valid bits (VII F.10.2/F.10.13).
+ * Failures populate sparc64_vii_mmu_fault; a locked PROM cannot report them.
+ */
+	.align	32
+	.globl	sparc64_vii_check_mmu_state
+	.type	sparc64_vii_check_mmu_state,#function
+sparc64_vii_check_mmu_state:
+	/* Preserve %o0, which carries the secondary startup cookie. */
+	mov	0x68, %o1
+	ldxa	[%o1] 0x58, %o2
+	sethi	%hi(0x8000), %o3
+	sllx	%o3, 32, %o4
+	or	%o3, %o4, %o3
+	andcc	%o2, %o3, %g0
+	bne,pn	%xcc, .Lvii_mmu_bad
+	 mov	1, %o1
+	mov	0x0, %o1
+	ldxa	[%o1] 0x61, %o2
+	andcc	%o2, 0x100, %g0
+	bne,pn	%xcc, .Lvii_mmu_bad
+	 mov	2, %o1
+	mov	0x8, %o1
+	ldxa	[%o1] 0x61, %o2
+	andcc	%o2, 0x100, %g0
+	bne,pn	%xcc, .Lvii_mmu_bad
+	 mov	3, %o1
+	mov	0x40, %o1
+	ldxa	[%o1] 0x61, %o2
+	andcc	%o2, 0x100, %g0
+	bne,pn	%xcc, .Lvii_mmu_bad
+	 mov	4, %o1
+	mov	0x48, %o1
+	ldxa	[%o1] 0x61, %o2
+	andcc	%o2, 0x100, %g0
+	bne,pn	%xcc, .Lvii_mmu_bad
+	 mov	5, %o1
+	mov	0x0, %o1
+	ldxa	[%o1] 0x62, %o2
+	andcc	%o2, 0x100, %g0
+	bne,pn	%xcc, .Lvii_mmu_bad
+	 mov	6, %o1
+	mov	0x8, %o1
+	ldxa	[%o1] 0x62, %o2
+	andcc	%o2, 0x100, %g0
+	bne,pn	%xcc, .Lvii_mmu_bad
+	 mov	7, %o1
+	mov	0x40, %o1
+	ldxa	[%o1] 0x62, %o2
+	andcc	%o2, 0x100, %g0
+	bne,pn	%xcc, .Lvii_mmu_bad
+	 mov	8, %o1
+	mov	0x48, %o1
+	ldxa	[%o1] 0x62, %o2
+	andcc	%o2, 0x100, %g0
+	bne,pn	%xcc, .Lvii_mmu_bad
+	 mov	9, %o1
+	retl
+	 nop
+.Lvii_mmu_bad:
+	/* PROM may already be locked; record the failure without reentering it. */
+	wrpr	%g0, 15, %pil
+	rdpr	%pstate, %o3
+	andn	%o3, PSTATE_IE, %o3
+	wrpr	%o3, 0, %pstate
+	sethi	%hi(sparc64_vii_mmu_fault), %o3
+	or	%o3, %lo(sparc64_vii_mmu_fault), %o3
+	stx	%o1, [%o3 + 8]
+	stx	%o2, [%o3 + 16]
+	stx	%o7, [%o3 + 24]
+	set	0x56494d4d, %o2
+	stx	%o2, [%o3]
+	membar	#Sync
+1:	ba,pt	%xcc, 1b
+	 nop
+	.size	sparc64_vii_check_mmu_state,.-sparc64_vii_check_mmu_state
+
+	.data
+	.align	32
+/* Fault record: magic, register (1 shared, 2-5 I, 6-9 D), value, caller. */
+	.globl	sparc64_vii_mmu_fault
+sparc64_vii_mmu_fault:
+	.xword	0, 0, 0, 0
+	.previous

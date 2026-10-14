@@ -3,8 +3,11 @@
 #define _ASM_SPARC64_HUGETLB_H
 
 #include <asm/page.h>
+#include <asm/spitfire.h>
 
 #ifdef CONFIG_HUGETLB_PAGE
+#define hugepages_supported() (tlb_type != sparc64_vii)
+
 struct pud_huge_patch_entry {
 	unsigned int addr;
 	unsigned int insn;
