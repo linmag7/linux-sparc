@@ -13,6 +13,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/numa.h>
+#include <linux/mutex.h>
 
 #include <asm/prom.h>
 #include <asm/irq.h>
@@ -427,6 +428,26 @@ static void pci_fire_hw_init(struct pci_pbm_info *pbm)
 	upa_writeq(~(u64)0, pbm->pbm_regs + FIRE_PEC_IENAB);
 }
 
+static bool oberon_diag_enabled;
+static DEFINE_MUTEX(oberon_diag_lock);
+static void oberon_diag_snapshot(struct pci_pbm_info *pbm, const char *phase);
+
+static ssize_t oberon_snapshot_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	struct pci_pbm_info *pbm = dev_get_drvdata(dev);
+	bool trigger;
+
+	if (!oberon_diag_enabled || !pbm || !pbm->is_oberon)
+		return -ENODEV;
+	if (kstrtobool(buf, &trigger) || !trigger)
+		return -EINVAL;
+	oberon_diag_snapshot(pbm, "runtime");
+	return count;
+}
+static DEVICE_ATTR_WO(oberon_snapshot);
+
 static int pci_fire_pbm_init(struct pci_pbm_info *pbm,
 			     struct platform_device *op, u32 portid)
 {
@@ -454,6 +475,8 @@ static int pci_fire_pbm_init(struct pci_pbm_info *pbm,
 
 	pbm->pbm_regs = regs[0].phys_addr;
 	pbm->controller_regs = regs[1].phys_addr - 0x410000UL;
+	if (pbm->is_oberon && oberon_diag_enabled)
+		oberon_diag_snapshot(pbm, "pre-pbm");
 
 	printk("%s: SUN4U PCIE Bus Module\n", pbm->name);
 
@@ -511,6 +534,11 @@ static int fire_probe(struct platform_device *op)
 		goto out_free_iommu;
 
 	dev_set_drvdata(&op->dev, pbm);
+	if (pbm->is_oberon && oberon_diag_enabled) {
+		err = device_create_file(&op->dev, &dev_attr_oberon_snapshot);
+		if (err)
+			dev_warn(&op->dev, "passive snapshot trigger unavailable: %d\n", err);
+	}
 
 	return 0;
 
@@ -542,7 +570,6 @@ static struct platform_driver fire_driver = {
 };
 
 /* This diagnostic is opt-in and never acknowledges or enables errors. */
-static bool oberon_diag_enabled;
 
 static int __init oberon_diag_setup(char *str)
 {
@@ -569,7 +596,7 @@ early_param("oberon_diag", oberon_diag_setup);
 #define OBERON_DIAG_UE_STATUS	0x91010UL
 #define OBERON_DIAG_CE_STATUS	0xa1010UL
 
-static void __init oberon_diag_snapshot(struct pci_pbm_info *pbm)
+static void oberon_diag_snapshot(struct pci_pbm_info *pbm, const char *phase)
 {
 	struct device_node *dp = pbm->op->dev.of_node;
 	const struct linux_prom64_registers *regs;
@@ -607,6 +634,7 @@ static void __init oberon_diag_snapshot(struct pci_pbm_info *pbm)
 		return;
 	}
 	imap_offset = 0x1000UL + 8 * ino;
+	mutex_lock(&oberon_diag_lock);
 	dmc_enable = upa_readq(base + OBERON_DIAG_DMC_ENABLE);
 	log_enable = upa_readq(base + OBERON_DIAG_MMU_LOG);
 	mmu_enable = upa_readq(base + OBERON_DIAG_MMU_ENABLE);
@@ -651,6 +679,7 @@ static void __init oberon_diag_snapshot(struct pci_pbm_info *pbm)
 	multi_after = upa_readq(base + OBERON_DIAG_MULTI_STATUS);
 
 	/* Finish all register reads before printk can enter the firmware console. */
+	pr_info("Oberon diag %pOF: phase=%s\n", dp, phase);
 	pr_info("Oberon diag %pOF: portid=%u ino=%x imap=%016llx route_valid=%u\n",
 		dp, pbm->portid, ino, imap, !!(imap & BIT_ULL(31)));
 	pr_info("Oberon diag %pOF: dmc_enable=%016llx mmu_log=%016llx mmu_enable=%016llx\n",
@@ -681,6 +710,7 @@ static void __init oberon_diag_snapshot(struct pci_pbm_info *pbm)
 		dp, rx1_after, rx2_after);
 	pr_info("Oberon diag %pOF: tx1_after=%016llx tx2_after=%016llx\n",
 		dp, tx1_after, tx2_after);
+	mutex_unlock(&oberon_diag_lock);
 }
 
 static int __init oberon_diag_init(void)
@@ -691,7 +721,7 @@ static int __init oberon_diag_init(void)
 		return 0;
 	for (pbm = pci_pbm_root; pbm; pbm = pbm->next)
 		if (pbm->is_oberon)
-			oberon_diag_snapshot(pbm);
+			oberon_diag_snapshot(pbm, "late");
 	return 0;
 }
 late_initcall(oberon_diag_init);
