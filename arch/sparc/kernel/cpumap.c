@@ -10,6 +10,7 @@
 #include <linux/cpumask.h>
 #include <linux/spinlock.h>
 #include <asm/cpudata.h>
+#include <asm/spitfire.h>
 #include "cpumap.h"
 
 
@@ -352,6 +353,9 @@ static void _cpu_map_rebuild(void)
 {
 	int i;
 
+	if (tlb_type == sparc64_vii)
+		return;
+
 	if (cpuinfo_tree) {
 		kfree(cpuinfo_tree);
 		cpuinfo_tree = NULL;
@@ -394,6 +398,10 @@ static int simple_map_to_cpu(unsigned int index)
 static int _map_to_cpu(unsigned int index)
 {
 	struct cpuinfo_node *root_node;
+
+	/* VII package IDs do not fit the core/processor tree hierarchy. */
+	if (tlb_type == sparc64_vii)
+		return cpumask_nth(index % num_online_cpus(), cpu_online_mask);
 
 	if (unlikely(!cpuinfo_tree)) {
 		_cpu_map_rebuild();

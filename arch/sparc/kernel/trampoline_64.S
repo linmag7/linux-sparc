@@ -21,6 +21,18 @@
 #include <asm/hypervisor.h>
 #include <asm/cpudata.h>
 
+/* Validate each direct firmware return without reading %ver on sun4v. */
+	.macro VII_CHECK_MMU_STATE
+	BRANCH_IF_SUN4V(g1, .Lvii_mmu_done\@)
+	BRANCH_IF_SPARC64_VII(g1, g5, .Lvii_mmu_check\@)
+	ba,pt	%xcc, .Lvii_mmu_done\@
+	 nop
+.Lvii_mmu_check\@:
+	call	sparc64_vii_check_mmu_state
+	 nop
+.Lvii_mmu_done\@:
+	.endm
+
 	.data
 	.align	8
 call_method:
@@ -41,10 +53,27 @@ tramp_stack:
 	.globl		sparc64_cpu_startup, sparc64_cpu_startup_end
 sparc64_cpu_startup:
 	BRANCH_IF_SUN4V(g1, niagara_startup)
+	BRANCH_IF_SPARC64_VII(g1, g5, vii_startup)
 	BRANCH_IF_CHEETAH_BASE(g1, g5, cheetah_startup)
 	BRANCH_IF_CHEETAH_PLUS_OR_FOLLOWON(g1, g5, cheetah_plus_startup)
 
 	ba,pt	%xcc, spitfire_startup
+	 nop
+
+vii_startup:
+	/* Preserve firmware cache/MMU control, as on the boot CPU. */
+	mov		8, %g1
+	ldxa		[%g1] 0x45, %g5
+	sethi		%hi(vii_startup_mcntl), %g1
+	stx		%g5, [%g1 + %lo(vii_startup_mcntl)]
+	membar		#Sync
+	call		sparc64_vii_check_mmu_state
+	 nop
+	set		0x101c0, %g1
+	andcc		%g5, %g1, %g0
+1:	bne,pn		%xcc, 1b
+	 nop
+	ba,pt		%xcc, niagara_startup
 	 nop
 
 cheetah_plus_startup:
@@ -144,6 +173,7 @@ startup_continue:
 	lduw		[%l6 + %lo(num_kernel_image_mappings)], %l6
 
 	mov		15, %l7
+	BRANCH_IF_SPARC64_VII(g1,g5,2f)
 	BRANCH_IF_ANY_CHEETAH(g1,g5,2f)
 
 	mov		63, %l7
@@ -182,6 +212,7 @@ startup_continue:
 	ldx		[%g2 + 0x08], %o1
 	call		%o1
 	 add		%sp, (2047 + 128), %o0
+	VII_CHECK_MMU_STATE
 
 	/* Lock into D-MMU */
 	sethi		%hi(call_method), %g2
@@ -215,6 +246,7 @@ startup_continue:
 	ldx		[%g2 + 0x08], %o1
 	call		%o1
 	 add		%sp, (2047 + 128), %o0
+	VII_CHECK_MMU_STATE
 
 	add		%l5, 1, %l5
 	cmp		%l5, %l6
@@ -396,6 +428,7 @@ after_lock_tlb:
 	ldx		[%g2 + 0x08], %o1
 	call		%o1
 	 add		%sp, (2047 + 128), %o0
+	VII_CHECK_MMU_STATE
 
 	ba,pt		%xcc, 3f
 	 nop
@@ -413,6 +446,7 @@ after_lock_tlb:
 	ldx		[%g2 + 0x08], %o1
 	call		%o1
 	 add		%sp, (2047 + 128), %o0
+	VII_CHECK_MMU_STATE
 
 3:	sethi		%hi(prom_entry_lock), %g2
 	/*

@@ -271,7 +271,8 @@ static inline void tsb_insert(struct tsb *ent, unsigned long tag, unsigned long 
 {
 	unsigned long tsb_addr = (unsigned long) ent;
 
-	if (tlb_type == cheetah_plus || tlb_type == hypervisor)
+	if (tlb_type == cheetah_plus || tlb_type == hypervisor ||
+	    tlb_type == sparc64_vii)
 		tsb_addr = __pa(tsb_addr);
 
 	__tsb_insert(tsb_addr, tag, pte);
@@ -329,6 +330,9 @@ static void __update_mmu_tsb_insert(struct mm_struct *mm, unsigned long tsb_inde
 #ifdef CONFIG_HUGETLB_PAGE
 static int __init hugetlbpage_init(void)
 {
+	if (!hugepages_supported())
+		return 0;
+
 	hugetlb_add_hstate(HPAGE_64K_SHIFT - PAGE_SHIFT);
 	hugetlb_add_hstate(HPAGE_SHIFT - PAGE_SHIFT);
 	hugetlb_add_hstate(HPAGE_256MB_SHIFT - PAGE_SHIFT);
@@ -355,6 +359,9 @@ bool __init arch_hugetlb_valid_size(unsigned long size)
 {
 	unsigned int hugepage_shift = ilog2(size);
 	unsigned int hv_pgsz_mask;
+
+	if (!hugepages_supported())
+		return false;
 
 	switch (hugepage_shift) {
 	case HPAGE_16GB_SHIFT:
@@ -495,6 +502,12 @@ EXPORT_SYMBOL(flush_dcache_folio);
 
 void __kprobes flush_icache_range(unsigned long start, unsigned long end)
 {
+	if (tlb_type == sparc64_vii) {
+		/* Coherent caches still require instruction-stream synchronization. */
+		__asm__ __volatile__("membar #Sync\n\tflush %0"
+				     : : "r" (start) : "memory");
+		return;
+	}
 	/* Cheetah and Hypervisor platform cpus have coherent I-cache. */
 	if (tlb_type == spitfire) {
 		unsigned long kaddr;
@@ -530,6 +543,8 @@ void mmu_info(struct seq_file *m)
 		seq_printf(m, "MMU Type\t: Cheetah\n");
 	else if (tlb_type == cheetah_plus)
 		seq_printf(m, "MMU Type\t: Cheetah+\n");
+	else if (tlb_type == sparc64_vii)
+		seq_puts(m, "MMU Type\t: Fujitsu SPARC64 VII\n");
 	else if (tlb_type == spitfire)
 		seq_printf(m, "MMU Type\t: Spitfire\n");
 	else if (tlb_type == hypervisor)
@@ -666,6 +681,52 @@ static void __init hypervisor_tlb_lock(unsigned long vaddr,
 
 static unsigned long kern_large_tte(unsigned long paddr);
 
+/*
+ * Reserve the kernel image mappings in the lower half of the fully
+ * associative bank. Check existing reservations, firmware
+ * status and physical slot readback before using the mappings.
+ */
+static void __init vii_check_slots(void)
+{
+	int i;
+
+	if (num_kernel_image_mappings > 2) {
+		prom_printf("VII-BOOT: kernel exceeds initial 8MB mapping budget\n");
+		prom_halt();
+	}
+	for (i = 16 - num_kernel_image_mappings; i <= 15; i++) {
+		unsigned long d = cheetah_get_ldtlb_data(i);
+		unsigned long t = cheetah_get_litlb_data(i);
+
+		if (((d & (_PAGE_VALID | _PAGE_L_4U)) ==
+		      (_PAGE_VALID | _PAGE_L_4U)) ||
+		     ((t & (_PAGE_VALID | _PAGE_L_4U)) ==
+		      (_PAGE_VALID | _PAGE_L_4U))) {
+			prom_printf("VII-BOOT: reserved slot %d occupied; halted\n", i);
+			prom_halt();
+		}
+	}
+}
+
+static void __init vii_check_mapping(int slot, unsigned long va,
+				     unsigned long tte)
+{
+	/* VII F.2 #238 leaves PA/VA bits 21:13 arbitrary on 4MB TLB reads. */
+	unsigned long offset_mask = GENMASK(21, 13);
+	unsigned long mask = (_PAGE_VALID | _PAGE_SZALL_4U |
+		_PAGE_PADDR_VII | _PAGE_L_4U) & ~offset_mask;
+	unsigned long d = cheetah_get_ldtlb_data(slot);
+	unsigned long t = cheetah_get_litlb_data(slot);
+	unsigned long dt = cheetah_get_ldtlb_tag(slot);
+	unsigned long it = cheetah_get_litlb_tag(slot);
+
+	if ((d & mask) != (tte & mask) || (t & mask) != (tte & mask) ||
+	    ((dt ^ va) & ~offset_mask) || ((it ^ va) & ~offset_mask)) {
+		prom_printf("VII-BOOT: mapping readback mismatch; halted\n");
+		prom_halt();
+	}
+}
+
 static void __init remap_kernel(void)
 {
 	unsigned long phys_page, tte_vaddr, tte_data;
@@ -677,6 +738,9 @@ static void __init remap_kernel(void)
 
 	kern_locked_tte_data = tte_data;
 
+	if (tlb_type == sparc64_vii)
+		vii_check_slots();
+
 	/* Now lock us into the TLBs via Hypervisor or OBP. */
 	if (tlb_type == hypervisor) {
 		for (i = 0; i < num_kernel_image_mappings; i++) {
@@ -687,8 +751,22 @@ static void __init remap_kernel(void)
 		}
 	} else {
 		for (i = 0; i < num_kernel_image_mappings; i++) {
-			prom_dtlb_load(tlb_ent - i, tte_data, tte_vaddr);
-			prom_itlb_load(tlb_ent - i, tte_data, tte_vaddr);
+			long ret;
+
+			ret = prom_dtlb_load(tlb_ent - i, tte_data, tte_vaddr);
+			if (ret && tlb_type == sparc64_vii) {
+				prom_printf("SUNW,dtlb-load failed: idx=%d va=%lx tte=%lx rc=%lx\n",
+					    tlb_ent - i, tte_vaddr, tte_data, ret);
+				prom_halt();
+			}
+			ret = prom_itlb_load(tlb_ent - i, tte_data, tte_vaddr);
+			if (ret && tlb_type == sparc64_vii) {
+				prom_printf("SUNW,itlb-load failed: idx=%d va=%lx tte=%lx rc=%lx\n",
+					    tlb_ent - i, tte_vaddr, tte_data, ret);
+				prom_halt();
+			}
+			if (tlb_type == sparc64_vii)
+				vii_check_mapping(tlb_ent - i, tte_vaddr, tte_data);
 			tte_vaddr += 0x400000;
 			tte_data += 0x400000;
 		}
@@ -713,6 +791,9 @@ static void __init inherit_prom_mappings(void)
 
 void prom_world(int enter)
 {
+	if (tlb_type == sparc64_vii)
+		sparc64_vii_check_mmu_state();
+
 	/*
 	 * No need to change the address space any more, just flush
 	 * the register windows
@@ -723,6 +804,11 @@ void prom_world(int enter)
 void __flush_dcache_range(unsigned long start, unsigned long end)
 {
 	unsigned long va;
+
+	if (tlb_type == sparc64_vii) {
+		__asm__ __volatile__("membar #Sync" : : : "memory");
+		return;
+	}
 
 	if (tlb_type == spitfire) {
 		int n = 0;
@@ -2347,7 +2433,8 @@ void __init paging_init(void)
 	else
 		sun4u_pgprot_init();
 
-	if (tlb_type == cheetah_plus ||
+	/* VII supports ASI_QUAD_LDD_PHYS (0x34); avoid shared-TLB TSB aliases. */
+	if (tlb_type == cheetah_plus || tlb_type == sparc64_vii ||
 	    tlb_type == hypervisor) {
 		tsb_phys_patch();
 		ktsb_phys_patch();
@@ -2369,6 +2456,15 @@ void __init paging_init(void)
 	read_obp_memory("available", &pavail[0], &pavail_ents);
 	read_obp_memory("available", &pavail[0], &pavail_ents);
 
+	if (tlb_type == sparc64_vii) {
+		for (i = 0; i < pall_ents; i++) {
+			if (pall[i].phys_addr >= (1UL << 40) ||
+			    pall[i].reg_size > (1UL << 40) - pall[i].phys_addr) {
+				prom_printf("VII-BOOT: RAM exceeds initial PA layout\n");
+				prom_halt();
+			}
+		}
+	}
 	phys_base = 0xffffffffffffffffUL;
 	for (i = 0; i < pavail_ents; i++) {
 		phys_base = min(phys_base, pavail[i].phys_addr);
@@ -2402,7 +2498,7 @@ void __init paging_init(void)
 	memset(swapper_pg_dir, 0, sizeof(swapper_pg_dir));
 
 	inherit_prom_mappings();
-	
+
 	/* Ok, we can use our TLB miss and window trap handlers safely.  */
 	setup_tba();
 
@@ -2813,9 +2909,14 @@ void __flush_tlb_all(void)
 				spitfire_put_itlb_data(i, 0x0UL);
 			}
 		}
-	} else if (tlb_type == cheetah || tlb_type == cheetah_plus) {
+	} else if (tlb_type == cheetah || tlb_type == cheetah_plus ||
+		   tlb_type == sparc64_vii) {
 		cheetah_flush_dtlb_all();
 		cheetah_flush_itlb_all();
+		/* JPS2 F.10.1 requires instruction visibility after demap-all. */
+		if (tlb_type == sparc64_vii)
+			__asm__ __volatile__("flush %0"
+					     : : "r" (KERNBASE) : "memory");
 	}
 	__asm__ __volatile__("wrpr	%0, 0, %%pstate"
 			     : : "r" (pstate));

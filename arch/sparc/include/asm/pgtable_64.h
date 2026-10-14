@@ -146,6 +146,9 @@ bool kern_addr_valid(unsigned long addr);
 #define _PAGE_P_4U	  _AC(0x0000000000000004,UL) /* Privileged Page      */
 #define _PAGE_W_4U	  _AC(0x0000000000000002,UL) /* Writable             */
 
+/* SPARC64 VII Extensions F.2: physical address bits 46:13. */
+#define _PAGE_PADDR_VII	  _AC(0x00007FFFFFFFE000, UL) /* pa[46:13]           */
+
 /* SUN4V pte bits... */
 #define _PAGE_NFO_4V	  _AC(0x4000000000000000,UL) /* No Fault Only        */
 #define _PAGE_SOFT2_4V	  _AC(0x3F00000000000000,UL) /* Software bits, set 2 */
@@ -224,6 +227,8 @@ static inline pte_t pfn_pte(unsigned long pfn, pgprot_t prot)
 }
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
+#define has_transparent_hugepage() (tlb_type != sparc64_vii)
+
 static inline pmd_t pfn_pmd(unsigned long page_nr, pgprot_t pgprot)
 {
 	pte_t pte = pfn_pte(page_nr, pgprot);
@@ -232,10 +237,13 @@ static inline pmd_t pfn_pmd(unsigned long page_nr, pgprot_t pgprot)
 }
 #endif
 
-/* This one can be done with two shifts.  */
+/* Extract the physical page number using the processor's TTE format. */
 static inline unsigned long pte_pfn(pte_t pte)
 {
 	unsigned long ret;
+
+	if (tlb_type == sparc64_vii)
+		return (pte_val(pte) & _PAGE_PADDR_VII) >> PAGE_SHIFT;
 
 	__asm__ __volatile__(
 	"\n661:	sllx		%1, %2, %0\n"
@@ -308,6 +316,9 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t prot)
 	  "i" (_PAGE_PADDR_4V | _PAGE_MODIFIED_4V | _PAGE_ACCESSED_4V |
 	       _PAGE_CP_4V | _PAGE_E_4V |
 	       _PAGE_SPECIAL | _PAGE_PMD_HUGE | _PAGE_SZALL_4V));
+
+	if (tlb_type == sparc64_vii)
+		mask |= _PAGE_PADDR_VII;
 
 	return __pte((pte_val(pte) & mask) | (pgprot_val(prot) & ~mask));
 }
