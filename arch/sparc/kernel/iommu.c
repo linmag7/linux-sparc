@@ -586,6 +586,7 @@ iommu_map_failed:
 		if (s == outs)
 			break;
 	}
+	iommu_free_ctx(iommu, ctx);
 	spin_unlock_irqrestore(&iommu->lock, flags);
 
 	return -EINVAL;
