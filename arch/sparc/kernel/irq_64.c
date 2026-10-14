@@ -704,6 +704,8 @@ static unsigned int cookie_build_irq(u32 devhandle, unsigned int devino,
 	unsigned int irq;
 
 	irq = sun4v_build_common(devhandle, devino, cookie_handler_data, chip);
+	if (!irq)
+		return 0;
 
 	hv_error = cookie_assign(irq, devhandle, devino);
 	if (hv_error) {
