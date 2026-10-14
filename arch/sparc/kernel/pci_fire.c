@@ -558,6 +558,11 @@ early_param("oberon_diag", oberon_diag_setup);
 #define OBERON_DIAG_MMU_STATUS	0x41010UL
 #define OBERON_DIAG_TFAR		0x41028UL
 #define OBERON_DIAG_TFSR		0x41030UL
+#define OBERON_DIAG_ILU_STATUS	0x51010UL
+#define OBERON_DIAG_PEC_STATUS	0x51808UL
+#define OBERON_DIAG_OE_STATUS	0x81010UL
+#define OBERON_DIAG_UE_STATUS	0x91010UL
+#define OBERON_DIAG_CE_STATUS	0xa1010UL
 
 static void __init oberon_diag_snapshot(struct pci_pbm_info *pbm)
 {
@@ -568,14 +573,18 @@ static void __init oberon_diag_snapshot(struct pci_pbm_info *pbm)
 	unsigned int ino;
 	u64 multi, dmc, status, tfar = 0, tfsr = 0;
 	u64 multi_after, dmc_after, status_after;
+	u64 pec = 0, pec_after = 0, ilu = 0, ilu_after = 0;
+	u64 oe = 0, oe_after = 0, ue = 0, ue_after = 0;
+	u64 ce = 0, ce_after = 0;
+	bool pec_read;
 	u64 dmc_enable, mmu_enable, log_enable, imap;
 	bool logs_read;
 	int len;
 
 	regs = of_get_property(dp, "reg", &len);
 	if (!regs || len < sizeof(*regs) || regs[0].phys_addr != base ||
-	    regs[0].reg_size < OBERON_DIAG_TFSR + sizeof(u64) ||
-	    base > ~0UL - OBERON_DIAG_TFSR - sizeof(u64)) {
+	    regs[0].reg_size < OBERON_DIAG_CE_STATUS + sizeof(u64) ||
+	    base > ~0UL - OBERON_DIAG_CE_STATUS - sizeof(u64)) {
 		pr_warn("Oberon diag %pOF: invalid CSR range; skipped\n", dp);
 		return;
 	}
@@ -603,6 +612,20 @@ static void __init oberon_diag_snapshot(struct pci_pbm_info *pbm)
 		tfar = upa_readq(base + OBERON_DIAG_TFAR);
 		tfsr = upa_readq(base + OBERON_DIAG_TFSR);
 	}
+	/* Preserve both samples; equal values do not establish an atomic snapshot. */
+	pec_read = !!(multi & BIT_ULL(1));
+	if (pec_read) {
+		pec = upa_readq(base + OBERON_DIAG_PEC_STATUS);
+		oe = upa_readq(base + OBERON_DIAG_OE_STATUS);
+		ce = upa_readq(base + OBERON_DIAG_CE_STATUS);
+		ue = upa_readq(base + OBERON_DIAG_UE_STATUS);
+		ilu = upa_readq(base + OBERON_DIAG_ILU_STATUS);
+		ilu_after = upa_readq(base + OBERON_DIAG_ILU_STATUS);
+		ue_after = upa_readq(base + OBERON_DIAG_UE_STATUS);
+		ce_after = upa_readq(base + OBERON_DIAG_CE_STATUS);
+		oe_after = upa_readq(base + OBERON_DIAG_OE_STATUS);
+		pec_after = upa_readq(base + OBERON_DIAG_PEC_STATUS);
+	}
 	status_after = upa_readq(base + OBERON_DIAG_MMU_STATUS);
 	dmc_after = upa_readq(base + OBERON_DIAG_DMC_STATUS);
 	multi_after = upa_readq(base + OBERON_DIAG_MULTI_STATUS);
@@ -619,6 +642,16 @@ static void __init oberon_diag_snapshot(struct pci_pbm_info *pbm)
 	pr_info("Oberon diag %pOF: multi_after=%016llx dmc_after=%016llx mmu_after=%016llx changed=%u\n",
 		dp, multi_after, dmc_after, status_after,
 		multi != multi_after || dmc != dmc_after || status != status_after);
+	pr_info("Oberon diag %pOF: pec_read=%u pec=%016llx pec_after=%016llx\n",
+		dp, pec_read, pec, pec_after);
+	pr_info("Oberon diag %pOF: oe=%016llx ce=%016llx ue=%016llx ilu=%016llx\n",
+		dp, oe, ce, ue, ilu);
+	pr_info("Oberon diag %pOF: oe_after=%016llx ce_after=%016llx\n",
+		dp, oe_after, ce_after);
+	pr_info("Oberon diag %pOF: ue_after=%016llx ilu_after=%016llx pec_changed=%u\n",
+		dp, ue_after, ilu_after,
+		pec != pec_after || oe != oe_after || ce != ce_after ||
+		ue != ue_after || ilu != ilu_after);
 }
 
 static int __init oberon_diag_init(void)
