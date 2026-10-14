@@ -451,7 +451,7 @@ static int dma_4u_map_sg(struct device *dev, struct scatterlist *sglist,
 	int outcount, incount, i;
 	struct strbuf *strbuf;
 	struct iommu *iommu;
-	unsigned long base_shift;
+	unsigned long base_shift, out_entry = 0;
 
 	BUG_ON(direction == DMA_NONE);
 
@@ -485,7 +485,7 @@ static int dma_4u_map_sg(struct device *dev, struct scatterlist *sglist,
 	seg_boundary_size = dma_get_seg_boundary_nr_pages(dev, IO_PAGE_SHIFT);
 	base_shift = iommu->tbl.table_map_base >> IO_PAGE_SHIFT;
 	for_each_sg(sglist, s, nelems, i) {
-		unsigned long paddr, npages, entry, out_entry = 0, slen;
+		unsigned long paddr, npages, entry, slen;
 		iopte_t *base;
 
 		slen = s->length;

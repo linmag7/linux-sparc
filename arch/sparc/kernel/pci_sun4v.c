@@ -489,7 +489,7 @@ static int dma_4v_map_sg(struct device *dev, struct scatterlist *sglist,
 	struct atu *atu;
 	struct iommu_map_table *tbl;
 	u64 mask;
-	unsigned long base_shift;
+	unsigned long base_shift, out_entry = 0;
 	long err;
 
 	BUG_ON(direction == DMA_NONE);
@@ -530,7 +530,7 @@ static int dma_4v_map_sg(struct device *dev, struct scatterlist *sglist,
 	base_shift = tbl->table_map_base >> IO_PAGE_SHIFT;
 
 	for_each_sg(sglist, s, nelems, i) {
-		unsigned long paddr, npages, entry, out_entry = 0, slen;
+		unsigned long paddr, npages, entry, slen;
 
 		slen = s->length;
 		/* Sanity check */
