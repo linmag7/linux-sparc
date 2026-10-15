@@ -22,6 +22,7 @@
 #include <linux/seq_file.h>
 #include <linux/ftrace.h>
 #include <linux/irq.h>
+#include <linux/irqdesc.h>
 #include <linux/string_choices.h>
 
 #include <asm/ptrace.h>
@@ -207,6 +208,9 @@ struct irq_handler_data {
 	unsigned long	iclr;
 	unsigned long	imap;
 	bool		oberon;
+	void (*capture)(void *arg);
+	void *capture_arg;
+	bool captured;
 };
 
 static inline unsigned int irq_data_to_handle(struct irq_data *data)
@@ -674,6 +678,71 @@ unsigned int oberon_build_irq(int inofixup, unsigned long iclr,
 	if (data)
 		data->oberon = true;
 	return irq;
+}
+
+/* This prepared-only flow never acknowledges or rearms the hardware. */
+static void oberon_capture_irq(struct irq_desc *desc)
+{
+	struct irq_handler_data *data;
+
+	guard(raw_spinlock)(&desc->lock);
+	data = irq_desc_get_handler_data(desc);
+	if (!data->captured) {
+		data->captured = true;
+		data->capture(data->capture_arg);
+	}
+}
+
+static void oberon_capture_noop(struct irq_data *data)
+{
+}
+
+static unsigned int oberon_capture_startup(struct irq_data *data)
+{
+	return 0;
+}
+
+static struct irq_chip oberon_capture_chip = {
+	.name = "oberon-capture",
+	.irq_startup = oberon_capture_startup,
+	.irq_shutdown = oberon_capture_noop,
+	.irq_enable = oberon_capture_noop,
+	.irq_disable = oberon_capture_noop,
+	.irq_mask = oberon_capture_noop,
+	.irq_unmask = oberon_capture_noop,
+	.irq_eoi = oberon_capture_noop,
+};
+
+int oberon_prepare_capture(unsigned int irq, unsigned long imap,
+			   void (*capture)(void *arg), void *arg)
+{
+	struct irq_desc *desc = irq_to_desc(irq);
+	struct irq_handler_data *data;
+	unsigned long flags;
+	int ret = -EINVAL;
+
+	if (!desc || !capture)
+		return ret;
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	data = irq_desc_get_handler_data(desc);
+	if (!data || !data->oberon || data->imap != imap ||
+	    desc->irq_data.chip != &sun4u_irq)
+		goto out;
+	ret = -EBUSY;
+	if (desc->action || !irqd_irq_disabled(&desc->irq_data) ||
+	    (upa_readq(imap) & IMAP_VALID))
+		goto out;
+	data->capture = capture;
+	data->capture_arg = arg;
+	data->captured = false;
+	desc->status_use_accessors |= IRQ_NOREQUEST | IRQ_NOPROBE |
+		IRQ_NOAUTOEN | IRQ_NO_BALANCING;
+	desc->irq_data.chip = &oberon_capture_chip;
+	desc->handle_irq = oberon_capture_irq;
+	ret = 0;
+out:
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	return ret;
 }
 
 static unsigned int sun4v_build_common(u32 devhandle, unsigned int devino,

@@ -46,6 +46,9 @@ void irq_install_pre_handler(int irq,
 #define irq_canonicalize(irq)	(irq)
 unsigned int build_irq(int inofixup, unsigned long iclr, unsigned long imap);
 unsigned int oberon_build_irq(int inofixup, unsigned long iclr, unsigned long imap);
+/* The callback and argument must remain valid for the life of the IRQ. */
+int oberon_prepare_capture(unsigned int irq, unsigned long imap,
+			   void (*capture)(void *arg), void *arg);
 unsigned int sun4v_build_irq(u32 devhandle, unsigned int devino);
 unsigned int sun4v_build_virq(u32 devhandle, unsigned int devino);
 unsigned int sun4v_build_msi(u32 devhandle, unsigned int *irq_p,
