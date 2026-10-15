@@ -775,6 +775,24 @@ out:
 	return ret;
 }
 
+bool oberon_capture_quarantined(unsigned int irq)
+{
+	struct irq_desc *desc = irq_to_desc(irq);
+	struct irq_handler_data *data;
+	unsigned long flags;
+	bool ready = false;
+
+	if (!desc)
+		return false;
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	data = irq_desc_get_handler_data(desc);
+	if (desc->irq_data.chip == &oberon_capture_chip && data &&
+	    data->capture_live && data->captured && !data->capture_armed)
+		ready = upa_readq(data->imap) == data->capture_baseline;
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	return ready;
+}
+
 int oberon_arm_capture(unsigned int irq)
 {
 	struct irq_desc *desc = irq_to_desc(irq);
