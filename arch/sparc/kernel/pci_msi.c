@@ -215,10 +215,8 @@ static void sparc64_teardown_msi_irq(unsigned int irq,
 
 	err = ops->msi_teardown(pbm, msi_num);
 	if (err) {
-		pci_err(pdev, "%s: teardown: ops->teardown() on MSI %u, "
-			"irq %u, gives error %d\n", pbm->name, msi_num, irq,
-			err);
-		return;
+		pci_err(pdev, "%s: MSI %u IRQ %u teardown failed (%d); reserving ID\n",
+			pbm->name, msi_num, irq, err);
 	}
 
 	WRITE_ONCE(pbm->msi_irq_table[i], 0);
@@ -230,7 +228,8 @@ static void sparc64_teardown_msi_irq(unsigned int irq,
 	entry->irq = 0;
 	irq_set_chip(irq, NULL);
 	irq_free(irq);
-	free_msi(pbm, msi_num);
+	if (!err)
+		free_msi(pbm, msi_num);
 }
 
 static int msi_bitmap_alloc(struct pci_pbm_info *pbm)
