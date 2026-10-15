@@ -35,8 +35,12 @@ static irqreturn_t sparc64_msiq_interrupt(int irq, void *cookie)
 		if (likely(err > 0)) {
 			unsigned int irq;
 
-			irq = pbm->msi_irq_table[msi - pbm->msi_first];
-			generic_handle_irq(irq);
+			if (msi < pbm->msi_first ||
+			    msi - pbm->msi_first >= pbm->msi_num)
+				continue;
+			irq = READ_ONCE(pbm->msi_irq_table[msi - pbm->msi_first]);
+			if (irq)
+				generic_handle_irq(irq);
 		}
 
 		if (unlikely(err < 0))
@@ -152,7 +156,7 @@ static int sparc64_setup_msi_irq(unsigned int *irq_p,
 	if (err)
 		goto out_msi_free;
 
-	pbm->msi_irq_table[msi - pbm->msi_first] = *irq_p;
+	WRITE_ONCE(pbm->msi_irq_table[msi - pbm->msi_first], *irq_p);
 
 	if (entry->pci.msi_attrib.is_64) {
 		msg.address_hi = pbm->msi64_start >> 32;
@@ -200,7 +204,7 @@ static void sparc64_teardown_msi_irq(unsigned int irq,
 	}
 
 	msi_num = pbm->msi_first + i;
-	pbm->msi_irq_table[i] = ~0U;
+	WRITE_ONCE(pbm->msi_irq_table[i], 0);
 
 	err = ops->msi_teardown(pbm, msi_num);
 	if (err) {
@@ -410,6 +414,7 @@ void sparc64_pbm_msi_init(struct pci_pbm_info *pbm,
 			goto no_msi;
 		}
 
+		pbm->msi_ops = ops;
 		if (sparc64_bringup_msi_queues(pbm, ops)) {
 			ops->msiq_free(pbm);
 			msi_table_free(pbm);
@@ -437,7 +442,6 @@ void sparc64_pbm_msi_init(struct pci_pbm_info *pbm,
 		       pbm->name,
 		       __pa(pbm->msi_queues));
 
-		pbm->msi_ops = ops;
 		pbm->setup_msi_irq = sparc64_setup_msi_irq;
 		pbm->teardown_msi_irq = sparc64_teardown_msi_irq;
 	}
