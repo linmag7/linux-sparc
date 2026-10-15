@@ -737,7 +737,9 @@ subsys_initcall(fire_init);
 struct oberon_irq_capture {
 	struct work_struct report;
 	struct pci_pbm_info *pbm;
-	u64 status[8];
+	u64 status[8], status_after[8];
+	u64 fault[2], header[4], header_after[4];
+	bool fault_read, headers_read;
 };
 
 static bool oberon_capture_prepare;
@@ -748,30 +750,64 @@ static int __init oberon_capture_setup(char *str)
 }
 early_param("oberon_capture_prepare", oberon_capture_setup);
 
+static const unsigned long oberon_capture_status_regs[] = {
+	OBERON_DIAG_MULTI_STATUS, OBERON_DIAG_DMC_STATUS,
+	OBERON_DIAG_MMU_STATUS, OBERON_DIAG_PEC_STATUS,
+	OBERON_DIAG_OE_STATUS, OBERON_DIAG_UE_STATUS,
+	OBERON_DIAG_CE_STATUS, OBERON_DIAG_ILU_STATUS,
+};
+
+static const unsigned long oberon_capture_header_regs[] = {
+	OBERON_DIAG_OE_RX1, OBERON_DIAG_OE_RX2,
+	OBERON_DIAG_OE_TX1, OBERON_DIAG_OE_TX2,
+};
+
 static void oberon_capture_report(struct work_struct *work)
 {
 	struct oberon_irq_capture *cap = container_of(work,
 		struct oberon_irq_capture, report);
+	int i;
 
-	pr_warn("Oberon capture %s: multi=%016llx dmc=%016llx mmu=%016llx pec=%016llx oe=%016llx ue=%016llx ce=%016llx ilu=%016llx; no ack or rearm\n",
-		cap->pbm->name, cap->status[0], cap->status[1], cap->status[2],
-		cap->status[3], cap->status[4], cap->status[5], cap->status[6],
-		cap->status[7]);
+	pr_warn("Oberon capture %s: candidate samples; no ack or rearm\n",
+		cap->pbm->name);
+	for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++)
+		pr_warn("Oberon capture %s: reg=%lx before=%016llx after=%016llx\n",
+			cap->pbm->name, oberon_capture_status_regs[i],
+			cap->status[i], cap->status_after[i]);
+	pr_warn("Oberon capture %s: fault_read=%u tfar=%016llx tfsr=%016llx headers_read=%u\n",
+		cap->pbm->name, cap->fault_read, cap->fault[0],
+		cap->fault[1], cap->headers_read);
+	if (cap->headers_read)
+		for (i = 0; i < ARRAY_SIZE(oberon_capture_header_regs); i++)
+			pr_warn("Oberon capture %s: header=%lx before=%016llx after=%016llx\n",
+				cap->pbm->name, oberon_capture_header_regs[i],
+				cap->header[i], cap->header_after[i]);
 }
 
 static void oberon_capture_event(void *arg)
 {
 	struct oberon_irq_capture *cap = arg;
 	unsigned long base = cap->pbm->pbm_regs;
+	int i;
 
-	cap->status[0] = upa_readq(base + OBERON_DIAG_MULTI_STATUS);
-	cap->status[1] = upa_readq(base + OBERON_DIAG_DMC_STATUS);
-	cap->status[2] = upa_readq(base + OBERON_DIAG_MMU_STATUS);
-	cap->status[3] = upa_readq(base + OBERON_DIAG_PEC_STATUS);
-	cap->status[4] = upa_readq(base + OBERON_DIAG_OE_STATUS);
-	cap->status[5] = upa_readq(base + OBERON_DIAG_UE_STATUS);
-	cap->status[6] = upa_readq(base + OBERON_DIAG_CE_STATUS);
-	cap->status[7] = upa_readq(base + OBERON_DIAG_ILU_STATUS);
+	/* At most 26 reads; equal samples do not prove an atomic snapshot. */
+	for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++)
+		cap->status[i] = upa_readq(base + oberon_capture_status_regs[i]);
+	cap->fault_read = cap->status[2] != 0;
+	if (cap->fault_read) {
+		cap->fault[0] = upa_readq(base + OBERON_DIAG_TFAR);
+		cap->fault[1] = upa_readq(base + OBERON_DIAG_TFSR);
+	}
+	/* Secondary-only events do not identify the candidate header logs. */
+	cap->headers_read = !!(cap->status[4] & OBERON_DIAG_OE_RUC_WUC);
+	if (cap->headers_read) {
+		for (i = 0; i < ARRAY_SIZE(oberon_capture_header_regs); i++)
+			cap->header[i] = upa_readq(base + oberon_capture_header_regs[i]);
+		for (i = ARRAY_SIZE(oberon_capture_header_regs) - 1; i >= 0; i--)
+			cap->header_after[i] = upa_readq(base + oberon_capture_header_regs[i]);
+	}
+	for (i = ARRAY_SIZE(oberon_capture_status_regs) - 1; i >= 0; i--)
+		cap->status_after[i] = upa_readq(base + oberon_capture_status_regs[i]);
 	schedule_work(&cap->report);
 }
 
