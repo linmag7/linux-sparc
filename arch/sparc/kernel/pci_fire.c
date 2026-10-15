@@ -3,6 +3,7 @@
  *
  * Copyright (C) 2007 David S. Miller (davem@davemloft.net)
  */
+#include <linux/workqueue.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
@@ -732,3 +733,91 @@ static int __init fire_init(void)
 }
 
 subsys_initcall(fire_init);
+
+struct oberon_irq_capture {
+	struct work_struct report;
+	struct pci_pbm_info *pbm;
+	u64 status[8];
+};
+
+static bool oberon_capture_prepare;
+
+static int __init oberon_capture_setup(char *str)
+{
+	return kstrtobool(str, &oberon_capture_prepare);
+}
+early_param("oberon_capture_prepare", oberon_capture_setup);
+
+static void oberon_capture_report(struct work_struct *work)
+{
+	struct oberon_irq_capture *cap = container_of(work,
+		struct oberon_irq_capture, report);
+
+	pr_warn("Oberon capture %s: multi=%016llx dmc=%016llx mmu=%016llx pec=%016llx oe=%016llx ue=%016llx ce=%016llx ilu=%016llx; no ack or rearm\n",
+		cap->pbm->name, cap->status[0], cap->status[1], cap->status[2],
+		cap->status[3], cap->status[4], cap->status[5], cap->status[6],
+		cap->status[7]);
+}
+
+static void oberon_capture_event(void *arg)
+{
+	struct oberon_irq_capture *cap = arg;
+	unsigned long base = cap->pbm->pbm_regs;
+
+	cap->status[0] = upa_readq(base + OBERON_DIAG_MULTI_STATUS);
+	cap->status[1] = upa_readq(base + OBERON_DIAG_DMC_STATUS);
+	cap->status[2] = upa_readq(base + OBERON_DIAG_MMU_STATUS);
+	cap->status[3] = upa_readq(base + OBERON_DIAG_PEC_STATUS);
+	cap->status[4] = upa_readq(base + OBERON_DIAG_OE_STATUS);
+	cap->status[5] = upa_readq(base + OBERON_DIAG_UE_STATUS);
+	cap->status[6] = upa_readq(base + OBERON_DIAG_CE_STATUS);
+	cap->status[7] = upa_readq(base + OBERON_DIAG_ILU_STATUS);
+	schedule_work(&cap->report);
+}
+
+static int __init oberon_capture_init(void)
+{
+	struct pci_pbm_info *pbm;
+
+	if (!oberon_capture_prepare)
+		return 0;
+	for (pbm = pci_pbm_root; pbm; pbm = pbm->next) {
+		const struct linux_prom64_registers *regs;
+		const __be32 *intr;
+		struct oberon_irq_capture *cap;
+		int len, irq, ret;
+
+		if (!pbm->is_oberon)
+			continue;
+		regs = of_get_property(pbm->op->dev.of_node, "reg", &len);
+		if (!regs || len < sizeof(*regs) ||
+		    regs[0].phys_addr != pbm->pbm_regs ||
+		    regs[0].reg_size < OBERON_DIAG_CE_STATUS + sizeof(u64) ||
+		    pbm->pbm_regs > ~0UL - OBERON_DIAG_CE_STATUS - sizeof(u64))
+			continue;
+		intr = of_get_property(pbm->op->dev.of_node, "interrupts", &len);
+		if (!intr || len < 2 * sizeof(*intr) ||
+		    be32_to_cpup(intr + 1) != 0x3e)
+			continue;
+		irq = platform_get_irq(pbm->op, 1);
+		if (irq <= 0)
+			continue;
+		cap = kzalloc_obj(*cap, GFP_KERNEL);
+		if (!cap)
+			return -ENOMEM;
+		cap->pbm = pbm;
+		INIT_WORK(&cap->report, oberon_capture_report);
+		ret = oberon_prepare_capture(irq, pbm->pbm_regs + 0x11f0,
+					     oberon_capture_event, cap);
+		if (ret) {
+			kfree(cap);
+			pr_warn("Oberon capture %s: preparation rejected: %d\n",
+				pbm->name, ret);
+		} else {
+			pr_info("Oberon capture %s: prepared only, IRQ remains unarmed\n",
+				pbm->name);
+		}
+	}
+	return 0;
+}
+late_initcall(oberon_capture_init);
