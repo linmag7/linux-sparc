@@ -277,18 +277,6 @@ static int pci_fire_msiq_alloc(struct pci_pbm_info *pbm)
 	return 0;
 }
 
-static void pci_fire_msiq_free(struct pci_pbm_info *pbm)
-{
-	unsigned long pages, order;
-
-	order = get_order(512 * 1024);
-	pages = (unsigned long) pbm->msi_queues;
-
-	free_pages(pages, order);
-
-	pbm->msi_queues = NULL;
-}
-
 static int pci_fire_msiq_build_irq(struct pci_pbm_info *pbm,
 				   unsigned long msiqid,
 				   unsigned long devino)
@@ -328,7 +316,6 @@ static const struct sparc64_msiq_ops pci_fire_msiq_ops = {
 	.msi_setup	=	pci_fire_msi_setup,
 	.msi_teardown	=	pci_fire_msi_teardown,
 	.msiq_alloc	=	pci_fire_msiq_alloc,
-	.msiq_free	=	pci_fire_msiq_free,
 	.msiq_build_irq	=	pci_fire_msiq_build_irq,
 };
 

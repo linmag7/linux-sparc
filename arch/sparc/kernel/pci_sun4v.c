@@ -1111,30 +1111,8 @@ static int pci_sun4v_msiq_alloc(struct pci_pbm_info *pbm)
 	return 0;
 
 h_error:
-	free_pages(pages, order);
+	/* A preceding configuration call may have published part of the storage. */
 	return -EINVAL;
-}
-
-static void pci_sun4v_msiq_free(struct pci_pbm_info *pbm)
-{
-	unsigned long q_size, alloc_size, pages, order;
-	int i;
-
-	for (i = 0; i < pbm->msiq_num; i++) {
-		unsigned long msiqid = pbm->msiq_first + i;
-
-		(void) pci_sun4v_msiq_conf(pbm->devhandle, msiqid, 0UL, 0);
-	}
-
-	q_size = pbm->msiq_ent_count * sizeof(struct pci_sun4v_msiq_entry);
-	alloc_size = (pbm->msiq_num * q_size);
-	order = get_order(alloc_size);
-
-	pages = (unsigned long) pbm->msi_queues;
-
-	free_pages(pages, order);
-
-	pbm->msi_queues = NULL;
 }
 
 static int pci_sun4v_msiq_build_irq(struct pci_pbm_info *pbm,
@@ -1161,7 +1139,6 @@ static const struct sparc64_msiq_ops pci_sun4v_msiq_ops = {
 	.msi_setup	=	pci_sun4v_msi_setup,
 	.msi_teardown	=	pci_sun4v_msi_teardown,
 	.msiq_alloc	=	pci_sun4v_msiq_alloc,
-	.msiq_free	=	pci_sun4v_msiq_free,
 	.msiq_build_irq	=	pci_sun4v_msiq_build_irq,
 };
 
