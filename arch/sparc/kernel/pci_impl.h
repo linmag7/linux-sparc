@@ -32,6 +32,12 @@
 
 #ifdef CONFIG_PCI_MSI
 struct pci_pbm_info;
+enum sparc64_msiq_result {
+	MSIQ_EMPTY,
+	MSIQ_DISPATCH,
+	MSIQ_DISCARD,
+};
+
 struct sparc64_msiq_ops {
 	int (*get_head)(struct pci_pbm_info *pbm, unsigned long msiqid,
 			unsigned long *head);

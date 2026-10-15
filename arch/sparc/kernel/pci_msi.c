@@ -18,7 +18,8 @@ static irqreturn_t sparc64_msiq_interrupt(int irq, void *cookie)
 	struct pci_pbm_info *pbm = msiq_cookie->pbm;
 	unsigned long msiqid = msiq_cookie->msiqid;
 	const struct sparc64_msiq_ops *ops;
-	unsigned long orig_head, head;
+	unsigned long head;
+	bool consumed = false;
 	int err;
 
 	ops = pbm->msi_ops;
@@ -27,12 +28,13 @@ static irqreturn_t sparc64_msiq_interrupt(int irq, void *cookie)
 	if (unlikely(err < 0))
 		goto err_get_head;
 
-	orig_head = head;
 	for (;;) {
 		unsigned long msi;
 
 		err = ops->dequeue_msi(pbm, msiqid, &head, &msi);
-		if (likely(err > 0)) {
+		if (err > 0)
+			consumed = true;
+		if (likely(err == MSIQ_DISPATCH)) {
 			unsigned int irq;
 
 			if (msi < pbm->msi_first ||
@@ -43,13 +45,17 @@ static irqreturn_t sparc64_msiq_interrupt(int irq, void *cookie)
 				generic_handle_irq(irq);
 		}
 
+		if (err == MSIQ_DISCARD)
+			pr_warn_ratelimited("MSI: discarded invalid message %lu on queue %lu\n",
+					    msi, msiqid);
+
 		if (unlikely(err < 0))
 			goto err_dequeue;
 
 		if (err == 0)
 			break;
 	}
-	if (likely(head != orig_head)) {
+	if (consumed) {
 		err = ops->set_head(pbm, msiqid, head);
 		if (unlikely(err < 0))
 			goto err_set_head;
@@ -62,6 +68,8 @@ err_get_head:
 	goto err_out;
 
 err_dequeue:
+	if (consumed && ops->set_head(pbm, msiqid, head))
+		pr_err("MSI: Cannot commit partial head on msiqid[%lu]\n", msiqid);
 	printk(KERN_EMERG "MSI: Dequeue head[%lu] from msiqid[%lu] "
 	       "gives error %d\n",
 	       head, msiqid, err);
