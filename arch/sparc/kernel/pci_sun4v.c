@@ -1056,7 +1056,9 @@ static int pci_sun4v_msi_teardown(struct pci_pbm_info *pbm, unsigned long msi)
 	if (err)
 		return -ENXIO;
 
-	pci_sun4v_msi_setvalid(pbm->devhandle, msi, HV_MSIVALID_INVALID);
+	err = pci_sun4v_msi_setvalid(pbm->devhandle, msi, HV_MSIVALID_INVALID);
+	if (err)
+		return -ENXIO;
 
 	return 0;
 }
