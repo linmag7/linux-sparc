@@ -214,6 +214,7 @@ struct irq_handler_data {
 	bool capture_live;
 	bool capture_armed;
 	bool capture_ack_attempted;
+	bool capture_rearm_attempted;
 	unsigned long capture_baseline;
 };
 
@@ -857,6 +858,72 @@ int oberon_arm_capture(unsigned int irq)
 	}
 	ret = 0;
 out:
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	return ret;
+}
+
+int oberon_rearm_capture(unsigned int irq, int (*check)(void *), void *arg)
+{
+	struct irq_desc *desc = irq_to_desc(irq);
+	struct irq_handler_data *data;
+	unsigned long flags, val;
+	int ret = -EBUSY;
+
+	if (!desc || !check || !arg || IS_ENABLED(CONFIG_HOTPLUG_CPU))
+		return -EINVAL;
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	data = irq_desc_get_handler_data(desc);
+	if (desc->irq_data.chip != &oberon_capture_chip || !data ||
+	    desc->action || !data->capture_live || !data->captured ||
+	    data->capture_armed || !data->capture_ack_attempted ||
+	    data->capture_rearm_attempted || !cpu_online(0))
+		goto out;
+	val = upa_readq(data->imap);
+	if (val != 0x40 || val != data->capture_baseline ||
+	    (upa_readq(data->iclr) & 3UL))
+		goto out;
+	data->capture_rearm_attempted = true;
+	ret = check(arg);
+	if (ret)
+		goto out;
+	if (upa_readq(data->imap) != val || (upa_readq(data->iclr) & 3UL)) {
+		ret = -EBUSY;
+		goto out;
+	}
+	/* The old record remains allocated; publish the fresh record before enabling. */
+	data->capture_arg = arg;
+	data->captured = false;
+	data->capture_armed = true;
+	upa_writeq(val | IMAP_VALID, data->imap);
+	if (upa_readq(data->imap) != (val | IMAP_VALID)) {
+		oberon_capture_mask(data);
+		oberon_capture_stop(1);
+	}
+	ret = 0;
+out:
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	return ret;
+}
+
+int oberon_capture_state(unsigned int irq, bool *armed, bool *captured,
+			 unsigned long *imap, unsigned long *iclr)
+{
+	struct irq_desc *desc = irq_to_desc(irq);
+	struct irq_handler_data *data;
+	unsigned long flags;
+	int ret = -EINVAL;
+
+	if (!desc)
+		return ret;
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	data = irq_desc_get_handler_data(desc);
+	if (data && desc->irq_data.chip == &oberon_capture_chip) {
+		*armed = data->capture_armed;
+		*captured = data->captured;
+		*imap = upa_readq(data->imap);
+		*iclr = upa_readq(data->iclr);
+		ret = 0;
+	}
 	raw_spin_unlock_irqrestore(&desc->lock, flags);
 	return ret;
 }
