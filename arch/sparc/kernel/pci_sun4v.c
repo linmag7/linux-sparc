@@ -976,7 +976,8 @@ static int pci_sun4v_get_head(struct pci_pbm_info *pbm, unsigned long msiqid,
 		return -ENXIO;
 
 	limit = pbm->msiq_ent_count * sizeof(struct pci_sun4v_msiq_entry);
-	if (unlikely(*head >= limit))
+	if (unlikely(*head >= limit ||
+		     !IS_ALIGNED(*head, sizeof(struct pci_sun4v_msiq_entry))))
 		return -EFBIG;
 
 	return 0;
@@ -988,6 +989,8 @@ static int pci_sun4v_dequeue_msi(struct pci_pbm_info *pbm,
 {
 	struct pci_sun4v_msiq_entry *ep;
 	unsigned long err, type;
+	u64 word;
+	int result = MSIQ_DISPATCH;
 
 	/* Note: void pointer arithmetic, 'head' is a byte offset  */
 	ep = (pbm->msi_queues + ((msiqid - pbm->msiq_first) *
@@ -995,31 +998,38 @@ static int pci_sun4v_dequeue_msi(struct pci_pbm_info *pbm,
 				  sizeof(struct pci_sun4v_msiq_entry))) +
 	      *head);
 
-	if ((ep->version_type & MSIQ_TYPE_MASK) == 0)
+	word = READ_ONCE(ep->version_type);
+	if (!(word & MSIQ_TYPE_MASK))
 		return 0;
+	dma_rmb();
 
-	type = (ep->version_type & MSIQ_TYPE_MASK) >> MSIQ_TYPE_SHIFT;
+	type = (word & MSIQ_TYPE_MASK) >> MSIQ_TYPE_SHIFT;
 	if (unlikely(type != MSIQ_TYPE_MSI32 &&
 		     type != MSIQ_TYPE_MSI64))
 		return -EINVAL;
 
-	*msi = ep->msi_data;
+	*msi = READ_ONCE(ep->msi_data);
+	if (*msi < pbm->msi_first || *msi - pbm->msi_first >= pbm->msi_num) {
+		result = MSIQ_DISCARD;
+		goto consume;
+	}
 
 	err = pci_sun4v_msi_setstate(pbm->devhandle,
-				     ep->msi_data /* msi_num */,
+				     *msi,
 				     HV_MSISTATE_IDLE);
 	if (unlikely(err))
 		return -ENXIO;
 
+consume:
 	/* Clear the entry.  */
-	ep->version_type &= ~MSIQ_TYPE_MASK;
+	WRITE_ONCE(ep->version_type, word & ~MSIQ_TYPE_MASK);
 
 	(*head) += sizeof(struct pci_sun4v_msiq_entry);
 	if (*head >=
 	    (pbm->msiq_ent_count * sizeof(struct pci_sun4v_msiq_entry)))
 		*head = 0;
 
-	return 1;
+	return result;
 }
 
 static int pci_sun4v_set_head(struct pci_pbm_info *pbm, unsigned long msiqid,
@@ -1027,6 +1037,7 @@ static int pci_sun4v_set_head(struct pci_pbm_info *pbm, unsigned long msiqid,
 {
 	unsigned long err;
 
+	dma_wmb();
 	err = pci_sun4v_msiq_sethead(pbm->devhandle, msiqid, head);
 	if (unlikely(err))
 		return -EINVAL;

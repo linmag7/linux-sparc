@@ -167,7 +167,10 @@ struct pci_msiq_entry {
 static int pci_fire_get_head(struct pci_pbm_info *pbm, unsigned long msiqid,
 			     unsigned long *head)
 {
-	*head = upa_readq(pbm->pbm_regs + EVENT_QUEUE_HEAD(msiqid));
+	*head = upa_readq(pbm->pbm_regs + EVENT_QUEUE_HEAD(msiqid)) &
+		EVENT_QUEUE_HEAD_VAL;
+	if (*head >= pbm->msiq_ent_count)
+		return -EINVAL;
 	return 0;
 }
 
@@ -175,40 +178,51 @@ static int pci_fire_dequeue_msi(struct pci_pbm_info *pbm, unsigned long msiqid,
 				unsigned long *head, unsigned long *msi)
 {
 	unsigned long type_fmt, type, msi_num;
+	u64 word;
+	int result = MSIQ_DISPATCH;
 	struct pci_msiq_entry *base, *ep;
 
 	base = (pbm->msi_queues + ((msiqid - pbm->msiq_first) * 8192));
 	ep = &base[*head];
 
-	if ((ep->word0 & MSIQ_WORD0_FMT_TYPE) == 0)
+	word = READ_ONCE(ep->word0);
+	if (!(word & MSIQ_WORD0_FMT_TYPE))
 		return 0;
+	dma_rmb();
 
-	type_fmt = ((ep->word0 & MSIQ_WORD0_FMT_TYPE) >>
+	type_fmt = ((word & MSIQ_WORD0_FMT_TYPE) >>
 		    MSIQ_WORD0_FMT_TYPE_SHIFT);
 	type = (type_fmt >> 3);
 	if (unlikely(type != MSIQ_TYPE_MSI32 &&
 		     type != MSIQ_TYPE_MSI64))
 		return -EINVAL;
 
-	*msi = msi_num = ((ep->word0 & MSIQ_WORD0_DATA0) >>
+	*msi = msi_num = ((word & MSIQ_WORD0_DATA0) >>
 			  MSIQ_WORD0_DATA0_SHIFT);
+	if (msi_num < pbm->msi_first ||
+	    msi_num - pbm->msi_first >= pbm->msi_num) {
+		result = MSIQ_DISCARD;
+		goto consume;
+	}
 
 	upa_writeq(MSI_CLEAR_EQWR_N, pbm->pbm_regs + MSI_CLEAR(msi_num));
 
+consume:
 	/* Clear the entry.  */
-	ep->word0 &= ~MSIQ_WORD0_FMT_TYPE;
+	WRITE_ONCE(ep->word0, word & ~MSIQ_WORD0_FMT_TYPE);
 
 	/* Go to next entry in ring.  */
 	(*head)++;
 	if (*head >= pbm->msiq_ent_count)
 		*head = 0;
 
-	return 1;
+	return result;
 }
 
 static int pci_fire_set_head(struct pci_pbm_info *pbm, unsigned long msiqid,
 			     unsigned long head)
 {
+	dma_wmb();
 	upa_writeq(head, pbm->pbm_regs + EVENT_QUEUE_HEAD(msiqid));
 	return 0;
 }
