@@ -65,6 +65,9 @@ void sun4u_destroy_msi(unsigned int irq);
 unsigned int irq_alloc(unsigned int dev_handle, unsigned int dev_ino);
 void irq_free(unsigned int irq);
 
+int oberon_arm_capture(unsigned int irq);
+int oberon_disarm_capture(unsigned int irq);
+
 void fixup_irqs(void);
 
 static inline void set_softint(unsigned long bits)

@@ -211,6 +211,9 @@ struct irq_handler_data {
 	void (*capture)(void *arg);
 	void *capture_arg;
 	bool captured;
+	bool capture_live;
+	bool capture_armed;
+	unsigned long capture_baseline;
 };
 
 static inline unsigned int irq_data_to_handle(struct irq_data *data)
@@ -680,13 +683,39 @@ unsigned int oberon_build_irq(int inofixup, unsigned long iclr,
 	return irq;
 }
 
-/* This prepared-only flow never acknowledges or rearms the hardware. */
+/* A terminal experiment failure deliberately avoids firmware console entry. */
+static unsigned int oberon_capture_failure;
+
+static void __noreturn oberon_capture_stop(unsigned int reason)
+{
+	WRITE_ONCE(oberon_capture_failure, reason);
+	local_irq_disable();
+	for (;;)
+		cpu_relax();
+}
+
+static bool oberon_capture_mask(struct irq_handler_data *data)
+{
+	unsigned long val = upa_readq(data->imap);
+
+	upa_writeq(val & ~IMAP_VALID, data->imap);
+	return upa_readq(data->imap) == (val & ~IMAP_VALID);
+}
+
+/* The dedicated flow never clears source status or writes ICLR. */
 static void oberon_capture_irq(struct irq_desc *desc)
 {
 	struct irq_handler_data *data;
 
 	guard(raw_spinlock)(&desc->lock);
 	data = irq_desc_get_handler_data(desc);
+	if (data->capture_live) {
+		if (!data->capture_armed || data->captured)
+			oberon_capture_stop(3);
+		if (!oberon_capture_mask(data))
+			oberon_capture_stop(2);
+		data->capture_armed = false;
+	}
 	if (!data->captured) {
 		data->captured = true;
 		data->capture(data->capture_arg);
@@ -735,11 +764,68 @@ int oberon_prepare_capture(unsigned int irq, unsigned long imap,
 	data->capture = capture;
 	data->capture_arg = arg;
 	data->captured = false;
+	data->capture_baseline = upa_readq(imap);
 	desc->status_use_accessors |= IRQ_NOREQUEST | IRQ_NOPROBE |
 		IRQ_NOAUTOEN | IRQ_NO_BALANCING;
 	desc->irq_data.chip = &oberon_capture_chip;
 	desc->handle_irq = oberon_capture_irq;
 	ret = 0;
+out:
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	return ret;
+}
+
+int oberon_arm_capture(unsigned int irq)
+{
+	struct irq_desc *desc = irq_to_desc(irq);
+	struct irq_handler_data *data;
+	unsigned long flags, val;
+	int ret = -EBUSY;
+
+	if (!desc || IS_ENABLED(CONFIG_HOTPLUG_CPU))
+		return -EINVAL;
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	data = irq_desc_get_handler_data(desc);
+	if (desc->irq_data.chip != &oberon_capture_chip || !data ||
+	    desc->action || data->captured || data->capture_live)
+		goto out;
+	/* This first experiment accepts only the observed CPU-0/controller-0 route. */
+	val = upa_readq(data->imap);
+	if (val != 0x40 || val != data->capture_baseline || !cpu_online(0))
+		goto out;
+	data->capture_live = true;
+	data->capture_armed = true;
+	upa_writeq(val | IMAP_VALID, data->imap);
+	if (upa_readq(data->imap) != (val | IMAP_VALID)) {
+		oberon_capture_mask(data);
+		oberon_capture_stop(1);
+	}
+	ret = 0;
+out:
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	return ret;
+}
+
+int oberon_disarm_capture(unsigned int irq)
+{
+	struct irq_desc *desc = irq_to_desc(irq);
+	struct irq_handler_data *data;
+	unsigned long flags;
+	int ret = -EINVAL;
+
+	if (!desc)
+		return ret;
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	data = irq_desc_get_handler_data(desc);
+	if (desc->irq_data.chip != &oberon_capture_chip || !data ||
+	    !data->capture_live)
+		goto out;
+	if (data->capture_armed) {
+		if (!oberon_capture_mask(data))
+			oberon_capture_stop(4);
+		data->capture_armed = false;
+	}
+	ret = data->captured;
 out:
 	raw_spin_unlock_irqrestore(&desc->lock, flags);
 	return ret;
