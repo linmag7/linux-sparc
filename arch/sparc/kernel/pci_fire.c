@@ -4,6 +4,7 @@
  * Copyright (C) 2007 David S. Miller (davem@davemloft.net)
  */
 #include <linux/workqueue.h>
+#include <linux/timer.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
@@ -736,11 +737,52 @@ subsys_initcall(fire_init);
 
 struct oberon_irq_capture {
 	struct work_struct report;
+	struct timer_list deadline;
+	unsigned int irq;
 	struct pci_pbm_info *pbm;
 	u64 status[8], status_after[8];
 	u64 fault[2], header[4], header_after[4];
 	bool fault_read, headers_read;
 };
+
+static int oberon_capture_arm_port = -1;
+
+static int __init oberon_capture_arm_setup(char *str)
+{
+	int port, ret = kstrtoint(str, 0, &port);
+
+	if (ret || port < 0 || port > 1)
+		return -EINVAL;
+	oberon_capture_arm_port = port;
+	return 0;
+}
+early_param("oberon_capture_arm_port", oberon_capture_arm_setup);
+
+static void oberon_capture_deadline(struct timer_list *timer)
+{
+	struct oberon_irq_capture *cap = timer_container_of(cap, timer, deadline);
+
+	oberon_disarm_capture(cap->irq);
+}
+
+static struct oberon_irq_capture *oberon_live_capture;
+
+static ssize_t oberon_capture_arm_store(struct device *dev,
+				       struct device_attribute *attr,
+				       const char *buf, size_t count)
+{
+	struct oberon_irq_capture *cap = oberon_live_capture;
+	int ret;
+
+	if (!cap || dev != &cap->pbm->op->dev || !sysfs_streq(buf, "1"))
+		return -EINVAL;
+	ret = oberon_arm_capture(cap->irq);
+	if (ret)
+		return ret;
+	mod_timer(&cap->deadline, jiffies + 5 * HZ);
+	return count;
+}
+static DEVICE_ATTR_WO(oberon_capture_arm);
 
 static bool oberon_capture_prepare;
 
@@ -814,6 +856,8 @@ static void oberon_capture_event(void *arg)
 static int __init oberon_capture_init(void)
 {
 	struct pci_pbm_info *pbm;
+	struct oberon_irq_capture *selected = NULL;
+	unsigned int matches = 0;
 
 	if (!oberon_capture_prepare)
 		return 0;
@@ -842,6 +886,8 @@ static int __init oberon_capture_init(void)
 		if (!cap)
 			return -ENOMEM;
 		cap->pbm = pbm;
+		cap->irq = irq;
+		timer_setup(&cap->deadline, oberon_capture_deadline, 0);
 		INIT_WORK(&cap->report, oberon_capture_report);
 		ret = oberon_prepare_capture(irq, pbm->pbm_regs + 0x11f0,
 					     oberon_capture_event, cap);
@@ -850,9 +896,24 @@ static int __init oberon_capture_init(void)
 			pr_warn("Oberon capture %s: preparation rejected: %d\n",
 				pbm->name, ret);
 		} else {
+			if (pbm->portid == oberon_capture_arm_port) {
+				selected = cap;
+				matches++;
+			}
 			pr_info("Oberon capture %s: prepared only, IRQ remains unarmed\n",
 				pbm->name);
 		}
+	}
+	if (matches == 1) {
+		int ret;
+
+		oberon_live_capture = selected;
+		ret = device_create_file(&selected->pbm->op->dev,
+					 &dev_attr_oberon_capture_arm);
+		if (ret)
+			oberon_live_capture = NULL;
+		pr_warn("Oberon capture %s: arm interface result=%d; ownership unverified, route unarmed\n",
+			selected->pbm->name, ret);
 	}
 	return 0;
 }
