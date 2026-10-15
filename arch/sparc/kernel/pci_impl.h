@@ -43,7 +43,6 @@ struct sparc64_msiq_ops {
 			 unsigned long msi, int is_msi64);
 	int (*msi_teardown)(struct pci_pbm_info *pbm, unsigned long msi);
 	int (*msiq_alloc)(struct pci_pbm_info *pbm);
-	void (*msiq_free)(struct pci_pbm_info *pbm);
 	int (*msiq_build_irq)(struct pci_pbm_info *pbm, unsigned long msiqid,
 			      unsigned long devino);
 };

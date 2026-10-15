@@ -409,18 +409,16 @@ void sparc64_pbm_msi_init(struct pci_pbm_info *pbm,
 		}
 
 		if (ops->msiq_alloc(pbm)) {
+			if (pbm->msi_queues)
+				goto retain_queues;
 			msi_table_free(pbm);
 			msi_bitmap_free(pbm);
 			goto no_msi;
 		}
 
 		pbm->msi_ops = ops;
-		if (sparc64_bringup_msi_queues(pbm, ops)) {
-			ops->msiq_free(pbm);
-			msi_table_free(pbm);
-			msi_bitmap_free(pbm);
-			goto no_msi;
-		}
+		if (sparc64_bringup_msi_queues(pbm, ops))
+			goto retain_queues;
 
 		printk(KERN_INFO "%s: MSI Queue first[%u] num[%u] count[%u] "
 		       "devino[0x%x]\n",
@@ -445,6 +443,12 @@ void sparc64_pbm_msi_init(struct pci_pbm_info *pbm,
 		pbm->setup_msi_irq = sparc64_setup_msi_irq;
 		pbm->teardown_msi_irq = sparc64_teardown_msi_irq;
 	}
+	return;
+
+retain_queues:
+	/* Published queues may still receive writes or have registered handlers. */
+	pr_err("%s: MSI initialization failed; retaining published queues\n",
+	       pbm->name);
 	return;
 
 no_msi:
