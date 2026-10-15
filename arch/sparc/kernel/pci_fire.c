@@ -750,6 +750,10 @@ struct oberon_irq_capture {
 	u64 ack_status[2][2][8];
 	int ack_result, ack_checks;
 	bool ack_requested;
+	bool rearm_requested;
+	int rearm_result;
+	unsigned int generation;
+	struct oberon_irq_capture *next;
 };
 
 static int oberon_capture_arm_port = -1;
@@ -783,6 +787,7 @@ static ssize_t oberon_capture_arm_store(struct device *dev,
 
 	if (!cap || dev != &cap->pbm->op->dev || !sysfs_streq(buf, "1"))
 		return -EINVAL;
+	guard(mutex)(&oberon_diag_lock);
 	ret = oberon_arm_capture(cap->irq);
 	if (ret)
 		return ret;
@@ -913,8 +918,9 @@ static ssize_t oberon_capture_clear_result_show(struct device *dev,
 	if (!cap || dev != &cap->pbm->op->dev)
 		return -ENODEV;
 	guard(mutex)(&oberon_diag_lock);
-	len = sysfs_emit(buf, "attempted=%u result=%d ack=%u rearm=0\n",
-			 cap->clear_attempted, cap->clear_result, cap->ack.written);
+	len = sysfs_emit(buf, "attempted=%u result=%d ack=%u rearm=%u\n",
+			 cap->clear_attempted, cap->clear_result, cap->ack.written,
+			 cap->rearm_requested);
 	for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++)
 		len += sysfs_emit_at(buf, len, "reg=%lx first=%016llx second=%016llx\n",
 				     oberon_capture_status_regs[i],
@@ -973,9 +979,10 @@ static ssize_t oberon_capture_ack_result_show(struct device *dev,
 		return -ENODEV;
 	guard(mutex)(&oberon_diag_lock);
 	len = sysfs_emit(buf,
-		"requested=%u written=%u result=%d before=%lx after=%lx checks=%d rearm=0\n",
+		"requested=%u written=%u result=%d before=%lx after=%lx checks=%d rearm=%u\n",
 			 cap->ack_requested, cap->ack.written, cap->ack_result,
-			 cap->ack.before, cap->ack.after, cap->ack_checks);
+			 cap->ack.before, cap->ack.after, cap->ack_checks,
+			 cap->rearm_requested);
 	for (stage = 0; stage < cap->ack_checks && stage < 2; stage++)
 		for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++)
 			len += sysfs_emit_at(buf, len,
@@ -993,8 +1000,8 @@ static void oberon_capture_report(struct work_struct *work)
 		struct oberon_irq_capture, report);
 	int i;
 
-	pr_warn("Oberon capture %s: candidate samples; no ack or rearm\n",
-		cap->pbm->name);
+	pr_warn("Oberon capture %s: generation=%u candidate samples\n",
+		cap->pbm->name, cap->generation);
 	for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++)
 		pr_warn("Oberon capture %s: reg=%lx before=%016llx after=%016llx\n",
 			cap->pbm->name, oberon_capture_status_regs[i],
@@ -1036,6 +1043,71 @@ static void oberon_capture_event(void *arg)
 	schedule_work(&cap->report);
 }
 
+static int oberon_rearm_sources(void *arg)
+{
+	struct oberon_irq_capture *cap = arg;
+	int ret = oberon_ack_sources(cap);
+
+	/* Start the deadline under the descriptor lock before enabling delivery. */
+	if (!ret)
+		mod_timer(&cap->deadline, jiffies + 5 * HZ);
+	return ret;
+}
+
+static ssize_t oberon_capture_rearm_store(struct device *dev,
+					struct device_attribute *attr,
+					const char *buf, size_t count)
+{
+	struct oberon_irq_capture *cap = oberon_live_capture, *next;
+
+	if (!cap || dev != &cap->pbm->op->dev || !sysfs_streq(buf, "1"))
+		return -EINVAL;
+	guard(mutex)(&oberon_diag_lock);
+	if (cap->rearm_requested || !cap->clear_attempted || cap->clear_result ||
+	    !cap->ack_requested || !cap->ack.written || cap->ack_result ||
+	    !oberon_capture_quarantined(cap->irq))
+		return -EBUSY;
+	timer_delete_sync(&cap->deadline);
+	flush_work(&cap->report);
+	next = kzalloc_obj(*next, GFP_KERNEL);
+	if (!next)
+		return -ENOMEM;
+	next->pbm = cap->pbm;
+	next->irq = cap->irq;
+	next->generation = 2;
+	timer_setup(&next->deadline, oberon_capture_deadline, 0);
+	INIT_WORK(&next->report, oberon_capture_report);
+	cap->next = next;
+	cap->rearm_requested = true;
+	cap->rearm_result = oberon_rearm_capture(cap->irq, oberon_rearm_sources, next);
+	return cap->rearm_result ? cap->rearm_result : count;
+}
+static DEVICE_ATTR_WO(oberon_capture_rearm);
+
+static ssize_t oberon_capture_rearm_result_show(struct device *dev,
+					      struct device_attribute *attr,
+					      char *buf)
+{
+	struct oberon_irq_capture *cap = oberon_live_capture;
+	unsigned long imap, iclr;
+	bool armed, captured;
+	int ret;
+
+	if (!cap || dev != &cap->pbm->op->dev)
+		return -ENODEV;
+	guard(mutex)(&oberon_diag_lock);
+	ret = oberon_capture_state(cap->irq, &armed, &captured, &imap, &iclr);
+	if (ret)
+		return ret;
+	return sysfs_emit(buf,
+		"requested=%u result=%d generation=%u armed=%u captured=%u imap=%lx iclr=%lx\n",
+		cap->rearm_requested, cap->rearm_result,
+		cap->rearm_requested && !cap->rearm_result ? 2 : 1,
+		armed, captured, imap, iclr);
+}
+static DEVICE_ATTR(oberon_capture_rearm_result, 0400,
+		   oberon_capture_rearm_result_show, NULL);
+
 static int __init oberon_capture_init(void)
 {
 	struct pci_pbm_info *pbm;
@@ -1069,6 +1141,7 @@ static int __init oberon_capture_init(void)
 		if (!cap)
 			return -ENOMEM;
 		cap->pbm = pbm;
+		cap->generation = 1;
 		cap->irq = irq;
 		timer_setup(&cap->deadline, oberon_capture_deadline, 0);
 		INIT_WORK(&cap->report, oberon_capture_report);
@@ -1108,7 +1181,17 @@ static int __init oberon_capture_init(void)
 		if (!ret)
 			ret = device_create_file(&selected->pbm->op->dev,
 						 &dev_attr_oberon_capture_ack_result);
+		if (!ret)
+			ret = device_create_file(&selected->pbm->op->dev,
+						 &dev_attr_oberon_capture_rearm);
+		if (!ret)
+			ret = device_create_file(&selected->pbm->op->dev,
+						 &dev_attr_oberon_capture_rearm_result);
 		if (ret) {
+			device_remove_file(&selected->pbm->op->dev,
+					   &dev_attr_oberon_capture_rearm);
+			device_remove_file(&selected->pbm->op->dev,
+					   &dev_attr_oberon_capture_ack_result);
 			device_remove_file(&selected->pbm->op->dev,
 					   &dev_attr_oberon_capture_ack);
 			device_remove_file(&selected->pbm->op->dev,
