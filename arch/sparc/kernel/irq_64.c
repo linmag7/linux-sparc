@@ -847,9 +847,15 @@ int oberon_target_capture(unsigned int irq, unsigned int cpu)
 	raw_spin_lock_irqsave(&desc->lock, flags);
 	data = irq_desc_get_handler_data(desc);
 	if (!data || desc->irq_data.chip != &oberon_capture_chip ||
-	    desc->action || data->capture_live || data->captured ||
-	    data->capture_target_attempted)
+	    desc->action || data->capture_armed || data->capture_target_attempted ||
+	    data->capture_rearm_attempted)
 		goto out;
+	if (data->capture_live) {
+		if (!data->captured || !data->capture_ack_attempted)
+			goto out;
+	} else if (data->captured) {
+		goto out;
+	}
 	val = upa_readq(data->imap);
 	if (val != 0x40 || val != data->capture_baseline ||
 	    (upa_readq(data->iclr) & 3UL))
