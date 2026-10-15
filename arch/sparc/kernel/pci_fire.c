@@ -225,6 +225,8 @@ static int pci_fire_msi_teardown(struct pci_pbm_info *pbm, unsigned long msi)
 	val &= ~MSI_MAP_VALID;
 
 	upa_writeq(val, pbm->pbm_regs + MSI_MAP(msi));
+	if (upa_readq(pbm->pbm_regs + MSI_MAP(msi)) & MSI_MAP_VALID)
+		return -EIO;
 
 	return 0;
 }
