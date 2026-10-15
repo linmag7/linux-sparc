@@ -191,10 +191,10 @@ static void sparc64_teardown_msi_irq(unsigned int irq,
 	const struct sparc64_msiq_ops *ops = pbm->msi_ops;
 	struct msi_desc *entry = irq_get_msi_desc(irq);
 	unsigned int msi_num;
-	int i, err;
+	int i, q, err;
 
 	for (i = 0; i < pbm->msi_num; i++) {
-		if (pbm->msi_irq_table[i] == irq)
+		if (READ_ONCE(pbm->msi_irq_table[i]) == irq)
 			break;
 	}
 	if (i >= pbm->msi_num) {
@@ -204,7 +204,6 @@ static void sparc64_teardown_msi_irq(unsigned int irq,
 	}
 
 	msi_num = pbm->msi_first + i;
-	WRITE_ONCE(pbm->msi_irq_table[i], 0);
 
 	err = ops->msi_teardown(pbm, msi_num);
 	if (err) {
@@ -214,12 +213,16 @@ static void sparc64_teardown_msi_irq(unsigned int irq,
 		return;
 	}
 
-	free_msi(pbm, msi_num);
+	WRITE_ONCE(pbm->msi_irq_table[i], 0);
+	/* A queue handler may already have fetched the old Linux IRQ. */
+	for (q = 0; q < pbm->msiq_num; q++)
+		synchronize_irq(pbm->msiq_irq_cookies[q].irq);
 
 	irq_set_msi_desc(irq, NULL);
 	entry->irq = 0;
 	irq_set_chip(irq, NULL);
 	irq_free(irq);
+	free_msi(pbm, msi_num);
 }
 
 static int msi_bitmap_alloc(struct pci_pbm_info *pbm)
@@ -289,8 +292,8 @@ static int bringup_one_msi_queue(struct pci_pbm_info *pbm,
 	int irq = ops->msiq_build_irq(pbm, msiqid, devino);
 	int err, nid;
 
-	if (irq < 0)
-		return irq;
+	if (irq <= 0)
+		return irq ?: -ENOMEM;
 
 	nid = pbm->numa_node;
 	if (nid != -1) {
@@ -302,6 +305,7 @@ static int bringup_one_msi_queue(struct pci_pbm_info *pbm,
 	if (err)
 		return err;
 
+	pbm->msiq_irq_cookies[msiqid - pbm->msiq_first].irq = irq;
 	return 0;
 }
 

@@ -53,6 +53,7 @@ void sparc64_pbm_msi_init(struct pci_pbm_info *pbm,
 struct sparc64_msiq_cookie {
 	struct pci_pbm_info *pbm;
 	unsigned long msiqid;
+	unsigned int irq;
 };
 #endif
 
