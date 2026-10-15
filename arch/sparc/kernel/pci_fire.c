@@ -804,6 +804,50 @@ static const unsigned long oberon_capture_header_regs[] = {
 	OBERON_DIAG_OE_TX1, OBERON_DIAG_OE_TX2,
 };
 
+/* A matching snapshot permits review of a clear, not automatic recovery. */
+static int oberon_capture_recovery_check(struct oberon_irq_capture *cap)
+{
+	const u64 expected[] = { 2, 0, 0, 1, BIT_ULL(16) | BIT_ULL(48), 0, 0, 0 };
+	unsigned long base = cap->pbm->pbm_regs;
+	int pass, i;
+
+	if (!oberon_capture_quarantined(cap->irq))
+		return -EBUSY;
+	for (i = 0; i < ARRAY_SIZE(expected); i++)
+		if (cap->status[i] != expected[i] ||
+		    cap->status_after[i] != expected[i])
+			return -EOPNOTSUPP;
+	if (!cap->headers_read)
+		return -EOPNOTSUPP;
+	for (i = 0; i < ARRAY_SIZE(cap->header); i++)
+		if (cap->header[i] != cap->header_after[i])
+			return -EAGAIN;
+	for (pass = 0; pass < 2; pass++) {
+		for (i = 0; i < ARRAY_SIZE(expected); i++)
+			if (upa_readq(base + oberon_capture_status_regs[i]) != expected[i])
+				return -EAGAIN;
+		for (i = 0; i < ARRAY_SIZE(cap->header); i++)
+			if (upa_readq(base + oberon_capture_header_regs[i]) != cap->header[i])
+				return -EAGAIN;
+	}
+	return oberon_capture_quarantined(cap->irq) ? 0 : -EBUSY;
+}
+
+static ssize_t oberon_capture_recovery_show(struct device *dev,
+					  struct device_attribute *attr,
+					  char *buf)
+{
+	struct oberon_irq_capture *cap = oberon_live_capture;
+	int ret;
+
+	if (!cap || dev != &cap->pbm->op->dev)
+		return -ENODEV;
+	ret = oberon_capture_recovery_check(cap);
+	return sysfs_emit(buf, "check=%d offset=0x81018 mask=0x0001000000010000 writes=0\n",
+			  ret);
+}
+static DEVICE_ATTR(oberon_capture_recovery, 0400, oberon_capture_recovery_show, NULL);
+
 static void oberon_capture_report(struct work_struct *work)
 {
 	struct oberon_irq_capture *cap = container_of(work,
@@ -910,8 +954,14 @@ static int __init oberon_capture_init(void)
 		oberon_live_capture = selected;
 		ret = device_create_file(&selected->pbm->op->dev,
 					 &dev_attr_oberon_capture_arm);
-		if (ret)
+		if (!ret)
+			ret = device_create_file(&selected->pbm->op->dev,
+						 &dev_attr_oberon_capture_recovery);
+		if (ret) {
+			device_remove_file(&selected->pbm->op->dev,
+					   &dev_attr_oberon_capture_arm);
 			oberon_live_capture = NULL;
+		}
 		pr_warn("Oberon capture %s: arm interface result=%d; ownership unverified, route unarmed\n",
 			selected->pbm->name, ret);
 	}
