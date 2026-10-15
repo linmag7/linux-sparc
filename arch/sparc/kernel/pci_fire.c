@@ -4,6 +4,7 @@
  * Copyright (C) 2007 David S. Miller (davem@davemloft.net)
  */
 #include <linux/workqueue.h>
+#include <linux/smp.h>
 #include <linux/timer.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
@@ -20,6 +21,7 @@
 #include <asm/prom.h>
 #include <asm/irq.h>
 #include <asm/upa.h>
+#include <asm/trap_block.h>
 
 #include "pci_impl.h"
 
@@ -753,6 +755,11 @@ struct oberon_irq_capture {
 	bool rearm_requested;
 	int rearm_result;
 	unsigned int generation;
+	unsigned int received_cpu;
+	unsigned long received_hard_id;
+	bool target_requested;
+	unsigned int target_cpu;
+	int target_result;
 	struct oberon_irq_capture *next;
 };
 
@@ -1000,8 +1007,9 @@ static void oberon_capture_report(struct work_struct *work)
 		struct oberon_irq_capture, report);
 	int i;
 
-	pr_warn("Oberon capture %s: generation=%u candidate samples\n",
-		cap->pbm->name, cap->generation);
+	pr_warn("Oberon capture %s: generation=%u cpu=%u hard_id=%lu candidate samples\n",
+		cap->pbm->name, cap->generation, cap->received_cpu,
+		cap->received_hard_id);
 	for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++)
 		pr_warn("Oberon capture %s: reg=%lx before=%016llx after=%016llx\n",
 			cap->pbm->name, oberon_capture_status_regs[i],
@@ -1022,7 +1030,9 @@ static void oberon_capture_event(void *arg)
 	unsigned long base = cap->pbm->pbm_regs;
 	int i;
 
-	/* At most 26 reads; equal samples do not prove an atomic snapshot. */
+	cap->received_cpu = raw_smp_processor_id();
+	cap->received_hard_id = real_hard_smp_processor_id();
+	/* At most 26 CSR reads; equal samples do not prove an atomic snapshot. */
 	for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++)
 		cap->status[i] = upa_readq(base + oberon_capture_status_regs[i]);
 	cap->fault_read = cap->status[2] != 0;
@@ -1108,6 +1118,48 @@ static ssize_t oberon_capture_rearm_result_show(struct device *dev,
 static DEVICE_ATTR(oberon_capture_rearm_result, 0400,
 		   oberon_capture_rearm_result_show, NULL);
 
+static ssize_t oberon_capture_target_store(struct device *dev,
+					 struct device_attribute *attr,
+					 const char *buf, size_t count)
+{
+	struct oberon_irq_capture *cap = oberon_live_capture;
+	unsigned int cpu;
+
+	if (!cap || dev != &cap->pbm->op->dev || kstrtouint(buf, 0, &cpu))
+		return -EINVAL;
+	guard(mutex)(&oberon_diag_lock);
+	if (cap->target_requested)
+		return -EBUSY;
+	cap->target_requested = true;
+	cap->target_cpu = cpu;
+	cap->target_result = oberon_target_capture(cap->irq, cpu);
+	return cap->target_result ? cap->target_result : count;
+}
+static DEVICE_ATTR_WO(oberon_capture_target);
+
+static ssize_t oberon_capture_target_result_show(struct device *dev,
+					       struct device_attribute *attr,
+					       char *buf)
+{
+	struct oberon_irq_capture *cap = oberon_live_capture;
+	unsigned long imap, iclr;
+	bool armed, captured;
+	int ret;
+
+	if (!cap || dev != &cap->pbm->op->dev)
+		return -ENODEV;
+	guard(mutex)(&oberon_diag_lock);
+	ret = oberon_capture_state(cap->irq, &armed, &captured, &imap, &iclr);
+	if (ret)
+		return ret;
+	return sysfs_emit(buf,
+		"requested=%u cpu=%u result=%d armed=%u captured=%u imap=%lx iclr=%lx\n",
+		cap->target_requested, cap->target_cpu, cap->target_result,
+		armed, captured, imap, iclr);
+}
+static DEVICE_ATTR(oberon_capture_target_result, 0400,
+		   oberon_capture_target_result_show, NULL);
+
 static int __init oberon_capture_init(void)
 {
 	struct pci_pbm_info *pbm;
@@ -1187,7 +1239,17 @@ static int __init oberon_capture_init(void)
 		if (!ret)
 			ret = device_create_file(&selected->pbm->op->dev,
 						 &dev_attr_oberon_capture_rearm_result);
+		if (!ret)
+			ret = device_create_file(&selected->pbm->op->dev,
+						 &dev_attr_oberon_capture_target);
+		if (!ret)
+			ret = device_create_file(&selected->pbm->op->dev,
+						 &dev_attr_oberon_capture_target_result);
 		if (ret) {
+			device_remove_file(&selected->pbm->op->dev,
+					   &dev_attr_oberon_capture_target);
+			device_remove_file(&selected->pbm->op->dev,
+					   &dev_attr_oberon_capture_rearm_result);
 			device_remove_file(&selected->pbm->op->dev,
 					   &dev_attr_oberon_capture_rearm);
 			device_remove_file(&selected->pbm->op->dev,

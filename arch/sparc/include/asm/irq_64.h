@@ -73,6 +73,7 @@ int oberon_ack_capture(unsigned int irq, int (*check)(void *), void *arg,
 		       struct oberon_ack_result *result);
 bool oberon_capture_quarantined(unsigned int irq);
 int oberon_arm_capture(unsigned int irq);
+int oberon_target_capture(unsigned int irq, unsigned int cpu);
 int oberon_rearm_capture(unsigned int irq, int (*check)(void *), void *arg);
 int oberon_capture_state(unsigned int irq, bool *armed, bool *captured,
 			 unsigned long *imap, unsigned long *iclr);

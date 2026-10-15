@@ -215,6 +215,9 @@ struct irq_handler_data {
 	bool capture_armed;
 	bool capture_ack_attempted;
 	bool capture_rearm_attempted;
+	bool capture_target_failed;
+	bool capture_target_attempted;
+	unsigned int capture_target;
 	unsigned long capture_baseline;
 };
 
@@ -831,6 +834,48 @@ out:
 	return ret;
 }
 
+int oberon_target_capture(unsigned int irq, unsigned int cpu)
+{
+	struct irq_desc *desc = irq_to_desc(irq);
+	struct irq_handler_data *data;
+	unsigned long flags, val, target;
+	int ret = -EBUSY;
+
+	if (!desc || IS_ENABLED(CONFIG_HOTPLUG_CPU) || cpu >= nr_cpu_ids ||
+	    cpu > 0x3ff || !cpu_online(cpu))
+		return -EINVAL;
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	data = irq_desc_get_handler_data(desc);
+	if (!data || desc->irq_data.chip != &oberon_capture_chip ||
+	    desc->action || data->capture_live || data->captured ||
+	    data->capture_target_attempted)
+		goto out;
+	val = upa_readq(data->imap);
+	if (val != 0x40 || val != data->capture_baseline ||
+	    (upa_readq(data->iclr) & 3UL))
+		goto out;
+	/* CPU indices on sun4u use firmware physical IDs; preserve controller bits. */
+	target = oberon_imap_target(val, cpu);
+	data->capture_target_attempted = true;
+	upa_writeq(target, data->imap);
+	if (upa_readq(data->imap) != target) {
+		data->capture_target_failed = true;
+		upa_writeq(val, data->imap);
+		if (upa_readq(data->imap) != val)
+			oberon_capture_stop(5);
+		ret = -EIO;
+		goto out;
+	}
+	if (upa_readq(data->iclr) & 3UL)
+		oberon_capture_stop(5);
+	data->capture_baseline = target;
+	data->capture_target = cpu;
+	ret = 0;
+out:
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	return ret;
+}
+
 int oberon_arm_capture(unsigned int irq)
 {
 	struct irq_desc *desc = irq_to_desc(irq);
@@ -843,11 +888,13 @@ int oberon_arm_capture(unsigned int irq)
 	raw_spin_lock_irqsave(&desc->lock, flags);
 	data = irq_desc_get_handler_data(desc);
 	if (desc->irq_data.chip != &oberon_capture_chip || !data ||
-	    desc->action || data->captured || data->capture_live)
+	    desc->action || data->captured || data->capture_live ||
+	    data->capture_target_failed)
 		goto out;
-	/* This first experiment accepts only the observed CPU-0/controller-0 route. */
+	/* Keep the prepared controller selection and disabled route intact. */
 	val = upa_readq(data->imap);
-	if (val != 0x40 || val != data->capture_baseline || !cpu_online(0))
+	if ((val & ~OBERON_IMAP_TID_MASK) != 0x40 ||
+	    val != data->capture_baseline || !cpu_online(data->capture_target))
 		goto out;
 	data->capture_live = true;
 	data->capture_armed = true;
@@ -876,10 +923,12 @@ int oberon_rearm_capture(unsigned int irq, int (*check)(void *), void *arg)
 	if (desc->irq_data.chip != &oberon_capture_chip || !data ||
 	    desc->action || !data->capture_live || !data->captured ||
 	    data->capture_armed || !data->capture_ack_attempted ||
-	    data->capture_rearm_attempted || !cpu_online(0))
+	    data->capture_rearm_attempted || data->capture_target_failed ||
+	    !cpu_online(data->capture_target))
 		goto out;
 	val = upa_readq(data->imap);
-	if (val != 0x40 || val != data->capture_baseline ||
+	if ((val & ~OBERON_IMAP_TID_MASK) != 0x40 ||
+	    val != data->capture_baseline ||
 	    (upa_readq(data->iclr) & 3UL))
 		goto out;
 	data->capture_rearm_attempted = true;
