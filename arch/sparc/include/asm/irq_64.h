@@ -65,6 +65,12 @@ void sun4u_destroy_msi(unsigned int irq);
 unsigned int irq_alloc(unsigned int dev_handle, unsigned int dev_ino);
 void irq_free(unsigned int irq);
 
+struct oberon_ack_result {
+	unsigned long before, after;
+	bool written;
+};
+int oberon_ack_capture(unsigned int irq, int (*check)(void *), void *arg,
+		       struct oberon_ack_result *result);
 bool oberon_capture_quarantined(unsigned int irq);
 int oberon_arm_capture(unsigned int irq);
 int oberon_disarm_capture(unsigned int irq);

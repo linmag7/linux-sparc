@@ -213,6 +213,7 @@ struct irq_handler_data {
 	bool captured;
 	bool capture_live;
 	bool capture_armed;
+	bool capture_ack_attempted;
 	unsigned long capture_baseline;
 };
 
@@ -791,6 +792,42 @@ bool oberon_capture_quarantined(unsigned int irq)
 		ready = upa_readq(data->imap) == data->capture_baseline;
 	raw_spin_unlock_irqrestore(&desc->lock, flags);
 	return ready;
+}
+
+int oberon_ack_capture(unsigned int irq, int (*check)(void *), void *arg,
+		       struct oberon_ack_result *result)
+{
+	struct irq_desc *desc = irq_to_desc(irq);
+	struct irq_handler_data *data;
+	unsigned long flags;
+	int ret = -EBUSY;
+
+	if (!desc || !check || !result)
+		return -EINVAL;
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	data = irq_desc_get_handler_data(desc);
+	if (!data || desc->irq_data.chip != &oberon_capture_chip ||
+	    !data->capture_live || !data->captured || data->capture_armed ||
+	    data->capture_ack_attempted ||
+	    upa_readq(data->imap) != data->capture_baseline)
+		goto out;
+	result->before = upa_readq(data->iclr);
+	ret = check(arg);
+	if (ret)
+		goto out;
+	data->capture_ack_attempted = true;
+	result->written = true;
+	/* Change only the two-bit controller state; the route remains invalid. */
+	upa_writeq(result->before & ~3UL, data->iclr);
+	result->after = upa_readq(data->iclr);
+	ret = check(arg);
+	if (result->after != (result->before & ~3UL))
+		ret = -EIO;
+	if (upa_readq(data->imap) != data->capture_baseline)
+		ret = -EBUSY;
+out:
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	return ret;
 }
 
 int oberon_arm_capture(unsigned int irq)
