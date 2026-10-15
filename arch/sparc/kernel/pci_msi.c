@@ -185,6 +185,7 @@ static void sparc64_teardown_msi_irq(unsigned int irq,
 {
 	struct pci_pbm_info *pbm = pdev->dev.archdata.host_controller;
 	const struct sparc64_msiq_ops *ops = pbm->msi_ops;
+	struct msi_desc *entry = irq_get_msi_desc(irq);
 	unsigned int msi_num;
 	int i, err;
 
@@ -211,6 +212,8 @@ static void sparc64_teardown_msi_irq(unsigned int irq,
 
 	free_msi(pbm, msi_num);
 
+	irq_set_msi_desc(irq, NULL);
+	entry->irq = 0;
 	irq_set_chip(irq, NULL);
 	irq_free(irq);
 }
