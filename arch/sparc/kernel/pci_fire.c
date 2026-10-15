@@ -1130,6 +1130,9 @@ static ssize_t oberon_capture_target_store(struct device *dev,
 	guard(mutex)(&oberon_diag_lock);
 	if (cap->target_requested)
 		return -EBUSY;
+	if (cap->ack_requested && (!cap->clear_attempted || cap->clear_result ||
+				   !cap->ack.written || cap->ack_result))
+		return -EBUSY;
 	cap->target_requested = true;
 	cap->target_cpu = cpu;
 	cap->target_result = oberon_target_capture(cap->irq, cpu);
