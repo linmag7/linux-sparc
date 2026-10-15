@@ -79,7 +79,7 @@ void __init smp4m_boot_cpus(void)
 int smp4m_boot_one_cpu(int i, struct task_struct *idle)
 {
 	unsigned long *entry = &sun4m_cpu_startup;
-	int timeout;
+	unsigned long timeout;
 	int cpu_node;
 
 	cpu_find_by_mid(i, &cpu_node);
@@ -103,11 +103,9 @@ int smp4m_boot_one_cpu(int i, struct task_struct *idle)
 	prom_startcpu(cpu_node, &smp_penguin_ctable, 0, (char *)entry);
 
 	/* wheee... it's going... */
-	for (timeout = 0; timeout < 10000; timeout++) {
-		if (cpu_callin_map[i])
-			break;
+	timeout = jiffies + 2 * HZ;
+	while (!cpu_callin_map[i] && time_before(jiffies, timeout))
 		udelay(200);
-	}
 
 	if (!(cpu_callin_map[i])) {
 		printk(KERN_ERR "Processor %d is stuck.\n", i);

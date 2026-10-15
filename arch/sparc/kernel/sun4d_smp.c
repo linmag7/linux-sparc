@@ -122,7 +122,7 @@ void __init smp4d_boot_cpus(void)
 int smp4d_boot_one_cpu(int i, struct task_struct *idle)
 {
 	unsigned long *entry = &sun4d_cpu_startup;
-	int timeout;
+	unsigned long timeout;
 	int cpu_node;
 
 	cpu_find_by_instance(i, &cpu_node, NULL);
@@ -145,11 +145,9 @@ int smp4d_boot_one_cpu(int i, struct task_struct *idle)
 	printk(KERN_INFO "prom_startcpu returned :)\n");
 
 	/* wheee... it's going... */
-	for (timeout = 0; timeout < 10000; timeout++) {
-		if (cpu_callin_map[i])
-			break;
+	timeout = jiffies + 2 * HZ;
+	while (!cpu_callin_map[i] && time_before(jiffies, timeout))
 		udelay(200);
-	}
 
 	if (!(cpu_callin_map[i])) {
 		printk(KERN_ERR "Processor %d is stuck.\n", i);

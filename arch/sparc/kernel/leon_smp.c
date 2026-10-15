@@ -180,7 +180,7 @@ void __init leon_boot_cpus(void)
 
 int leon_boot_one_cpu(int i, struct task_struct *idle)
 {
-	int timeout;
+	unsigned long timeout;
 
 	current_set[i] = task_thread_info(idle);
 
@@ -205,11 +205,9 @@ int leon_boot_one_cpu(int i, struct task_struct *idle)
 	LEON_BYPASS_STORE_PA(&(leon3_irqctrl_regs->mpstatus), 1 << i);
 
 	/* wheee... it's going... */
-	for (timeout = 0; timeout < 10000; timeout++) {
-		if (cpu_callin_map[i])
-			break;
+	timeout = jiffies + 2 * HZ;
+	while (!cpu_callin_map[i] && time_before(jiffies, timeout))
 		udelay(200);
-	}
 	printk(KERN_INFO "Started CPU %d\n", (unsigned int)i);
 
 	if (!(cpu_callin_map[i])) {
