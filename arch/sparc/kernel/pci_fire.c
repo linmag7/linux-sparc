@@ -755,6 +755,7 @@ struct oberon_irq_capture {
 	bool rearm_requested;
 	int rearm_result;
 	unsigned int generation;
+	bool late;
 	unsigned int received_cpu;
 	unsigned long received_hard_id;
 	bool target_requested;
@@ -1007,9 +1008,9 @@ static void oberon_capture_report(struct work_struct *work)
 		struct oberon_irq_capture, report);
 	int i;
 
-	pr_warn("Oberon capture %s: generation=%u cpu=%u hard_id=%lu candidate samples\n",
+	pr_warn("Oberon capture %s: generation=%u cpu=%u hard_id=%lu late=%u candidate samples\n",
 		cap->pbm->name, cap->generation, cap->received_cpu,
-		cap->received_hard_id);
+		cap->received_hard_id, cap->late);
 	for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++)
 		pr_warn("Oberon capture %s: reg=%lx before=%016llx after=%016llx\n",
 			cap->pbm->name, oberon_capture_status_regs[i],
@@ -1024,12 +1025,13 @@ static void oberon_capture_report(struct work_struct *work)
 				cap->header[i], cap->header_after[i]);
 }
 
-static void oberon_capture_event(void *arg)
+static void oberon_capture_event(void *arg, bool late)
 {
 	struct oberon_irq_capture *cap = arg;
 	unsigned long base = cap->pbm->pbm_regs;
 	int i;
 
+	cap->late = late;
 	cap->received_cpu = raw_smp_processor_id();
 	cap->received_hard_id = real_hard_smp_processor_id();
 	/* At most 26 CSR reads; equal samples do not prove an atomic snapshot. */

@@ -208,7 +208,7 @@ struct irq_handler_data {
 	unsigned long	iclr;
 	unsigned long	imap;
 	bool		oberon;
-	void (*capture)(void *arg);
+	void (*capture)(void *arg, bool late);
 	void *capture_arg;
 	bool captured;
 	bool capture_live;
@@ -711,19 +711,20 @@ static bool oberon_capture_mask(struct irq_handler_data *data)
 static void oberon_capture_irq(struct irq_desc *desc)
 {
 	struct irq_handler_data *data;
+	bool late = false;
 
 	guard(raw_spinlock)(&desc->lock);
 	data = irq_desc_get_handler_data(desc);
 	if (data->capture_live) {
-		if (!data->capture_armed || data->captured)
-			oberon_capture_stop(desc, 3);
+		/* Masking a route does not recall an interrupt already in flight. */
+		late = !data->capture_armed;
 		if (!oberon_capture_mask(data))
 			oberon_capture_stop(desc, 2);
 		data->capture_armed = false;
 	}
 	if (!data->captured) {
 		data->captured = true;
-		data->capture(data->capture_arg);
+		data->capture(data->capture_arg, late);
 	}
 }
 
@@ -748,7 +749,7 @@ static struct irq_chip oberon_capture_chip = {
 };
 
 int oberon_prepare_capture(unsigned int irq, unsigned long imap,
-			   void (*capture)(void *arg), void *arg)
+			   void (*capture)(void *arg, bool late), void *arg)
 {
 	struct irq_desc *desc = irq_to_desc(irq);
 	struct irq_handler_data *data;
