@@ -1942,6 +1942,16 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4389, quirk_no_msi);
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x438a, quirk_no_msi);
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x438b, quirk_no_msi);
 
+/* This ULi EHCI revision duplicates the low MSI data byte on word writes. */
+static void quirk_uli_ehci_no_msi(struct pci_dev *dev)
+{
+	if (dev->revision == 0x01 &&
+	    dev->subsystem_vendor == PCI_VENDOR_ID_AL &&
+	    dev->subsystem_device == 0x5238)
+		quirk_no_msi(dev);
+}
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AL, 0x5239, quirk_uli_ehci_no_msi);
+
 static void quirk_pcie_mch(struct pci_dev *pdev)
 {
 	pdev->no_msi = 1;
