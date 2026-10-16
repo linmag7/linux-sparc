@@ -1137,12 +1137,27 @@ static int pci_sun4v_msiq_build_irq(struct pci_pbm_info *pbm,
 	if (!irq)
 		return -ENOMEM;
 
+	return irq;
+}
+
+static int pci_sun4v_msiq_enable(struct pci_pbm_info *pbm, unsigned long msiqid)
+{
 	if (pci_sun4v_msiq_setvalid(pbm->devhandle, msiqid, HV_MSIQ_VALID))
 		return -EINVAL;
 	if (pci_sun4v_msiq_setstate(pbm->devhandle, msiqid, HV_MSIQSTATE_IDLE))
 		return -EINVAL;
+	return 0;
+}
 
-	return irq;
+static int pci_sun4v_msiq_disable(struct pci_pbm_info *pbm, unsigned long msiqid)
+{
+	unsigned long valid;
+
+	if (pci_sun4v_msiq_setvalid(pbm->devhandle, msiqid, HV_MSIQ_INVALID))
+		return -EIO;
+	if (pci_sun4v_msiq_getvalid(pbm->devhandle, msiqid, &valid))
+		return -EIO;
+	return valid == HV_MSIQ_INVALID ? 0 : -EBUSY;
 }
 
 static const struct sparc64_msiq_ops pci_sun4v_msiq_ops = {
@@ -1152,6 +1167,8 @@ static const struct sparc64_msiq_ops pci_sun4v_msiq_ops = {
 	.msi_setup	=	pci_sun4v_msi_setup,
 	.msi_teardown	=	pci_sun4v_msi_teardown,
 	.msiq_alloc	=	pci_sun4v_msiq_alloc,
+	.msiq_enable	=	pci_sun4v_msiq_enable,
+	.msiq_disable	=	pci_sun4v_msiq_disable,
 	.msiq_build_irq	=	pci_sun4v_msiq_build_irq,
 };
 

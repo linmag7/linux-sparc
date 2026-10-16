@@ -313,7 +313,7 @@ static int bringup_one_msi_queue(struct pci_pbm_info *pbm,
 		return err;
 
 	pbm->msiq_irq_cookies[msiqid - pbm->msiq_first].irq = irq;
-	return 0;
+	return ops->msiq_enable(pbm, msiqid);
 }
 
 static int sparc64_bringup_msi_queues(struct pci_pbm_info *pbm,
@@ -332,6 +332,23 @@ static int sparc64_bringup_msi_queues(struct pci_pbm_info *pbm,
 	}
 
 	return 0;
+}
+
+static void sparc64_disable_msi_queues(struct pci_pbm_info *pbm,
+				     const struct sparc64_msiq_ops *ops)
+{
+	int i;
+
+	for (i = 0; i < pbm->msiq_num; i++) {
+		struct sparc64_msiq_cookie *cookie = &pbm->msiq_irq_cookies[i];
+
+		if (!cookie->irq)
+			continue;
+		if (ops->msiq_disable(pbm, cookie->msiqid))
+			pr_err("%s: MSI queue %lu disable not confirmed\n",
+			       pbm->name, cookie->msiqid);
+		synchronize_irq(cookie->irq);
+	}
 }
 
 void sparc64_pbm_msi_init(struct pci_pbm_info *pbm,
@@ -457,6 +474,7 @@ void sparc64_pbm_msi_init(struct pci_pbm_info *pbm,
 	return;
 
 retain_queues:
+	sparc64_disable_msi_queues(pbm, ops);
 	/* Published queues may still receive writes or have registered handlers. */
 	pr_err("%s: MSI initialization failed; retaining published queues\n",
 	       pbm->name);
