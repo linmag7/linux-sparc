@@ -319,10 +319,26 @@ static int pci_fire_msiq_build_irq(struct pci_pbm_info *pbm,
 	if (!irq)
 		return -ENOMEM;
 
+	return irq;
+}
+
+static int pci_fire_msiq_enable(struct pci_pbm_info *pbm, unsigned long msiqid)
+{
 	upa_writeq(EVENT_QUEUE_CONTROL_SET_EN,
 		   pbm->pbm_regs + EVENT_QUEUE_CONTROL_SET(msiqid));
+	return 0;
+}
 
-	return irq;
+static int pci_fire_msiq_disable(struct pci_pbm_info *pbm, unsigned long msiqid)
+{
+	unsigned long state;
+
+	upa_writeq(EVENT_QUEUE_CONTROL_CLEAR_DIS,
+		   pbm->pbm_regs + EVENT_QUEUE_CONTROL_CLEAR(msiqid));
+	state = upa_readq(pbm->pbm_regs + EVENT_QUEUE_STATE(msiqid));
+	/* The state readback does not establish completion of queue DMA. */
+	return (state & EVENT_QUEUE_STATE_MASK) == EVENT_QUEUE_STATE_IDLE ?
+		0 : -EBUSY;
 }
 
 static const struct sparc64_msiq_ops pci_fire_msiq_ops = {
@@ -332,6 +348,8 @@ static const struct sparc64_msiq_ops pci_fire_msiq_ops = {
 	.msi_setup	=	pci_fire_msi_setup,
 	.msi_teardown	=	pci_fire_msi_teardown,
 	.msiq_alloc	=	pci_fire_msiq_alloc,
+	.msiq_enable	=	pci_fire_msiq_enable,
+	.msiq_disable	=	pci_fire_msiq_disable,
 	.msiq_build_irq	=	pci_fire_msiq_build_irq,
 };
 
