@@ -304,11 +304,11 @@ maybe_smp4m_msg:
 	sethi	%hi(0x70000000), %o2	! Check all soft-IRQs
 	ld	[%o5 + %o3], %o1
 	ld	[%o1 + 0x00], %o3	! sun4m_irq_percpu[cpu]->pending
-	andcc	%o3, %o2, %g0
+	andcc	%o3, %o2, %o4
 	be,a	smp4m_ticker
 	 cmp	%l7, 14
-	/* Soft-IRQ IPI */
-	st	%o2, [%o1 + 0x04]	! sun4m_irq_percpu[cpu]->clear=0x70000000
+	/* Soft-IRQ IPI: clear only the ones we saw, a later one must stay */
+	st	%o4, [%o1 + 0x04]	! sun4m_irq_percpu[cpu]->clear
 	WRITE_PAUSE
 	ld	[%o1 + 0x00], %g0	! sun4m_irq_percpu[cpu]->pending
 	WRITE_PAUSE
