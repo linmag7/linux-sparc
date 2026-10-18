@@ -17,6 +17,8 @@
  * That one page is used to protect kernel from intruders, so that
  * we can make our access_ok test faster
  */
+#define HAVE_ARCH_PICK_MMAP_LAYOUT
+
 #define TASK_SIZE	PAGE_OFFSET
 #ifdef __KERNEL__
 #define STACK_TOP	(PAGE_OFFSET - PAGE_SIZE)

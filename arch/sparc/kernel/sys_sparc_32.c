@@ -24,6 +24,9 @@
 #include <linux/smp.h>
 #include <linux/ipc.h>
 #include <linux/hugetlb.h>
+#include <linux/random.h>
+#include <linux/elf-randomize.h>
+#include <linux/sizes.h>
 
 #include <linux/uaccess.h>
 #include <asm/unistd.h>
@@ -75,7 +78,7 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsi
 	if (len > TASK_SIZE - PAGE_SIZE)
 		return -ENOMEM;
 	if (!addr)
-		addr = TASK_UNMAPPED_BASE;
+		addr = current->mm->mmap_base;
 
 	info.length = len;
 	info.low_limit = addr;
@@ -88,6 +91,44 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsi
 		info.align_mask = huge_page_mask_align(filp);
 	}
 	return vm_unmapped_area(&info);
+}
+
+/* Keep the existing bottom-up layout, with an 8 MiB randomized floor. */
+static unsigned long sparc32_mmap_rnd(void)
+{
+	if (!(current->flags & PF_RANDOMIZE))
+		return 0;
+
+	return (get_random_long() & (SZ_8M / PAGE_SIZE - 1)) << PAGE_SHIFT;
+}
+
+unsigned long arch_mmap_rnd(void)
+{
+	/*
+	 * The ELF loader places PIE segments with fixed private mappings,
+	 * bypassing the colour selection in arch_get_unmapped_area(). Keep
+	 * each file page at its existing colour across executions. This
+	 * deliberately reduces PIE entropy on large virtually indexed
+	 * caches: an 8 MiB range has 16 positions with a 512 KiB SHMLBA.
+	 */
+	return sparc32_mmap_rnd() & ~(SHMLBA - 1);
+}
+
+unsigned long arch_randomize_brk(struct mm_struct *mm)
+{
+	unsigned long limit = TASK_SIZE - PAGE_SIZE;
+
+	if (mm->brk >= limit)
+		return mm->brk;
+
+	return randomize_page(mm->brk, min(SZ_32M, limit - mm->brk));
+}
+
+void arch_pick_mmap_layout(struct mm_struct *mm, const struct rlimit *rlim_stack)
+{
+	/* File mappings still receive their pgoff-based colour alignment. */
+	mm->mmap_base = TASK_UNMAPPED_BASE + sparc32_mmap_rnd();
+	mm_flags_clear(MMF_TOPDOWN, mm);
 }
 
 /*
