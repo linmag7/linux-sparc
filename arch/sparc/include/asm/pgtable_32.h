@@ -136,9 +136,18 @@ static inline pmd_t *pud_pgtable(pud_t pud)
 	}
 }
 
+/*
+ * A PAGE_NONE pte has no SRMMU_VALID, so that the MMU faults on every
+ * access, but the page is still mapped.  It is told apart from a swap pte
+ * by its access bits, SRMMU_PRIV, which a swap pte (bits 0-5 clear) never
+ * has.  Only SRMMU_PRIV_RDONLY is tested: SRMMU_WRITE is part of
+ * SRMMU_PRIV, and pte_wrprotect() clears it, as fork does on a COW
+ * mapping.
+ */
 static inline int pte_present(pte_t pte)
 {
-	return ((pte_val(pte) & SRMMU_ET_MASK) == SRMMU_ET_PTE);
+	return (pte_val(pte) & SRMMU_ET_MASK) == SRMMU_ET_PTE ||
+	       (pte_val(pte) & SRMMU_PRIV_RDONLY) == SRMMU_PRIV_RDONLY;
 }
 
 static inline int pte_none(pte_t pte)
