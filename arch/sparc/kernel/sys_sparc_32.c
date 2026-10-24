@@ -40,6 +40,15 @@ SYSCALL_DEFINE0(getpagesize)
 	return PAGE_SIZE; /* Possibly older binaries want 8192 on sun4's? */
 }
 
+/*
+ * A file page reached at two colours is two cache lines, so a kernel-chosen
+ * mapping of one sits at the colour its page offset implies - private too.
+ */
+static bool sparc_needs_colour_align(struct file *filp, unsigned long flags)
+{
+	return filp || (flags & MAP_SHARED);
+}
+
 unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsigned long len, unsigned long pgoff, unsigned long flags, vm_flags_t vm_flags)
 {
 	struct vm_unmapped_area_info info = {};
@@ -50,7 +59,11 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsi
 
 	if (flags & MAP_FIXED) {
 		/* We do not accept a shared mapping if it would violate
-		 * cache aliasing constraints.
+		 * cache aliasing constraints.  Private file mappings are not
+		 * rejected here: the ELF loader places segments with
+		 * MAP_FIXED at offsets that need not preserve colour, and
+		 * refusing them makes execve() fail.  sparc64 draws the line
+		 * in the same place.
 		 */
 		if (!file_hugepage && (flags & MAP_SHARED) &&
 		    ((addr - (pgoff << PAGE_SHIFT)) & (SHMLBA - 1)))
@@ -68,7 +81,7 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsi
 	info.low_limit = addr;
 	info.high_limit = TASK_SIZE;
 	if (!file_hugepage) {
-		info.align_mask = (flags & MAP_SHARED) ?
+		info.align_mask = sparc_needs_colour_align(filp, flags) ?
 			(PAGE_MASK & (SHMLBA - 1)) : 0;
 		info.align_offset = pgoff << PAGE_SHIFT;
 	} else {
