@@ -2176,6 +2176,11 @@ void __init load_mmu(void)
 		smp_cachetlb_ops.page_for_dma = local_ops->page_for_dma;
 	}
 
+	if (poke_srmmu == poke_hypersparc) {
+		/* The HyperSPARC DMA callback is an I/O-coherent no-op. */
+		smp_cachetlb_ops.page_for_dma = local_ops->page_for_dma;
+	}
+
 	/* It really is const after this point. */
 	sparc32_cachetlb_ops = (const struct sparc32_cachetlb_ops *)
 		&smp_cachetlb_ops;
