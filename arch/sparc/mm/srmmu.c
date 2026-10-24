@@ -2186,15 +2186,23 @@ static void local_hypersparc_flush_icache_range(unsigned long start,
 
 void flush_icache_range(unsigned long start, unsigned long end)
 {
-	if (start >= end || !is_hypersparc)
+	if (start >= end)
 		return;
 
-	preempt_disable();
-	local_hypersparc_flush_icache_range(start, end);
+	if (is_hypersparc) {
+		preempt_disable();
+		local_hypersparc_flush_icache_range(start, end);
 #ifdef CONFIG_SMP
-	xc2(local_hypersparc_flush_icache_range, start, end);
+		xc2(local_hypersparc_flush_icache_range, start, end);
 #endif
-	preempt_enable();
+		preempt_enable();
+		return;
+	}
+
+	if (poke_srmmu == poke_viking) {
+		/* One local FLUSH synchronizes all preceding instruction stores. */
+		__asm__ __volatile__("flush %0" : : "r" (start) : "memory");
+	}
 }
 EXPORT_SYMBOL(flush_icache_range);
 
