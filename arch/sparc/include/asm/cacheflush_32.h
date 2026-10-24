@@ -35,6 +35,12 @@
 #define flush_page_for_dma(addr) \
 	sparc32_cachetlb_ops->page_for_dma(addr)
 
+struct vm_area_struct;
+
+#define ARCH_HAS_FLUSH_ANON_PAGE
+void flush_anon_page(struct vm_area_struct *vma, struct page *page,
+		     unsigned long vaddr);
+
 void sparc_flush_page_to_ram(struct page *page);
 void sparc_flush_folio_to_ram(struct folio *folio);
 
