@@ -89,6 +89,37 @@ static int is_hypersparc;
 
 static int srmmu_cache_pagetables;
 
+void sparc32_flush_cache_vmap(unsigned long start, unsigned long end)
+{
+	unsigned long addr;
+
+	flush_cache_all();
+	if (!is_hypersparc)
+		return;
+
+	for (addr = start; addr < end; addr += PAGE_SIZE) {
+		unsigned long pfn;
+		struct page *page;
+		pte_t *ptep, pte;
+
+		ptep = virt_to_kpte(addr);
+		if (!ptep)
+			continue;
+		pte = ptep_get(ptep);
+		if (!pte_present(pte))
+			continue;
+		pfn = pte_pfn(pte);
+		if (!pfn_valid(pfn))
+			continue;
+		page = pfn_to_page(pfn);
+		if (PageHighMem(page))
+			/* Taint this allocation for any vmap exposure until
+			 * the page is reused; the allocator clears it then.
+			 */
+			set_bit(PG_arch_2, &page->flags.f);
+	}
+}
+
 /*
  * Keep the single-mapping case cacheable.  On a colour conflict, publish the
  * data and make every live alias uncached until it is unmapped.
