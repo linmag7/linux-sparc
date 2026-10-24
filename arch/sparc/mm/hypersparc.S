@@ -149,6 +149,7 @@ hypersparc_flush_cache_range:
 	bne	2b
 	 sta	%g0, [%o2 + %g5] ASI_M_FLUSH_PAGE
 3:
+	sta	%g0, [%o2] ASI_M_FLUSH_PROBE
 	cmp	%o2, %o1
 	bne	1b
 	 add	%o2, -PAGE_SIZE, %o0
@@ -209,6 +210,7 @@ hypersparc_flush_cache_page:
 	mov	SRMMU_FAULT_STATUS, %g7
 	mov	SRMMU_CTX_REG, %g4
 	lda	[%g7] ASI_M_MMUREGS, %g0
+	sta	%g0, [%o1] ASI_M_FLUSH_PROBE
 	sta	%o2, [%g4] ASI_M_MMUREGS
 hypersparc_flush_cache_page_out:
 	retl
