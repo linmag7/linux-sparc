@@ -26,6 +26,10 @@
 #include <asm/vaddrs.h>
 #include <asm/pgtsrmmu.h>
 
+void sparc32_kmap_local_cache_flush(unsigned long vaddr);
+void sparc32_kmap_local_tlb_flush(unsigned long vaddr);
+void sparc32_kmap_local_post_map(unsigned long vaddr, pte_t pteval);
+
 #define kmap_prot __pgprot(SRMMU_ET_PTE | SRMMU_PRIV | SRMMU_CACHE)
 extern pte_t *pkmap_page_table;
 
@@ -48,10 +52,12 @@ extern pte_t *pkmap_page_table;
 #define flush_cache_kmaps()	flush_cache_all()
 
 /* FIXME: Use __flush_*_one(vaddr) instead of flush_*_all() -- Anton */
-#define arch_kmap_local_pre_map(vaddr, pteval)	flush_cache_all()
-#define arch_kmap_local_pre_unmap(vaddr)	flush_cache_all()
-#define arch_kmap_local_post_map(vaddr, pteval)	flush_tlb_all()
-#define arch_kmap_local_post_unmap(vaddr)	flush_tlb_all()
+#define arch_kmap_local_pre_unmap(vaddr) \
+	sparc32_kmap_local_cache_flush(vaddr)
+#define arch_kmap_local_post_map(vaddr, pteval) \
+	sparc32_kmap_local_post_map(vaddr, pteval)
+#define arch_kmap_local_post_unmap(vaddr) \
+	sparc32_kmap_local_tlb_flush(vaddr)
 
 #endif /* __KERNEL__ */
 
