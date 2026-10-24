@@ -1625,12 +1625,8 @@ static void smp_flush_cache_mm(struct mm_struct *mm)
 static void smp_flush_tlb_mm(struct mm_struct *mm)
 {
 	if (mm->context != NO_CONTEXT) {
-		if (any_other_mm_cpus(mm)) {
+		if (any_other_mm_cpus(mm))
 			xc1(local_ops->tlb_mm, (unsigned long)mm);
-			if (atomic_read(&mm->mm_users) == 1 && current->active_mm == mm)
-				cpumask_copy(mm_cpumask(mm),
-					     cpumask_of(smp_processor_id()));
-		}
 		local_ops->tlb_mm(mm);
 	}
 }
