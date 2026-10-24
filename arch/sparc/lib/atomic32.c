@@ -28,15 +28,19 @@ static DEFINE_SPINLOCK(dummy);
 
 #endif /* SMP */
 
+/* Failed bit-lock acquisition must not overwrite an owner's plain store. */
 #define ATOMIC_FETCH_OP(op, c_op)					\
 int arch_atomic_fetch_##op(int i, atomic_t *v)				\
 {									\
-	int ret;							\
+	int ret, new;							\
 	unsigned long flags;						\
 	spin_lock_irqsave(ATOMIC_HASH(v), flags);			\
 									\
-	ret = v->counter;						\
-	v->counter c_op i;						\
+	ret = READ_ONCE(v->counter);					\
+	new = ret;							\
+	new c_op i;							\
+	if (new != ret)							\
+		WRITE_ONCE(v->counter, new);				\
 									\
 	spin_unlock_irqrestore(ATOMIC_HASH(v), flags);			\
 	return ret;							\
@@ -125,8 +129,9 @@ unsigned long sp32___set_bit(unsigned long *addr, unsigned long mask)
 	unsigned long old, flags;
 
 	spin_lock_irqsave(ATOMIC_HASH(addr), flags);
-	old = *addr;
-	*addr = old | mask;
+	old = READ_ONCE(*addr);
+	if (!(old & mask))
+		WRITE_ONCE(*addr, old | mask);
 	spin_unlock_irqrestore(ATOMIC_HASH(addr), flags);
 
 	return old & mask;
@@ -138,8 +143,9 @@ unsigned long sp32___clear_bit(unsigned long *addr, unsigned long mask)
 	unsigned long old, flags;
 
 	spin_lock_irqsave(ATOMIC_HASH(addr), flags);
-	old = *addr;
-	*addr = old & ~mask;
+	old = READ_ONCE(*addr);
+	if (old & mask)
+		WRITE_ONCE(*addr, old & ~mask);
 	spin_unlock_irqrestore(ATOMIC_HASH(addr), flags);
 
 	return old & mask;
