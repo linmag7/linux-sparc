@@ -45,6 +45,20 @@ hypersparc_flush_combined_all:
 	sethi	%hi(vac_line_size), %g1
 	ld	[%g1 + %lo(vac_line_size)], %g2
 1:
+	sub	%g5, %g2, %g5
+	sta	%g0, [%g5] ASI_M_FLUSH_CTX
+	sub	%g5, %g2, %g5
+	sta	%g0, [%g5] ASI_M_FLUSH_CTX
+	sub	%g5, %g2, %g5
+	sta	%g0, [%g5] ASI_M_FLUSH_CTX
+	sub	%g5, %g2, %g5
+	sta	%g0, [%g5] ASI_M_FLUSH_CTX
+	sub	%g5, %g2, %g5
+	sta	%g0, [%g5] ASI_M_FLUSH_CTX
+	sub	%g5, %g2, %g5
+	sta	%g0, [%g5] ASI_M_FLUSH_CTX
+	sub	%g5, %g2, %g5
+	sta	%g0, [%g5] ASI_M_FLUSH_CTX
 	subcc	%g5, %g2, %g5
 	bne	1b
 	 sta	%g0, [%g5] ASI_M_FLUSH_CTX
