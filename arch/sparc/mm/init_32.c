@@ -103,6 +103,31 @@ void sparc_flush_page_to_ram(struct page *page)
 }
 EXPORT_SYMBOL(sparc_flush_page_to_ram);
 
+/*
+ * Write back the source user alias before copying through the kernel alias.
+ * Lowmem kmap_local mappings bypass the cache hooks, so explicitly flush
+ * the source kernel alias both before reading and after filling it. This
+ * avoids stale reads and leaves no source alias behind for later user writes.
+ * Flush the destination through its mapped address, also valid for highmem.
+ */
+void copy_user_highpage(struct page *to, struct page *from,
+			unsigned long vaddr, struct vm_area_struct *vma)
+{
+	char *vfrom, *vto;
+
+	if (vma)
+		flush_cache_page(vma, vaddr, page_to_pfn(from));
+
+	vfrom = kmap_local_page(from);
+	vto = kmap_local_page(to);
+	__flush_page_to_ram((unsigned long)vfrom);
+	copy_page(vto, vfrom);
+	__flush_page_to_ram((unsigned long)vfrom);
+	__flush_page_to_ram((unsigned long)vto);
+	kunmap_local(vto);
+	kunmap_local(vfrom);
+}
+
 void sparc_flush_folio_to_ram(struct folio *folio)
 {
 	unsigned long vaddr = (unsigned long)folio_address(folio);
