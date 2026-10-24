@@ -416,6 +416,27 @@ void kmap_flush_tlb(unsigned long addr)
 }
 EXPORT_SYMBOL(kmap_flush_tlb);
 
+static bool hypersparc_kmap_needs_preflush(pte_t pteval)
+{
+	unsigned long pfn = pte_pfn(pteval);
+	unsigned long flags;
+	struct page *page;
+	bool active;
+
+	if (!pfn_valid(pfn))
+		return true;
+	page = pfn_to_page(pfn);
+	if (!PageHighMem(page) || PageReserved(page))
+		return true;
+	if (folio_mapped(page_folio(page)) || test_bit(PG_arch_2, &page->flags.f))
+		return true;
+
+	spin_lock_irqsave(&hypersparc_kmap_lock, flags);
+	active = hypersparc_kmap_alias_active(pfn);
+	spin_unlock_irqrestore(&hypersparc_kmap_lock, flags);
+	return active;
+}
+
 /*
  * Runs on both the map and the scheduler restore path, so the tracking stays
  * correct across a context switch without generic code having to change.
@@ -426,7 +447,8 @@ void sparc32_kmap_local_post_map(unsigned long vaddr, pte_t pteval)
 	 * Nothing has touched the new mapping yet, so flushing other aliases
 	 * of this page here is as good as doing it before the pte was set.
 	 */
-	sparc32_kmap_local_cache_flush(vaddr);
+	if (!is_hypersparc || hypersparc_kmap_needs_preflush(pteval))
+		sparc32_kmap_local_cache_flush(vaddr);
 	if (is_hypersparc)
 		hypersparc_track_kmap(vaddr, pteval);
 	sparc32_kmap_local_tlb_flush(vaddr);
