@@ -29,7 +29,23 @@
 /* declarations for highmem.c */
 extern unsigned long highstart_pfn, highend_pfn;
 
+/* Reconcile a pinned persistent mapping after kmap_lock is released. */
+#define ARCH_HAS_KMAP_FLUSH_TLB
+void kmap_flush_tlb(unsigned long addr);
+
+/* Pin PKMAP aliases, but use fixmap slots so the post-map hook runs. */
+#define ARCH_NEEDS_KMAP_HIGH_GET
+void *kmap_high_get(const struct page *page);
+
+static inline void *arch_kmap_local_high_get(const struct page *page)
+{
+	return NULL;
+}
+
+#define arch_kmap_local_high_get arch_kmap_local_high_get
+
 void sparc32_kmap_local_cache_flush(unsigned long vaddr);
+void sparc32_kmap_local_cache_flush_unmap(unsigned long vaddr);
 void sparc32_kmap_local_tlb_flush(unsigned long vaddr);
 void sparc32_kmap_local_post_map(unsigned long vaddr, pte_t pteval);
 
@@ -61,7 +77,7 @@ extern pte_t *pkmap_page_table;
 
 /* FIXME: Use __flush_*_one(vaddr) instead of flush_*_all() -- Anton */
 #define arch_kmap_local_pre_unmap(vaddr) \
-	sparc32_kmap_local_cache_flush(vaddr)
+	sparc32_kmap_local_cache_flush_unmap(vaddr)
 #define arch_kmap_local_post_map(vaddr, pteval) \
 	sparc32_kmap_local_post_map(vaddr, pteval)
 #define arch_kmap_local_post_unmap(vaddr) \
