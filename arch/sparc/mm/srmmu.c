@@ -1663,10 +1663,18 @@ static bool any_other_mm_cpus(struct mm_struct *mm)
 	return cpumask_any_but(mm_cpumask(mm), smp_processor_id()) < nr_cpu_ids;
 }
 
+/* Dirty lines in a virtually indexed write-back cache outlive the mm_cpumask
+ * bit, so the mask cannot gate a cache flush the way it gates a shootdown.
+ */
+static bool cache_xcall_needed(struct mm_struct *mm)
+{
+	return is_hypersparc || any_other_mm_cpus(mm);
+}
+
 static void smp_flush_cache_mm(struct mm_struct *mm)
 {
 	if (mm->context != NO_CONTEXT) {
-		if (any_other_mm_cpus(mm))
+		if (cache_xcall_needed(mm))
 			xc1(local_ops->cache_mm, (unsigned long)mm);
 		local_ops->cache_mm(mm);
 	}
@@ -1688,7 +1696,7 @@ static void smp_flush_cache_range(struct vm_area_struct *vma,
 	struct mm_struct *mm = vma->vm_mm;
 
 	if (mm->context != NO_CONTEXT) {
-		if (any_other_mm_cpus(mm))
+		if (cache_xcall_needed(mm))
 			xc3(local_ops->cache_range, (unsigned long)vma, start,
 			    end);
 		local_ops->cache_range(vma, start, end);
@@ -1714,7 +1722,7 @@ static void smp_flush_cache_page(struct vm_area_struct *vma, unsigned long page)
 	struct mm_struct *mm = vma->vm_mm;
 
 	if (mm->context != NO_CONTEXT) {
-		if (any_other_mm_cpus(mm))
+		if (cache_xcall_needed(mm))
 			xc2(local_ops->cache_page, (unsigned long)vma, page);
 		local_ops->cache_page(vma, page);
 	}
