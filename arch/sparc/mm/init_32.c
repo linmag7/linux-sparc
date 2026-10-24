@@ -268,6 +268,29 @@ void sparc_flush_page_to_ram(struct page *page)
 }
 EXPORT_SYMBOL(sparc_flush_page_to_ram);
 
+/*
+ * The kernel reads the source page through a kmap alias, which on a
+ * virtually indexed cache lands in a different set than the user mapping
+ * userspace has been dirtying.  Flush that alias first, and flush the
+ * destination through the address actually written rather than
+ * page_address(), which is NULL for a highmem page.
+ */
+void copy_user_highpage(struct page *to, struct page *from,
+			unsigned long vaddr, struct vm_area_struct *vma)
+{
+	char *vfrom, *vto;
+
+	if (vma)
+		flush_cache_page(vma, vaddr, page_to_pfn(from));
+
+	vfrom = kmap_local_page(from);
+	vto = kmap_local_page(to);
+	copy_page(vto, vfrom);
+	__flush_page_to_ram((unsigned long)vto);
+	kunmap_local(vto);
+	kunmap_local(vfrom);
+}
+
 void sparc_flush_folio_to_ram(struct folio *folio)
 {
 	unsigned long vaddr = (unsigned long)folio_address(folio);
