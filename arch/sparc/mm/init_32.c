@@ -133,6 +133,16 @@ void sparc_flush_folio_to_ram(struct folio *folio)
 	unsigned long vaddr = (unsigned long)folio_address(folio);
 	unsigned int i, nr = folio_nr_pages(folio);
 
+	/*
+	 * No kernel address to aim at. Only a user alias can be incoherent
+	 * here; the kmap the kernel used is flushed when it is unmapped.
+	 */
+	if (!vaddr) {
+		if (folio_mapped(folio))
+			flush_cache_all();
+		return;
+	}
+
 	for (i = 0; i < nr; i++)
 		__flush_page_to_ram(vaddr + i * PAGE_SIZE);
 }
