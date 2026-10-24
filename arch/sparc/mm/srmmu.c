@@ -1733,6 +1733,32 @@ static struct sparc32_cachetlb_ops smp_cachetlb_ops __ro_after_init = {
 };
 #endif
 
+static void local_hypersparc_flush_icache_range(unsigned long start,
+					      unsigned long end)
+{
+	start &= ~3UL;
+	for (;;) {
+		__asm__ __volatile__("flush %0" : : "r" (start) : "memory");
+		if (end - start <= 4)
+			break;
+		start += 4;
+	}
+}
+
+void flush_icache_range(unsigned long start, unsigned long end)
+{
+	if (start >= end || !is_hypersparc)
+		return;
+
+	preempt_disable();
+	local_hypersparc_flush_icache_range(start, end);
+#ifdef CONFIG_SMP
+	xc2(local_hypersparc_flush_icache_range, start, end);
+#endif
+	preempt_enable();
+}
+EXPORT_SYMBOL(flush_icache_range);
+
 /* Load up routines and constants for sun4m and sun4d mmu */
 void __init load_mmu(void)
 {
