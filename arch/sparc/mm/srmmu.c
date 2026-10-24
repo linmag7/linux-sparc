@@ -430,9 +430,25 @@ void sparc32_kmap_local_cache_flush_unmap(unsigned long vaddr)
 	flush_cache_all();
 }
 
+#ifdef CONFIG_SMP
+static void hypersparc_flush_kmap_tlb(unsigned long vaddr)
+{
+	vaddr &= PAGE_MASK;
+	__asm__ __volatile__("sta %%g0, [%0] %1\n\t" : :
+			     "r" (vaddr), "i" (ASI_M_FLUSH_PROBE) :
+			     "memory");
+}
+
+#endif
+
 void sparc32_kmap_local_tlb_flush(unsigned long vaddr)
 {
-	/* Remote translating cache operations can populate these entries. */
+#ifdef CONFIG_SMP
+	if (is_hypersparc) {
+		hypersparc_flush_kmap_tlb(vaddr);
+		return;
+	}
+#endif
 	flush_tlb_all();
 }
 
