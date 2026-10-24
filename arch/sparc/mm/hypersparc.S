@@ -44,22 +44,20 @@ hypersparc_flush_combined_all:
 	ld	[%g4 + %lo(vac_cache_size)], %g5
 	sethi	%hi(vac_line_size), %g1
 	ld	[%g1 + %lo(vac_line_size)], %g2
+	add	%g2, %g2, %g4
+	add	%g4, %g2, %g1
+	/* Keep descending indices; reuse the existing scratch registers. */
 1:
-	sub	%g5, %g2, %g5
+	sub	%g5, %g1, %g5
+	sta	%g0, [%g5 + %g4] ASI_M_FLUSH_CTX
+	sta	%g0, [%g5 + %g2] ASI_M_FLUSH_CTX
 	sta	%g0, [%g5] ASI_M_FLUSH_CTX
-	sub	%g5, %g2, %g5
+	sub	%g5, %g1, %g5
+	sta	%g0, [%g5 + %g4] ASI_M_FLUSH_CTX
+	sta	%g0, [%g5 + %g2] ASI_M_FLUSH_CTX
 	sta	%g0, [%g5] ASI_M_FLUSH_CTX
-	sub	%g5, %g2, %g5
-	sta	%g0, [%g5] ASI_M_FLUSH_CTX
-	sub	%g5, %g2, %g5
-	sta	%g0, [%g5] ASI_M_FLUSH_CTX
-	sub	%g5, %g2, %g5
-	sta	%g0, [%g5] ASI_M_FLUSH_CTX
-	sub	%g5, %g2, %g5
-	sta	%g0, [%g5] ASI_M_FLUSH_CTX
-	sub	%g5, %g2, %g5
-	sta	%g0, [%g5] ASI_M_FLUSH_CTX
-	subcc	%g5, %g2, %g5
+	subcc	%g5, %g4, %g5
+	sta	%g0, [%g5 + %g2] ASI_M_FLUSH_CTX
 	bne	1b
 	 sta	%g0, [%g5] ASI_M_FLUSH_CTX
 	retl
