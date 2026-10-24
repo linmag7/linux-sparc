@@ -25,6 +25,7 @@
 #include <linux/pagemap.h>
 #include <linux/gfp.h>
 
+#include <asm/mbus.h>
 #include <asm/sections.h>
 #include <asm/page.h>
 #include <asm/vaddrs.h>
@@ -141,6 +142,17 @@ void sparc_flush_folio_to_ram(struct folio *folio)
 {
 	unsigned long vaddr = (unsigned long)folio_address(folio);
 	unsigned int i, nr = folio_nr_pages(folio);
+
+	/*
+	 * A mapped folio can have a dirty user alias at a different cache
+	 * colour even when a direct or persistent kernel mapping exists.
+	 * Flushing only that kernel address misses the user alias. Use the
+	 * existing all-CPU, all-index operation to cover every colour.
+	 */
+	if (srmmu_modtype == HyperSparc && folio_mapped(folio)) {
+		flush_cache_all();
+		return;
+	}
 
 	/*
 	 * No kernel address to aim at. Only a user alias can be incoherent
