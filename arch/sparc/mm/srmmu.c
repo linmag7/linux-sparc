@@ -1094,6 +1094,20 @@ static void poke_hypersparc(void)
 	clear = srmmu_get_fstatus();
 }
 
+static void hypersparc_flush_cache_page_data(struct vm_area_struct *vma,
+					     unsigned long addr)
+{
+	unsigned long page = addr & PAGE_MASK;
+
+	if (vma->vm_mm->context == NO_CONTEXT)
+		return;
+
+	/* Cover data aliases even when the mapping is executable. */
+	hypersparc_flush_cache_range_index(page, page + PAGE_SIZE);
+	if (vma->vm_flags & VM_EXEC)
+		hypersparc_flush_cache_page(vma, addr);
+}
+
 static void hypersparc_flush_cache_range_data(struct vm_area_struct *vma,
 					      unsigned long start,
 					      unsigned long end)
@@ -1111,7 +1125,7 @@ static void hypersparc_flush_cache_range_data(struct vm_area_struct *vma,
 static const struct sparc32_cachetlb_ops hypersparc_ops = {
 	.cache_all	= hypersparc_flush_cache_all,
 	.cache_mm	= hypersparc_flush_cache_mm,
-	.cache_page	= hypersparc_flush_cache_page,
+	.cache_page	= hypersparc_flush_cache_page_data,
 	.cache_range	= hypersparc_flush_cache_range_data,
 	.tlb_all	= hypersparc_flush_tlb_all,
 	.tlb_mm		= hypersparc_flush_tlb_mm,
