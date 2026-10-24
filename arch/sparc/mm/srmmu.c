@@ -655,7 +655,6 @@ extern void hypersparc_flush_cache_all(void);
 extern void hypersparc_flush_cache_mm(struct mm_struct *mm);
 extern void hypersparc_flush_cache_range(struct vm_area_struct *vma, unsigned long start, unsigned long end);
 extern void hypersparc_flush_cache_page(struct vm_area_struct *vma, unsigned long page);
-extern void hypersparc_flush_page_to_ram(unsigned long page);
 extern void hypersparc_flush_page_for_dma(unsigned long page);
 extern void hypersparc_flush_sig_insns(struct mm_struct *mm, unsigned long insn_addr);
 extern void hypersparc_flush_tlb_all(void);
@@ -1092,6 +1091,13 @@ static void poke_hypersparc(void)
 	hyper_flush_whole_icache();
 	clear = srmmu_get_faddr();
 	clear = srmmu_get_fstatus();
+}
+
+static void hypersparc_flush_page_to_ram(unsigned long page)
+{
+	unsigned long addr = page & PAGE_MASK;
+
+	hypersparc_flush_cache_range_index(addr, addr + PAGE_SIZE);
 }
 
 static void hypersparc_flush_cache_page_data(struct vm_area_struct *vma,

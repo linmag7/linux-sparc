@@ -20,7 +20,6 @@
 	.globl	hypersparc_flush_cache_all, hypersparc_flush_cache_mm
 	.globl	hypersparc_flush_cache_range, hypersparc_flush_cache_page
 	.globl	hypersparc_flush_cache_range_index
-	.globl	hypersparc_flush_page_to_ram
 	.globl	hypersparc_flush_page_for_dma, hypersparc_flush_sig_insns
 	.globl	hypersparc_flush_tlb_all, hypersparc_flush_tlb_mm
 	.globl	hypersparc_flush_tlb_range, hypersparc_flush_tlb_page
@@ -258,42 +257,6 @@ hypersparc_flush_sig_insns:
 	flush	%o1
 	retl
 	 flush	%o1 + 4
-
-	/* HyperSparc is copy-back. */
-hypersparc_flush_page_to_ram:
-	sethi	%hi(vac_line_size), %g1
-	ld	[%g1 + %lo(vac_line_size)], %o4
-	andn	%o0, (PAGE_SIZE - 1), %o0
-	add	%o4, %o4, %o5
-	or	%o0, 0x400, %g7
-	lda	[%g7] ASI_M_FLUSH_PROBE, %g5
-	add	%o4, %o5, %g1
-	orcc	%g5, 0, %g0
-	be	2f
-	 add	%o4, %g1, %g2
-	add	%o4, %g2, %g3
-	sub	%o0, -PAGE_SIZE, %o0
-	add	%o4, %g3, %g4
-	add	%o4, %g4, %g5
-	add	%o4, %g5, %g7
-
-	/* BLAMMO! */
-1:
-	sub	%o0, %g7, %o0
-	sta	%g0, [%o0 + %g0] ASI_M_FLUSH_PAGE
-	sta	%g0, [%o0 + %o4] ASI_M_FLUSH_PAGE
-	sta	%g0, [%o0 + %o5] ASI_M_FLUSH_PAGE
-	sta	%g0, [%o0 + %g1] ASI_M_FLUSH_PAGE
-	sta	%g0, [%o0 + %g2] ASI_M_FLUSH_PAGE
-	sta	%g0, [%o0 + %g3] ASI_M_FLUSH_PAGE
-	andcc	%o0, 0xffc, %g0
-	sta	%g0, [%o0 + %g4] ASI_M_FLUSH_PAGE
-	bne	1b
-	 sta	%g0, [%o0 + %g5] ASI_M_FLUSH_PAGE
-2:
-	mov	SRMMU_FAULT_STATUS, %g1
-	retl
-	 lda	[%g1] ASI_M_MMUREGS, %g0
 
 	/* HyperSparc is IO cache coherent. */
 hypersparc_flush_page_for_dma:
