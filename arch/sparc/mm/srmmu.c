@@ -196,7 +196,7 @@ static void hypersparc_kmap_remote_sync(unsigned long arg)
 {
 	struct hyper_alias_sync *sync = (struct hyper_alias_sync *)arg;
 
-	local_ops->cache_all();
+	hypersparc_flush_combined_all();
 	hypersparc_kmap_sync_wait(sync);
 
 	/*
@@ -257,7 +257,7 @@ static void hypersparc_sync_aliases(unsigned long pfn, unsigned long pkmap)
 	sync.pkmap = pkmap;
 	sync.writer = cpumask_any_but(&sync.mask, smp_processor_id());
 
-	local_ops->cache_all();
+	hypersparc_flush_combined_all();
 	if (sync.writer < nr_cpu_ids) {
 		/*
 		 * Do not touch any mapped data after publishing.  The local
@@ -274,7 +274,7 @@ static void hypersparc_sync_aliases(unsigned long pfn, unsigned long pkmap)
 	}
 	local_ops->tlb_all();
 #else
-	sparc32_cachetlb_ops->cache_all();
+	hypersparc_flush_combined_all();
 	hypersparc_uncache_kmap_aliases(pfn);
 	if (pkmap)
 		hypersparc_uncache_one(pkmap, pfn);
@@ -401,6 +401,13 @@ void sparc32_kmap_local_post_map(unsigned long vaddr, pte_t pteval)
 
 void sparc32_kmap_local_cache_flush(unsigned long vaddr)
 {
+	if (is_hypersparc) {
+#ifdef CONFIG_SMP
+		xc0(hypersparc_flush_combined_all);
+#endif
+		hypersparc_flush_combined_all();
+		return;
+	}
 	flush_cache_all();
 }
 
@@ -412,15 +419,11 @@ void sparc32_kmap_local_cache_flush_unmap(unsigned long vaddr)
 	 * not in this registry, so narrowing belongs with the PKMAP work.
 	 */
 	if (is_hypersparc) {
-#ifdef CONFIG_SMP
 		/* kmap_local pins us to the slot owner; publish before removal. */
-		local_ops->cache_all();
-#else
-		sparc32_cachetlb_ops->cache_all();
-#endif
+		hypersparc_flush_combined_all();
 		hypersparc_unregister_kmap(vaddr);
 #ifdef CONFIG_SMP
-		xc0(local_ops->cache_all);
+		xc0(hypersparc_flush_combined_all);
 #endif
 		return;
 	}
