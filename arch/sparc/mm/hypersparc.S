@@ -60,16 +60,16 @@ hypersparc_flush_cache_mm:
 
 	/* BLAMMO! */
 1:
-	subcc	%o0, %o5, %o0				! hyper_flush_cache_user
-	sta	%g0, [%o0 + %g0] ASI_M_FLUSH_USER
-	sta	%g0, [%o0 + %o1] ASI_M_FLUSH_USER
-	sta	%g0, [%o0 + %g1] ASI_M_FLUSH_USER
-	sta	%g0, [%o0 + %g2] ASI_M_FLUSH_USER
-	sta	%g0, [%o0 + %g3] ASI_M_FLUSH_USER
-	sta	%g0, [%o0 + %g4] ASI_M_FLUSH_USER
-	sta	%g0, [%o0 + %g5] ASI_M_FLUSH_USER
+	subcc	%o0, %o5, %o0				! hyper_flush_cache_ctx
+	sta	%g0, [%o0 + %g0] ASI_M_FLUSH_CTX
+	sta	%g0, [%o0 + %o1] ASI_M_FLUSH_CTX
+	sta	%g0, [%o0 + %g1] ASI_M_FLUSH_CTX
+	sta	%g0, [%o0 + %g2] ASI_M_FLUSH_CTX
+	sta	%g0, [%o0 + %g3] ASI_M_FLUSH_CTX
+	sta	%g0, [%o0 + %g4] ASI_M_FLUSH_CTX
+	sta	%g0, [%o0 + %g5] ASI_M_FLUSH_CTX
 	bne	1b
-	 sta	%g0, [%o0 + %o4] ASI_M_FLUSH_USER
+	 sta	%g0, [%o0 + %o4] ASI_M_FLUSH_CTX
 hypersparc_flush_cache_mm_out:
 	retl
 	 nop
