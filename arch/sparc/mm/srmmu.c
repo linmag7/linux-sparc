@@ -158,6 +158,26 @@ static bool hypersparc_kmap_alias_active(unsigned long pfn)
 	return found;
 }
 
+static bool hypersparc_kmap_other_alias_active(unsigned long pfn,
+					       int this_cpu, int this_slot)
+{
+	int cpu;
+	int i;
+
+	for_each_online_cpu(cpu) {
+		struct hypersparc_kmap_slots *slots;
+
+		slots = per_cpu_ptr(&hypersparc_kmap_slots, cpu);
+		for (i = 0; i < KM_MAX_IDX; i++) {
+			if (cpu == this_cpu && i == this_slot)
+				continue;
+			if (slots->pfn[i] == pfn + 1)
+				return true;
+		}
+	}
+	return false;
+}
+
 /* Forward and reverse of one layout; keep them together. */
 static unsigned long hypersparc_kmap_slot_va(int cpu, int slot)
 {
@@ -464,14 +484,103 @@ void sparc32_kmap_local_cache_flush(unsigned long vaddr)
 	flush_cache_all();
 }
 
+/* Called with hypersparc_kmap_lock held. */
+static bool hypersparc_kmap_unmap_is_private(unsigned long vaddr,
+					     struct page *page,
+					     unsigned long pfn,
+					     int cpu, int slot)
+{
+	struct hypersparc_kmap_slots *slots;
+	pte_t *ptep;
+	pte_t pte;
+
+	slots = per_cpu_ptr(&hypersparc_kmap_slots, cpu);
+	if (slots->pfn[slot] != pfn + 1)
+		return false;
+	ptep = virt_to_kpte(vaddr);
+	if (!ptep)
+		return false;
+	pte = ptep_get(ptep);
+	if (!pte_present(pte) || pte_pfn(pte) != pfn)
+		return false;
+	if (folio_mapped(page_folio(page)) || test_bit(PG_arch_2, &page->flags.f))
+		return false;
+	if (hypersparc_kmap_other_alias_active(pfn, cpu, slot))
+		return false;
+
+	/* A live PKMAP alias must already have made this mapping uncached. */
+	if ((pte_val(pte) & SRMMU_CACHE) && page_address(page))
+		return false;
+	return true;
+}
+
+static bool hypersparc_try_narrow_kmap_unmap(unsigned long vaddr)
+{
+	struct hypersparc_kmap_slots *slots;
+	unsigned long flags;
+	unsigned long pfn;
+	struct page *page;
+	pte_t *ptep;
+	pte_t pte;
+	int slot;
+	int cpu;
+
+	cpu = smp_processor_id();
+	slot = hypersparc_kmap_slot(vaddr, cpu);
+	if (WARN_ON_ONCE(slot < 0 || slot >= KM_MAX_IDX))
+		return false;
+
+	ptep = virt_to_kpte(vaddr);
+	if (!ptep)
+		return false;
+	pte = ptep_get(ptep);
+	if (!pte_present(pte))
+		return false;
+	pfn = pte_pfn(pte);
+	if (!pfn_valid(pfn))
+		return false;
+	page = pfn_to_page(pfn);
+	if (!PageHighMem(page) || PageReserved(page))
+		return false;
+
+	/* Keep the alias registered until every cpu has discarded this page. */
+	spin_lock_irqsave(&hypersparc_kmap_lock, flags);
+	if (!hypersparc_kmap_unmap_is_private(vaddr, page, pfn, cpu, slot)) {
+		spin_unlock_irqrestore(&hypersparc_kmap_lock, flags);
+		return false;
+	}
+#ifdef CONFIG_SMP
+	local_ops->page_to_ram(vaddr);
+#else
+	sparc32_cachetlb_ops->page_to_ram(vaddr);
+#endif
+	spin_unlock_irqrestore(&hypersparc_kmap_lock, flags);
+
+#ifdef CONFIG_SMP
+	/*
+	 * xc1() is synchronous.  Keep the mapping and the registry entry
+	 * live until every cpu has flushed this cache index.
+	 */
+	xc1(local_ops->page_to_ram, vaddr);
+#endif
+
+	spin_lock_irqsave(&hypersparc_kmap_lock, flags);
+	if (!hypersparc_kmap_unmap_is_private(vaddr, page, pfn, cpu, slot)) {
+		spin_unlock_irqrestore(&hypersparc_kmap_lock, flags);
+		return false;
+	}
+	slots = per_cpu_ptr(&hypersparc_kmap_slots, cpu);
+	slots->pfn[slot] = 0;
+	spin_unlock_irqrestore(&hypersparc_kmap_lock, flags);
+	return true;
+}
+
 void sparc32_kmap_local_cache_flush_unmap(unsigned long vaddr)
 {
-	/*
-	 * Whole cache, every cpu.  A page flush would reach only the colour
-	 * being unmapped, and a persistent kmap() alias at another colour is
-	 * not in this registry, so narrowing belongs with the PKMAP work.
-	 */
 	if (is_hypersparc) {
+		if (hypersparc_try_narrow_kmap_unmap(vaddr))
+			return;
+
 		/* kmap_local pins us to the slot owner; publish before removal. */
 		hypersparc_flush_combined_all();
 		hypersparc_unregister_kmap(vaddr);
