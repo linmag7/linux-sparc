@@ -53,7 +53,8 @@ static inline void flush_dcache_page(struct page *page)
 #define flush_dcache_mmap_lock(mapping)		do { } while (0)
 #define flush_dcache_mmap_unlock(mapping)	do { } while (0)
 
-#define flush_cache_vmap(start, end)		flush_cache_all()
+void sparc32_flush_cache_vmap(unsigned long start, unsigned long end);
+#define flush_cache_vmap(start, end)		sparc32_flush_cache_vmap(start, end)
 #define flush_cache_vmap_early(start, end)	do { } while (0)
 #define flush_cache_vunmap(start, end)		flush_cache_all()
 
