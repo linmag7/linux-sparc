@@ -1094,11 +1094,25 @@ static void poke_hypersparc(void)
 	clear = srmmu_get_fstatus();
 }
 
+static void hypersparc_flush_cache_range_data(struct vm_area_struct *vma,
+					      unsigned long start,
+					      unsigned long end)
+{
+	if (start >= end || vma->vm_mm->context == NO_CONTEXT)
+		return;
+
+	/* Writable executable mappings need index-based data maintenance too. */
+	hypersparc_flush_cache_range_index(start, end);
+	/* Retain the existing virtual instruction-cache maintenance. */
+	if (vma->vm_flags & VM_EXEC)
+		hypersparc_flush_cache_range(vma, start, end);
+}
+
 static const struct sparc32_cachetlb_ops hypersparc_ops = {
 	.cache_all	= hypersparc_flush_cache_all,
 	.cache_mm	= hypersparc_flush_cache_mm,
 	.cache_page	= hypersparc_flush_cache_page,
-	.cache_range	= hypersparc_flush_cache_range,
+	.cache_range	= hypersparc_flush_cache_range_data,
 	.tlb_all	= hypersparc_flush_tlb_all,
 	.tlb_mm		= hypersparc_flush_tlb_mm,
 	.tlb_page	= hypersparc_flush_tlb_page,

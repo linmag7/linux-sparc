@@ -126,6 +126,9 @@ static inline void put_ross_icr(unsigned int icreg)
 
 /* HyperSparc specific cache flushing. */
 
+void hypersparc_flush_cache_range_index(unsigned long start,
+					unsigned long end);
+
 /* This is for the on-chip instruction cache. */
 static inline void hyper_flush_whole_icache(void)
 {

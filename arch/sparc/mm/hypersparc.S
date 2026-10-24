@@ -19,6 +19,7 @@
 
 	.globl	hypersparc_flush_cache_all, hypersparc_flush_cache_mm
 	.globl	hypersparc_flush_cache_range, hypersparc_flush_cache_page
+	.globl	hypersparc_flush_cache_range_index
 	.globl	hypersparc_flush_page_to_ram
 	.globl	hypersparc_flush_page_for_dma, hypersparc_flush_sig_insns
 	.globl	hypersparc_flush_tlb_all, hypersparc_flush_tlb_mm
@@ -71,6 +72,43 @@ hypersparc_flush_cache_mm:
 	bne	1b
 	 sta	%g0, [%o0 + %o4] ASI_M_FLUSH_USER
 hypersparc_flush_cache_mm_out:
+	retl
+	 nop
+
+/*
+ * Data-only range flush.  ASI 0x11 writes back and invalidates the external
+ * line at this index without a translation or tag check, so unlike
+ * ASI_M_FLUSH_PAGE it cannot step over a line whose tag names another page.
+ * It can evict unrelated data.  Cover the intersecting lines, capped at one
+ * external-cache traversal. The caller rejects empty ranges and separately
+ * preserves instruction-cache maintenance for executable mappings.
+ */
+hypersparc_flush_cache_range_index:
+	WINDOW_FLUSH(%g4, %g5)
+	sethi	%hi(vac_line_size), %g1
+	ld	[%g1 + %lo(vac_line_size)], %o2
+	sethi	%hi(vac_cache_size), %g1
+	ld	[%g1 + %lo(vac_cache_size)], %o3
+	sub	%o1, %o0, %o1
+	sub	%o2, 1, %g1
+	and	%o0, %g1, %g2
+	andn	%o0, %g1, %o0
+	/* Clamp before rounding, so a large range cannot wrap to zero. */
+	cmp	%o1, %o3
+	bgeu	1f
+	 nop
+	add	%o1, %g2, %o1
+	add	%o1, %g1, %o1
+	andn	%o1, %g1, %o1
+	cmp	%o1, %o3
+	blu	2f
+	 nop
+1:
+	mov	%o3, %o1
+2:
+	subcc	%o1, %o2, %o1
+	bne	2b
+	 sta	%g0, [%o0 + %o1] ASI_M_FLUSH_SEG
 	retl
 	 nop
 
