@@ -965,17 +965,18 @@ static void __init init_vac_layout(void)
 {
 	phandle nd;
 	int cache_lines;
+	bool found_cpu = false;
 	char node_str[128];
 #ifdef CONFIG_SMP
-	int cpu = 0;
 	unsigned long max_size = 0;
 	unsigned long min_line_size = 0x10000000;
 #endif
 
-	nd = prom_getchild(prom_root_node);
-	while ((nd = prom_getsibling(nd)) != 0) {
+	for (nd = prom_getchild(prom_root_node); nd != 0;
+	     nd = prom_getsibling(nd)) {
 		prom_getstring(nd, "device_type", node_str, sizeof(node_str));
 		if (!strcmp(node_str, "cpu")) {
+			found_cpu = true;
 			vac_line_size = prom_getint(nd, "cache-line-size");
 			if (vac_line_size == -1) {
 				prom_printf("can't determine cache-line-size, halting.\n");
@@ -993,16 +994,12 @@ static void __init init_vac_layout(void)
 				max_size = vac_cache_size;
 			if (vac_line_size < min_line_size)
 				min_line_size = vac_line_size;
-			//FIXME: cpus not contiguous!!
-			cpu++;
-			if (cpu >= nr_cpu_ids || !cpu_online(cpu))
-				break;
 #else
 			break;
 #endif
 		}
 	}
-	if (nd == 0) {
+	if (!found_cpu) {
 		prom_printf("No CPU nodes found, halting.\n");
 		prom_halt();
 	}
