@@ -143,7 +143,11 @@ void copy_user_highpage(struct page *to, struct page *from,
 	    !vma || (vma->vm_flags & VM_EXEC))
 		__flush_page_to_ram((unsigned long)vto);
 	kunmap_local(vto);
-	kunmap_local(vfrom);
+	/* Only this mapping was read-only; the destination keeps its policy. */
+	if (srmmu_modtype == HyperSparc && PageHighMem(from) && from != to)
+		sparc32_kunmap_local_copy_source(vfrom);
+	else
+		kunmap_local(vfrom);
 }
 
 void sparc_flush_folio_to_ram(struct folio *folio)

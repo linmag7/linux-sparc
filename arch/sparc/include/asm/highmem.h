@@ -43,6 +43,7 @@ static inline void *arch_kmap_local_high_get(const struct page *page)
 
 void sparc32_kmap_local_cache_flush(unsigned long vaddr);
 void sparc32_kmap_local_cache_flush_unmap(unsigned long vaddr);
+void sparc32_kunmap_local_copy_source(const void *vaddr);
 void sparc32_kmap_local_tlb_flush(unsigned long vaddr);
 void sparc32_kmap_local_post_map(unsigned long vaddr, pte_t pteval);
 
