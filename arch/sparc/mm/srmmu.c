@@ -134,6 +134,28 @@ struct hypersparc_kmap_slots {
 static DEFINE_PER_CPU(struct hypersparc_kmap_slots, hypersparc_kmap_slots);
 static DEFINE_SPINLOCK(hypersparc_kmap_lock);
 
+/* One final-unmap hint, consumed before generic code can reuse the slot. */
+static DEFINE_PER_CPU(unsigned long, hypersparc_copy_source_unmap);
+
+/*
+ * copy_user_highpage() alone promises no stores through this mapping, and
+ * has already unmapped a distinct destination. Entry and scheduler hooks
+ * retain their ordinary policy. Pin this short hint/unmap sequence to the
+ * current CPU; save/restore permits a nested interrupt to do its own copy.
+ */
+void sparc32_kunmap_local_copy_source(const void *vaddr)
+{
+	unsigned long saved;
+
+	preempt_disable();
+	saved = this_cpu_read(hypersparc_copy_source_unmap);
+	this_cpu_write(hypersparc_copy_source_unmap,
+		       (unsigned long)vaddr & PAGE_MASK);
+	kunmap_local(vaddr);
+	this_cpu_write(hypersparc_copy_source_unmap, saved);
+	preempt_enable();
+}
+
 static int hypersparc_kmap_slot(unsigned long vaddr, int cpu)
 {
 	int idx = (FIXADDR_TOP - vaddr) >> PAGE_SHIFT;
@@ -487,10 +509,11 @@ void sparc32_kmap_local_cache_flush(unsigned long vaddr)
 }
 
 /* Called with hypersparc_kmap_lock held. */
-static bool hypersparc_kmap_unmap_is_private(unsigned long vaddr,
+static bool hypersparc_kmap_unmap_can_narrow(unsigned long vaddr,
 					     struct page *page,
 					     unsigned long pfn,
-					     int cpu, int slot)
+					     int cpu, int slot,
+					     bool copy_source)
 {
 	struct hypersparc_kmap_slots *slots;
 	pte_t *ptep;
@@ -505,18 +528,25 @@ static bool hypersparc_kmap_unmap_is_private(unsigned long vaddr,
 	pte = ptep_get(ptep);
 	if (!pte_present(pte) || pte_pfn(pte) != pfn)
 		return false;
-	if (folio_mapped(page_folio(page)) || test_bit(PG_arch_2, &page->flags.f))
+	if ((!copy_source && folio_mapped(page_folio(page))) ||
+	    test_bit(PG_arch_2, &page->flags.f))
 		return false;
 	if (hypersparc_kmap_other_alias_active(pfn, cpu, slot))
 		return false;
 
-	/* A live PKMAP alias must already have made this mapping uncached. */
-	if ((pte_val(pte) & SRMMU_CACHE) && page_address(page))
+	/* An uncached source may have participated in a conflicting alias. */
+	if (copy_source && !(pte_val(pte) & SRMMU_CACHE))
+		return false;
+
+	/* A copy source with a persistent alias needs the whole-cache path. */
+	if ((copy_source || (pte_val(pte) & SRMMU_CACHE)) &&
+	    page_address(page))
 		return false;
 	return true;
 }
 
-static bool hypersparc_try_narrow_kmap_unmap(unsigned long vaddr)
+static bool hypersparc_try_narrow_kmap_unmap(unsigned long vaddr,
+					    bool copy_source)
 {
 	struct hypersparc_kmap_slots *slots;
 	unsigned long flags;
@@ -547,7 +577,8 @@ static bool hypersparc_try_narrow_kmap_unmap(unsigned long vaddr)
 
 	/* Keep the alias registered until every cpu has discarded this page. */
 	spin_lock_irqsave(&hypersparc_kmap_lock, flags);
-	if (!hypersparc_kmap_unmap_is_private(vaddr, page, pfn, cpu, slot)) {
+	if (!hypersparc_kmap_unmap_can_narrow(vaddr, page, pfn, cpu, slot,
+					      copy_source)) {
 		spin_unlock_irqrestore(&hypersparc_kmap_lock, flags);
 		return false;
 	}
@@ -567,7 +598,8 @@ static bool hypersparc_try_narrow_kmap_unmap(unsigned long vaddr)
 #endif
 
 	spin_lock_irqsave(&hypersparc_kmap_lock, flags);
-	if (!hypersparc_kmap_unmap_is_private(vaddr, page, pfn, cpu, slot)) {
+	if (!hypersparc_kmap_unmap_can_narrow(vaddr, page, pfn, cpu, slot,
+					      copy_source)) {
 		spin_unlock_irqrestore(&hypersparc_kmap_lock, flags);
 		return false;
 	}
@@ -580,7 +612,13 @@ static bool hypersparc_try_narrow_kmap_unmap(unsigned long vaddr)
 void sparc32_kmap_local_cache_flush_unmap(unsigned long vaddr)
 {
 	if (is_hypersparc) {
-		if (hypersparc_try_narrow_kmap_unmap(vaddr))
+		bool copy_source;
+
+		copy_source = this_cpu_read(hypersparc_copy_source_unmap) == vaddr;
+		if (copy_source)
+			/* Consume before generic code can reuse the slot. */
+			this_cpu_write(hypersparc_copy_source_unmap, 0);
+		if (hypersparc_try_narrow_kmap_unmap(vaddr, copy_source))
 			return;
 
 		/* kmap_local pins us to the slot owner; publish before removal. */
