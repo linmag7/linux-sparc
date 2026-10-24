@@ -17,7 +17,8 @@
 	.text
 	.align	4
 
-	.globl	hypersparc_flush_cache_all, hypersparc_flush_cache_mm
+	.globl	hypersparc_flush_cache_all, hypersparc_flush_combined_all
+	.globl	hypersparc_flush_cache_mm
 	.globl	hypersparc_flush_cache_range, hypersparc_flush_cache_page
 	.globl	hypersparc_flush_cache_range_index
 	.globl	hypersparc_flush_page_for_dma, hypersparc_flush_sig_insns
@@ -36,6 +37,19 @@ hypersparc_flush_cache_all:
 	 sta	%g0, [%g5] ASI_M_FLUSH_CTX
 	retl
 	 sta	%g0, [%g0] ASI_M_FLUSH_IWHOLE	! hyper_flush_whole_icache
+
+hypersparc_flush_combined_all:
+	WINDOW_FLUSH(%g4, %g5)
+	sethi	%hi(vac_cache_size), %g4
+	ld	[%g4 + %lo(vac_cache_size)], %g5
+	sethi	%hi(vac_line_size), %g1
+	ld	[%g1 + %lo(vac_line_size)], %g2
+1:
+	subcc	%g5, %g2, %g5
+	bne	1b
+	 sta	%g0, [%g5] ASI_M_FLUSH_CTX
+	retl
+	 sta	%g0, [%g0] ASI_M_FLUSH_IWHOLE
 
 	/* We expand the window flush to get maximum performance. */
 hypersparc_flush_cache_mm:
