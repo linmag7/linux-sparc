@@ -260,6 +260,17 @@ void __init arch_mm_preinit(void)
 	taint_real_pages();
 }
 
+/*
+ * Called after generic code pins an anon page it will reach through a kernel
+ * mapping; the user alias may hold dirty lines that mapping cannot see.
+ */
+void flush_anon_page(struct vm_area_struct *vma, struct page *page,
+		     unsigned long vaddr)
+{
+	if (PageAnon(page))
+		flush_cache_page(vma, vaddr, page_to_pfn(page));
+}
+
 void sparc_flush_page_to_ram(struct page *page)
 {
 	unsigned long vaddr = (unsigned long)page_address(page);
