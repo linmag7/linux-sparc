@@ -33,7 +33,12 @@ void sparc32_kmap_local_cache_flush(unsigned long vaddr);
 void sparc32_kmap_local_tlb_flush(unsigned long vaddr);
 void sparc32_kmap_local_post_map(unsigned long vaddr, pte_t pteval);
 
-#define kmap_prot __pgprot(SRMMU_ET_PTE | SRMMU_PRIV | SRMMU_CACHE)
+/*
+ * Kernel kmap mappings do not need hardware dirty/accessed tracking.
+ * Match PAGE_KERNEL and avoid M/R updates during translated accesses.
+ */
+#define kmap_prot __pgprot(SRMMU_ET_PTE | SRMMU_PRIV | SRMMU_CACHE | \
+			   SRMMU_DIRTY | SRMMU_REF)
 extern pte_t *pkmap_page_table;
 
 /*
