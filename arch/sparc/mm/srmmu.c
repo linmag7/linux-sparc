@@ -90,6 +90,27 @@ static int is_hypersparc;
 
 static int srmmu_cache_pagetables;
 
+void sparc32_kmap_local_cache_flush(unsigned long vaddr)
+{
+	flush_cache_all();
+}
+
+/*
+ * Nothing has touched the new mapping yet, so flushing other aliases of this
+ * page here is as good as doing it before the pte was set.
+ */
+void sparc32_kmap_local_post_map(unsigned long vaddr, pte_t pteval)
+{
+	sparc32_kmap_local_cache_flush(vaddr);
+	sparc32_kmap_local_tlb_flush(vaddr);
+}
+
+void sparc32_kmap_local_tlb_flush(unsigned long vaddr)
+{
+	/* Remote translating cache operations can populate these entries. */
+	flush_tlb_all();
+}
+
 /* these will be initialized in srmmu_nocache_calcsize() */
 static unsigned long srmmu_nocache_size;
 static unsigned long srmmu_nocache_end;
