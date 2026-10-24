@@ -298,7 +298,15 @@ void copy_user_highpage(struct page *to, struct page *from,
 	vfrom = kmap_local_page(from);
 	vto = kmap_local_page(to);
 	copy_page(vto, vfrom);
-	__flush_page_to_ram((unsigned long)vto);
+	/*
+	 * HyperSPARC highmem mappings always use a local fixmap slot. Both
+	 * unmap paths publish its data before returning, so do not publish
+	 * twice. Keep the explicit operation for executable/unknown users
+	 * and for lowmem, where kunmap_local() can be a no-op.
+	 */
+	if (srmmu_modtype != HyperSparc || !PageHighMem(to) ||
+	    !vma || (vma->vm_flags & VM_EXEC))
+		__flush_page_to_ram((unsigned long)vto);
 	kunmap_local(vto);
 	kunmap_local(vfrom);
 }
