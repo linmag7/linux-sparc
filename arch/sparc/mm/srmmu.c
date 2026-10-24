@@ -468,6 +468,18 @@ static void __init sparc_context_init(int numctx)
 		add_to_free_ctxlist(ctx_list_pool + ctx);
 }
 
+/* Order CPU enrollment before accesses through the new context. */
+static inline void sparc32_mm_context_barrier(void)
+{
+#ifdef CONFIG_SMP
+	unsigned char scratch = 0;
+
+	/* STBAR orders prior stores; LDSTUB blocks subsequent loads. */
+	asm volatile("stbar\n\tldstub %0, %%g0"
+		     : "+m" (scratch) : : "memory");
+#endif
+}
+
 void switch_mm(struct mm_struct *old_mm, struct mm_struct *mm,
 	       struct task_struct *tsk)
 {
@@ -479,6 +491,10 @@ void switch_mm(struct mm_struct *old_mm, struct mm_struct *mm,
 		spin_unlock_irqrestore(&srmmu_context_spinlock, flags);
 		srmmu_ctxd_set(&srmmu_context_table[mm->context], mm->pgd);
 	}
+
+	/* kthread_use_mm() can enter an mm without a task switch. */
+	cpumask_set_cpu(smp_processor_id(), mm_cpumask(mm));
+	sparc32_mm_context_barrier();
 
 	if (sparc_cpu_model == sparc_leon)
 		leon_switch_mm();
