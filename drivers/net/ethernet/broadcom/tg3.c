@@ -37,6 +37,7 @@
 #include <linux/pci.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
+#include <linux/of_net.h>
 #include <linux/skbuff.h>
 #include <linux/ethtool.h>
 #include <linux/mdio.h>
@@ -236,6 +237,7 @@ MODULE_PARM_DESC(tg3_debug, "Tigon3 bitmapped debugging message enable value");
 
 #define TG3_DRV_DATA_FLAG_10_100_ONLY	0x0001
 #define TG3_DRV_DATA_FLAG_5705_10_100	0x0002
+#define TG3_DRV_DATA_FLAG_LOCAL_MAC	0x0004
 
 static const struct pci_device_id tg3_pci_tbl[] = {
 	{PCI_DEVICE(PCI_VENDOR_ID_BROADCOM, PCI_DEVICE_ID_TIGON3_5700)},
@@ -352,7 +354,10 @@ static const struct pci_device_id tg3_pci_tbl[] = {
 	{PCI_DEVICE(PCI_VENDOR_ID_ALTIMA, PCI_DEVICE_ID_ALTIMA_AC1003)},
 	{PCI_DEVICE(PCI_VENDOR_ID_ALTIMA, PCI_DEVICE_ID_ALTIMA_AC9100)},
 	{PCI_DEVICE(PCI_VENDOR_ID_APPLE, PCI_DEVICE_ID_APPLE_TIGON3)},
+	{PCI_DEVICE(0x10cf, 0x11a1), /* Fujitsu add-in BCM5703C */
+	 .driver_data = TG3_DRV_DATA_FLAG_LOCAL_MAC},
 	{PCI_DEVICE(0x10cf, 0x11a2)}, /* Fujitsu 1000base-SX with BCM5703SKHB */
+	{PCI_DEVICE(0x10cf, 0x11cc)}, /* Fujitsu onboard BCM5703C */
 	{}
 };
 
@@ -17036,13 +17041,19 @@ static int tg3_is_default_mac_address(u8 *addr)
 	return ether_addr_equal(default_mac_address, addr);
 }
 
-static int tg3_get_device_address(struct tg3 *tp, u8 *addr)
+static int tg3_get_device_address(struct tg3 *tp, u8 *addr,
+				  const struct pci_device_id *ent)
 {
 	u32 hi, lo, mac_offset;
 	int addr_ok = 0;
 	int err;
 
-	if (!eth_platform_get_mac_address(&tp->pdev->dev, addr))
+	/* An empty OF address on a Fujitsu add-in card must not select the host MAC. */
+	if (ent->driver_data & TG3_DRV_DATA_FLAG_LOCAL_MAC)
+		err = of_get_mac_address(tp->pdev->dev.of_node, addr);
+	else
+		err = eth_platform_get_mac_address(&tp->pdev->dev, addr);
+	if (!err)
 		return 0;
 
 	if (tg3_flag(tp, IS_SSB_CORE)) {
@@ -17913,7 +17924,7 @@ static int tg3_init_one(struct pci_dev *pdev,
 		tp->rx_pending = 63;
 	}
 
-	err = tg3_get_device_address(tp, addr);
+	err = tg3_get_device_address(tp, addr, ent);
 	if (err) {
 		dev_err(&pdev->dev,
 			"Could not obtain valid ethernet address, aborting\n");
