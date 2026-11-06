@@ -41,6 +41,6 @@ void prom_console_write_buf(const char *buf, int len)
 		if (n < 0)
 			continue;
 		len -= n;
-		buf += len;
+		buf += n;
 	}
 }
