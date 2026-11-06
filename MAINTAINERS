@@ -25772,6 +25772,7 @@ F:	drivers/tty/serial/sunzilog.c
 F:	drivers/tty/serial/sunzilog.h
 F:	drivers/tty/vcc.c
 F:	include/linux/sunserialcore.h
+F:	include/linux/sunsu_prom.h
 
 SPARSE CHECKER
 M:	Chris Li <sparse@chrisli.org>

@@ -18,7 +18,6 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/panic.h>
 #include <linux/spinlock.h>
 #include <linux/errno.h>
 #include <linux/tty.h>
@@ -39,6 +38,7 @@
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 
 #include <linux/io.h>
@@ -47,6 +47,9 @@
 
 #include <linux/serial_core.h>
 #include <linux/sunserialcore.h>
+#include <linux/sunsu_prom.h>
+#include <linux/iopoll.h>
+#include <linux/panic.h>
 
 /* We are on a NS PC87303 clocked with 24.0 MHz, which results
  * in a UART clock of 1.8462 MHz.
@@ -88,8 +91,10 @@ struct uart_sunsu_port {
 	unsigned char		ier;
 	unsigned short		rev;
 	unsigned char		lcr;
+	unsigned char		fcr;
 	unsigned int		lsr_saved_flags;
 	unsigned int		cflag;
+	bool			prom_owned;
 
 	/* Probing information.  */
 	enum su_type		su_type;
@@ -149,6 +154,12 @@ static void serial_out(struct uart_sunsu_port *up, int offset, int value)
 	default:
 		outb(value, up->port.iobase + offset);
 	}
+}
+
+static void sunsu_write_fcr(struct uart_sunsu_port *up, unsigned int value)
+{
+	up->fcr = value & ~(UART_FCR_CLEAR_RCVR | UART_FCR_CLEAR_XMIT);
+	serial_out(up, UART_FCR, value);
 }
 
 /*
@@ -625,10 +636,10 @@ static int sunsu_startup(struct uart_port *port)
 	 * (they will be reenabled in set_termios())
 	 */
 	if (uart_config[up->port.type].flags & UART_CLEAR_FIFO) {
-		serial_out(up, UART_FCR, UART_FCR_ENABLE_FIFO);
-		serial_out(up, UART_FCR, UART_FCR_ENABLE_FIFO |
+		sunsu_write_fcr(up, UART_FCR_ENABLE_FIFO);
+		sunsu_write_fcr(up, UART_FCR_ENABLE_FIFO |
 				UART_FCR_CLEAR_RCVR | UART_FCR_CLEAR_XMIT);
-		serial_out(up, UART_FCR, 0);
+		sunsu_write_fcr(up, 0);
 	}
 
 	/*
@@ -731,10 +742,10 @@ static void sunsu_shutdown(struct uart_port *port)
 	 * Disable break condition and FIFOs
 	 */
 	serial_out(up, UART_LCR, serial_in(up, UART_LCR) & ~UART_LCR_SBC);
-	serial_out(up, UART_FCR, UART_FCR_ENABLE_FIFO |
+	sunsu_write_fcr(up, UART_FCR_ENABLE_FIFO |
 				  UART_FCR_CLEAR_RCVR |
 				  UART_FCR_CLEAR_XMIT);
-	serial_out(up, UART_FCR, 0);
+	sunsu_write_fcr(up, 0);
 
 #ifdef CONFIG_SERIAL_8250_RSA
 	/*
@@ -863,15 +874,15 @@ sunsu_change_speed(struct uart_port *port, unsigned int cflag,
 	serial_out(up, UART_DLL, quot & 0xff);		/* LS of divisor */
 	serial_out(up, UART_DLM, quot >> 8);		/* MS of divisor */
 	if (up->port.type == PORT_16750)
-		serial_out(up, UART_FCR, fcr);		/* set fcr */
+		sunsu_write_fcr(up, fcr);		/* set fcr */
 	serial_out(up, UART_LCR, cval);		/* reset DLAB */
 	up->lcr = cval;					/* Save LCR */
 	if (up->port.type != PORT_16750) {
 		if (fcr & UART_FCR_ENABLE_FIFO) {
 			/* emulated UARTs (Lucent Venus 167x) need two steps */
-			serial_out(up, UART_FCR, UART_FCR_ENABLE_FIFO);
+			sunsu_write_fcr(up, UART_FCR_ENABLE_FIFO);
 		}
-		serial_out(up, UART_FCR, fcr);		/* set fcr */
+		sunsu_write_fcr(up, fcr);		/* set fcr */
 	}
 
 	up->cflag = cflag;
@@ -1073,7 +1084,7 @@ static void sunsu_autoconfig(struct uart_sunsu_port *up)
 	serial_out(up, UART_LCR, 0xBF);	/* set up for StarTech test */
 	serial_out(up, UART_EFR, 0);		/* EFR is the same as FCR */
 	serial_out(up, UART_LCR, 0);
-	serial_out(up, UART_FCR, UART_FCR_ENABLE_FIFO);
+	sunsu_write_fcr(up, UART_FCR_ENABLE_FIFO);
 	scratch = serial_in(up, UART_IIR) >> 6;
 	switch (scratch) {
 		case 0:
@@ -1103,8 +1114,8 @@ static void sunsu_autoconfig(struct uart_sunsu_port *up)
 	if (up->port.type == PORT_16550A) {
 		/* Check for TI 16750 */
 		serial_out(up, UART_LCR, save_lcr | UART_LCR_DLAB);
-		serial_out(up, UART_FCR,
-			    UART_FCR_ENABLE_FIFO | UART_FCR7_64BYTE);
+		sunsu_write_fcr(up,
+				UART_FCR_ENABLE_FIFO | UART_FCR7_64BYTE);
 		scratch = serial_in(up, UART_IIR) >> 5;
 		if (scratch == 7) {
 			/*
@@ -1113,15 +1124,15 @@ static void sunsu_autoconfig(struct uart_sunsu_port *up)
 			 * mode if the UART_FCR7_64BYTE bit was set
 			 * while UART_LCR_DLAB was latched.
 			 */
-			serial_out(up, UART_FCR, UART_FCR_ENABLE_FIFO);
+			sunsu_write_fcr(up, UART_FCR_ENABLE_FIFO);
 			serial_out(up, UART_LCR, 0);
-			serial_out(up, UART_FCR,
-				    UART_FCR_ENABLE_FIFO | UART_FCR7_64BYTE);
+			sunsu_write_fcr(up,
+					UART_FCR_ENABLE_FIFO | UART_FCR7_64BYTE);
 			scratch = serial_in(up, UART_IIR) >> 5;
 			if (scratch == 6)
 				up->port.type = PORT_16750;
 		}
-		serial_out(up, UART_FCR, UART_FCR_ENABLE_FIFO);
+		sunsu_write_fcr(up, UART_FCR_ENABLE_FIFO);
 	}
 	serial_out(up, UART_LCR, save_lcr);
 	if (up->port.type == PORT_16450) {
@@ -1150,10 +1161,10 @@ static void sunsu_autoconfig(struct uart_sunsu_port *up)
 		serial_out(up, UART_RSA_FRR, 0);
 #endif
 	serial_out(up, UART_MCR, save_mcr);
-	serial_out(up, UART_FCR, (UART_FCR_ENABLE_FIFO |
+	sunsu_write_fcr(up, (UART_FCR_ENABLE_FIFO |
 				     UART_FCR_CLEAR_RCVR |
 				     UART_FCR_CLEAR_XMIT));
-	serial_out(up, UART_FCR, 0);
+	sunsu_write_fcr(up, 0);
 	(void)serial_in(up, UART_RX);
 	serial_out(up, UART_IER, 0);
 
@@ -1287,6 +1298,12 @@ static void sunsu_console_write(struct console *co, const char *s,
 	/* A stopped owner may have left DLAB set; do not access an unowned UART. */
 	if (panic && !locked)
 		return;
+	/* Firmware owns the registers even while the native port lock is free. */
+	if (READ_ONCE(up->prom_owned)) {
+		if (locked)
+			uart_port_unlock_irqrestore(&up->port, flags);
+		return;
+	}
 
 	/*
 	 *	First save the UER then disable the interrupts
@@ -1485,6 +1502,158 @@ out_unmap:
 	kfree(up);
 	return err;
 }
+
+#if defined(CONFIG_SPARC64) && defined(CONFIG_SERIAL_SUNSU_CONSOLE)
+struct sunsu_prom_handoff {
+	struct uart_sunsu_port *up;
+	u8 lcr, mcr, ier, dll, dlm, fcr;
+	bool active;
+};
+
+/* The caller has captured other CPUs and disabled local interrupts. */
+int sunsu_prom_begin(struct sunsu_prom_handoff *state)
+{
+	struct uart_sunsu_port *up = state->up;
+	unsigned long flags;
+	u8 status;
+	int ret = -EBUSY;
+
+	if (!irqs_disabled() || state->active)
+		return -EINVAL;
+	if (!uart_port_trylock_irqsave(&up->port, &flags))
+		return -EBUSY;
+	if (up->prom_owned)
+		goto unlock;
+	state->lcr = serial_in(up, UART_LCR);
+	if ((state->lcr & (UART_LCR_DLAB | UART_LCR_SBC)) ||
+	    state->lcr != up->lcr || !(up->cflag & CLOCAL) ||
+	    up->ier & UART_IER_MSI || uart_cons_flow_enabled(&up->port) ||
+	    up->port.x_char || !kfifo_is_empty(&up->port.state->port.xmit_fifo))
+		goto unlock;
+	status = sunsu_read_lsr(up);
+	if (!uart_lsr_tx_empty(status) ||
+	    (status & (UART_LSR_DR | UART_LSR_BRK_ERROR_BITS)))
+		goto unlock;
+	state->ier = serial_in(up, UART_IER);
+	if (state->ier != up->ier)
+		goto unlock;
+	state->mcr = serial_in(up, UART_MCR);
+	state->fcr = up->fcr;
+	serial_out(up, UART_LCR, state->lcr | UART_LCR_DLAB);
+	state->dll = serial_in(up, UART_DLL);
+	state->dlm = serial_in(up, UART_DLM);
+	serial_out(up, UART_LCR, state->lcr);
+	if (!(state->dll | state->dlm) ||
+	    ((state->dlm << 8) | state->dll) > SU_BASE_BAUD / 9600)
+		goto unlock;
+	/* Do not carry the native port lock into firmware or CPU capture. */
+	state->active = true;
+	WRITE_ONCE(up->prom_owned, true);
+	serial_out(up, UART_IER, 0);
+	ret = serial_in(up, UART_IER) ? -EIO : 0;
+unlock:
+	uart_port_unlock_irqrestore(&up->port, flags);
+	return ret;
+}
+
+/* Restore before releasing captured CPUs, including after a refused CIF. */
+int sunsu_prom_end(struct sunsu_prom_handoff *state)
+{
+	struct uart_sunsu_port *up = state->up;
+	unsigned long flags;
+	u8 dll, dlm, status;
+	int ret = -EIO;
+
+	if (!state->active)
+		return 0;
+	if (!irqs_disabled() || !uart_port_trylock_irqsave(&up->port, &flags))
+		return -EIO;
+	if (!up->prom_owned)
+		goto unlock;
+	if (read_poll_timeout_atomic(sunsu_read_lsr, status,
+				     uart_lsr_tx_empty(status), 1, 100000, false, up))
+		goto unlock;
+	serial_out(up, UART_LCR, state->lcr);
+	serial_out(up, UART_IER, 0);
+	serial_out(up, UART_LCR, state->lcr | UART_LCR_DLAB);
+	serial_out(up, UART_DLL, state->dll);
+	serial_out(up, UART_DLM, state->dlm);
+	dll = serial_in(up, UART_DLL);
+	dlm = serial_in(up, UART_DLM);
+	serial_out(up, UART_LCR, state->lcr);
+	serial_out(up, UART_MCR, state->mcr);
+	/* A FIFO-mode change would discard input: contain it instead. */
+	if ((serial_in(up, UART_IIR) & UART_IIR_FIFO_ENABLED) !=
+	    ((state->fcr & UART_FCR_ENABLE_FIFO) ? UART_IIR_FIFO_ENABLED : 0))
+		goto unlock;
+	if (state->fcr & UART_FCR_ENABLE_FIFO)
+		sunsu_write_fcr(up, state->fcr);
+	if (dll != state->dll || dlm != state->dlm ||
+	    serial_in(up, UART_LCR) != state->lcr ||
+	    serial_in(up, UART_MCR) != state->mcr)
+		goto unlock;
+	sunsu_read_lsr(up);
+	serial_out(up, UART_IER, state->ier);
+	if (serial_in(up, UART_IER) != state->ier) {
+		serial_out(up, UART_IER, 0);
+		goto unlock;
+	}
+	WRITE_ONCE(up->prom_owned, false);
+	state->active = false;
+	ret = 0;
+unlock:
+	uart_port_unlock_irqrestore(&up->port, flags);
+	return ret;
+}
+
+int sunsu_prom_handoff(struct device_node *input, struct device_node *output,
+		       sunsu_prom_call_t call, void *arg)
+{
+	struct sunsu_prom_handoff state = {};
+	struct platform_device *op;
+	struct uart_sunsu_port *up;
+	int ret = -EBUSY;
+
+	/* The caller must be sleepable; not all held locks are tracked here. */
+	if (!in_task() || preempt_count() || softirq_count() || irqs_disabled() ||
+	    oops_in_progress || panic_in_progress() || !input || input != output)
+		return -EOPNOTSUPP;
+	might_sleep();
+	op = of_find_device_by_node(output);
+	if (!op)
+		return -ENODEV;
+	if (!device_trylock(&op->dev))
+		goto put;
+	up = platform_get_drvdata(op);
+	if (!op->dev.driver || strcmp(op->dev.driver->name, "su") || !up ||
+	    up->port.dev != &op->dev || !up->port.membase ||
+	    up->su_type != SU_PORT_PORT || up->port.type != PORT_16550A ||
+	    !up->port.state || !up->port.cons ||
+	    up->port.line != up->port.cons->index) {
+		ret = -ENODEV;
+		goto unlock_device;
+	}
+	if (!mutex_trylock(&up->port.state->port.mutex))
+		goto unlock_device;
+	if (!console_trylock())
+		goto unlock_tty;
+	if (!uart_console_registered(&up->port)) {
+		ret = -ENODEV;
+		goto unlock_console;
+	}
+	state.up = up;
+	ret = call(&state, arg);
+unlock_console:
+	console_unlock();
+unlock_tty:
+	mutex_unlock(&up->port.state->port.mutex);
+unlock_device:
+	device_unlock(&op->dev);
+put:
+	put_device(&op->dev);
+	return ret;
+}
+#endif
 
 static void su_remove(struct platform_device *op)
 {
