@@ -1759,8 +1759,8 @@ static unsigned long __ref kernel_map_range(unsigned long pstart,
 	unsigned long alloc_bytes = 0UL;
 
 	if ((vstart & ~PAGE_MASK) || (vend & ~PAGE_MASK)) {
-		prom_printf("kernel_map: Unaligned physmem[%lx:%lx]\n",
-			    vstart, vend);
+		pr_emerg("kernel_map: Unaligned physmem[%lx:%lx]\n",
+			 vstart, vend);
 		prom_halt();
 	}
 

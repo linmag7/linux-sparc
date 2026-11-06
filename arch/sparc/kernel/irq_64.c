@@ -630,7 +630,7 @@ unsigned int build_irq(int inofixup, unsigned long iclr, unsigned long imap)
 
 	handler_data = kzalloc_obj(struct irq_handler_data, GFP_ATOMIC);
 	if (unlikely(!handler_data)) {
-		prom_printf("IRQ: kzalloc(irq_handler_data) failed.\n");
+		pr_emerg("IRQ: kzalloc(irq_handler_data) failed.\n");
 		prom_halt();
 	}
 	irq_set_handler_data(irq, handler_data);

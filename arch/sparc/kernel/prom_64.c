@@ -449,7 +449,7 @@ static void *of_iterate_over_cpus(void *(*func)(struct device_node *, int, int),
 			cpuid = of_getintprop_default(dp, this_mid_prop, -1);
 		}
 		if (cpuid < 0) {
-			prom_printf("OF: Serious problem, cpu lacks "
+			pr_emerg("OF: Serious problem, cpu lacks "
 				    "%s property", this_mid_prop);
 			prom_halt();
 		}
