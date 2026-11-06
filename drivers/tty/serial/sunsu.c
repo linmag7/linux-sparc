@@ -18,6 +18,7 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/panic.h>
 #include <linux/spinlock.h>
 #include <linux/errno.h>
 #include <linux/tty.h>
@@ -1276,12 +1277,16 @@ static void sunsu_console_write(struct console *co, const char *s,
 	struct uart_sunsu_port *up = &sunsu_ports[co->index];
 	unsigned long flags;
 	unsigned int ier;
+	bool panic = panic_in_progress();
 	int locked = 1;
 
-	if (up->port.sysrq || oops_in_progress)
+	if (up->port.sysrq || oops_in_progress || panic)
 		locked = uart_port_trylock_irqsave(&up->port, &flags);
 	else
 		uart_port_lock_irqsave(&up->port, &flags);
+	/* A stopped owner may have left DLAB set; do not access an unowned UART. */
+	if (panic && !locked)
+		return;
 
 	/*
 	 *	First save the UER then disable the interrupts
