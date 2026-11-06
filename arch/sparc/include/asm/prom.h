@@ -49,6 +49,9 @@ void __iomem *of_ioremap(struct resource *res, unsigned long offset, unsigned lo
 void of_iounmap(struct resource *res, void __iomem *base, unsigned long size);
 
 extern struct device_node *of_console_device;
+#ifdef CONFIG_SPARC64
+extern struct device_node *of_console_input_device;
+#endif
 extern char *of_console_path;
 extern char *of_console_options;
 

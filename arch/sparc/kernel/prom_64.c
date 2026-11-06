@@ -624,6 +624,8 @@ void __init of_fill_in_cpu_data(void)
 	smp_fill_in_sib_core_maps();
 }
 
+struct device_node *of_console_input_device;
+
 void __init of_console_init(void)
 {
 	char *msg = "OF stdout device is: %s\n";
@@ -658,6 +660,9 @@ void __init of_console_init(void)
 	}
 
 	of_console_device = dp;
+	node = prom_getint(prom_chosen_node, "stdin");
+	if (node != -1 && node)
+		of_console_input_device = of_find_node_by_phandle(prom_inst2pkg(node));
 
 	printk(msg, of_console_path);
 }
