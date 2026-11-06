@@ -10,6 +10,7 @@
 #include <asm/prom.h>
 #include <asm/irq.h>
 #include <asm/upa.h>
+#include <asm/spitfire.h>
 
 #include "prom.h"
 
@@ -77,6 +78,12 @@ static void __init psycho_irq_trans_init(struct device_node *dp)
 
 	dp->irq_trans = prom_early_alloc(sizeof(struct of_irq_controller));
 	dp->irq_trans->irq_build = psycho_irq_build;
+	if (tlb_type == sparc64_v &&
+	    of_property_match_string(of_root, "name", "FJSV,GPUZC-M") >= 0 &&
+	    of_property_match_string(of_root, "model", "250") >= 0 &&
+	    of_property_present(dp, "interrupt-extension"))
+		primepower_irq_mask = IMAP_IGN | IMAP_INO;
+
 
 	regs = of_get_property(dp, "reg", NULL);
 	dp->irq_trans->data = (void *) regs[2].phys_addr;

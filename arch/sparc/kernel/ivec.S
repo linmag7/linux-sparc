@@ -22,6 +22,11 @@ do_ivec:
 	stxa		%g0, [%g0] ASI_INTR_RECEIVE
 	membar		#Sync
 
+	/* Hardware vectors only: cross-call dispatch has already branched. */
+	sethi		%hi(primepower_irq_mask), %g2
+	ldx		[%g2 + %lo(primepower_irq_mask)], %g2
+	and		%g3, %g2, %g3
+
 	sethi		%hi(ivector_table_pa), %g2
 	ldx		[%g2 + %lo(ivector_table_pa)], %g2
 	sllx		%g3, 4, %g3

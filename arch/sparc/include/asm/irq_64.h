@@ -15,6 +15,8 @@
 #include <asm/pil.h>
 #include <asm/ptrace.h>
 
+extern unsigned long primepower_irq_mask;
+
 /* IMAP/ICLR register defines */
 #define IMAP_VALID		0x80000000UL	/* IRQ Enabled		*/
 #define IMAP_TID_UPA		0x7c000000UL	/* UPA TargetID		*/

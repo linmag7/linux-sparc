@@ -49,6 +49,9 @@
 #include "cpumap.h"
 #include "kstack.h"
 
+/* Match extended PRIMEPOWER vectors to the IRQ bucket index. */
+unsigned long primepower_irq_mask __ro_after_init = ~0UL;
+
 struct ino_bucket *ivector_table;
 unsigned long ivector_table_pa;
 
