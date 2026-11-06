@@ -639,7 +639,7 @@ unsigned int build_irq(int inofixup, unsigned long iclr, unsigned long imap)
 	if (!irq) {
 		irq = irq_alloc(0, ino);
 		if (!irq) {
-			prom_printf("IRQ: cannot allocate interrupt descriptor.\n");
+			pr_emerg("IRQ: cannot allocate interrupt descriptor.\n");
 			prom_halt();
 		}
 		bucket_set_irq(__pa(bucket), irq);
