@@ -36,10 +36,10 @@ static int __prom_console_write_buf(const char *buf, int len)
 
 void prom_console_write_buf(const char *buf, int len)
 {
-	while (len) {
+	while (len > 0) {
 		int n = __prom_console_write_buf(buf, len);
-		if (n < 0)
-			continue;
+		if (n <= 0 || n > len)
+			break;
 		len -= n;
 		buf += n;
 	}
