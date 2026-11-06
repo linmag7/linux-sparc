@@ -248,6 +248,6 @@ int prom_ihandle2path(int handle, char *buffer, int bufsize);
 
 /* Client interface level routines. */
 void prom_cif_init(void *cif_handler);
-void p1275_cmd_direct(unsigned long *);
+int p1275_cmd_direct(unsigned long *);
 
 #endif /* !(__SPARC64_OPLIB_H) */
