@@ -17,6 +17,7 @@
 #include <linux/kernel.h>
 #include <linux/compiler.h>
 #include <linux/spinlock.h>
+#include <linux/panic.h>
 
 #include <asm/openprom.h>
 #include <asm/oplib.h>
@@ -34,7 +35,12 @@ void notrace prom_write(const char *buf, unsigned int n)
 	char *dest;
 
 	dest = console_write_buf;
-	raw_spin_lock_irqsave(&console_write_lock, flags);
+	if (panic_in_progress()) {
+		if (!raw_spin_trylock_irqsave(&console_write_lock, flags))
+			return;
+	} else {
+		raw_spin_lock_irqsave(&console_write_lock, flags);
+	}
 
 	dest_len = 0;
 	while (n-- != 0) {
