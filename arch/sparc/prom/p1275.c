@@ -33,7 +33,7 @@ extern void prom_cif_callback(void);
  */
 DEFINE_RAW_SPINLOCK(prom_entry_lock);
 
-void p1275_cmd_direct(unsigned long *args)
+int p1275_cmd_direct(unsigned long *args)
 {
 	unsigned long flags;
 
@@ -47,6 +47,7 @@ void p1275_cmd_direct(unsigned long *args)
 
 	raw_spin_unlock(&prom_entry_lock);
 	local_irq_restore(flags);
+	return 0;
 }
 
 void prom_cif_init(void *cif_handler)
