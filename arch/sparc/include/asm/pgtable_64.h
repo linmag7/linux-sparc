@@ -227,7 +227,7 @@ static inline pte_t pfn_pte(unsigned long pfn, pgprot_t prot)
 }
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
-#define has_transparent_hugepage() (tlb_type != sparc64_vii)
+#define has_transparent_hugepage() (!sparc64_fujitsu_mmu())
 
 static inline pmd_t pfn_pmd(unsigned long page_nr, pgprot_t pgprot)
 {

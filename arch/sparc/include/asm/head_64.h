@@ -31,6 +31,17 @@
 	be,pn %icc, label; \
 	 nop
 
+#define __SPARC64_V_ID 0x00040005
+
+#define BRANCH_IF_SPARC64_V(tmp1, tmp2, label) \
+	rdpr %ver, %tmp1; \
+	srlx %tmp1, 32, %tmp1; \
+	sethi %hi(__SPARC64_V_ID), %tmp2; \
+	or %tmp2, %lo(__SPARC64_V_ID), %tmp2; \
+	cmp %tmp1, %tmp2; \
+	be,pn %icc, label; \
+	 nop
+
 #define __CHEETAH_ID	0x003e0014
 #define __JALAPENO_ID	0x003e0016
 #define __SERRANO_ID	0x003e0022

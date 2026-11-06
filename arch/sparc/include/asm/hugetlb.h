@@ -6,7 +6,7 @@
 #include <asm/spitfire.h>
 
 #ifdef CONFIG_HUGETLB_PAGE
-#define hugepages_supported() (tlb_type != sparc64_vii)
+#define hugepages_supported() (!sparc64_fujitsu_mmu())
 
 struct pud_huge_patch_entry {
 	unsigned int addr;

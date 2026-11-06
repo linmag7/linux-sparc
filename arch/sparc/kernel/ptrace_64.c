@@ -109,8 +109,8 @@ void flush_ptrace_access(struct vm_area_struct *vma, struct page *page,
 {
 	BUG_ON(len > PAGE_SIZE);
 
-	if (tlb_type == sparc64_vii) {
-		/* VII caches are coherent; ASI_DCACHE_INVALIDATE is not valid. */
+	if (sparc64_fujitsu_mmu()) {
+		/* Fujitsu caches handle aliases without Sun diagnostic ASIs. */
 		flush_icache_range((unsigned long)kaddr,
 				   (unsigned long)kaddr + len);
 		return;

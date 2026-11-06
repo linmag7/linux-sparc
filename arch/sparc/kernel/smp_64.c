@@ -54,6 +54,7 @@
 #include <asm/ldc.h>
 #include <asm/hypervisor.h>
 #include <asm/pcr.h>
+#include <asm/sparc64_v.h>
 
 #include "cpumap.h"
 #include "kernel.h"
@@ -100,6 +101,85 @@ void smp_bogo(struct seq_file *m)
 extern void setup_sparc64_timer(void);
 
 static volatile unsigned long callin_flag = 0;
+
+/* Written before Linux owns the secondary trap table; no per-CPU accesses. */
+static struct {
+	unsigned long ver, dcu, mcntl, upa, error;
+	unsigned long itlb[32], dtlb[32];
+} v_secondary;
+static unsigned int v_expected_mid;
+
+/* Called with the PROM lock held and a temporary mapped stack. */
+unsigned long noinstr __no_stack_protector sparc64_v_secondary_check(void)
+{
+	unsigned long ver, dcu, mcntl, upa, ext, error = 0;
+	unsigned int i, first = 16;
+
+	__asm__ __volatile__("rdpr %%ver, %0" : "=r" (ver));
+	__asm__ __volatile__("ldxa [%%g0] 0x45, %0" : "=r" (dcu));
+	__asm__ __volatile__("ldxa [%1] 0x45, %0"
+			     : "=r" (mcntl) : "r" (8UL));
+	__asm__ __volatile__("ldxa [%%g0] 0x4a, %0" : "=r" (upa));
+	v_secondary.ver = ver;
+	v_secondary.dcu = dcu;
+	v_secondary.mcntl = mcntl;
+	v_secondary.upa = upa;
+	/* V R1.0 5.2.12, F.10.1 and R.3: preserve supported firmware modes. */
+	if ((mcntl & SPARC64_V_MCNTL_UNSUPPORTED) ||
+	    (mcntl & SPARC64_V_MCNTL_RMD_MASK) != SPARC64_V_MCNTL_RMD_2 ||
+	    (dcu & SPARC64_V_DCU_MMU_ENABLE) != SPARC64_V_DCU_MMU_ENABLE ||
+	    (dcu & SPARC64_V_DCU_WEAK_SPCA) ||
+	    ((upa >> SPARC64_V_UPA_AM_SHIFT) & 3) > 1 ||
+	    ((upa >> SPARC64_V_UPA_MID_SHIFT) & 0x1f) != v_expected_mid)
+		error |= 1;
+	for (i = TSB_EXTENSION_P; i <= TSB_EXTENSION_N; i += 8) {
+		__asm__ __volatile__("ldxa [%1] %2, %0"
+			: "=r" (ext) : "r" (i), "i" (ASI_DMMU));
+		if (ext)
+			error |= 2;
+		if (i == TSB_EXTENSION_S)
+			continue;
+		__asm__ __volatile__("ldxa [%1] %2, %0"
+			: "=r" (ext) : "r" (i), "i" (ASI_IMMU));
+		if (ext)
+			error |= 2;
+	}
+	if (num_kernel_image_mappings < 1 || num_kernel_image_mappings > 2)
+		error |= 4;
+	else
+		first -= num_kernel_image_mappings;
+	/* V F.1 Table F-1: 32 fTLB entries, with locking in this bank only. */
+	for (i = 0; i < 32; i++) {
+		unsigned long d = cheetah_get_ldtlb_data(i);
+		unsigned long it = cheetah_get_litlb_data(i);
+
+		v_secondary.dtlb[i] = d;
+		v_secondary.itlb[i] = it;
+		if (i >= first && i < 16 &&
+		    (((d & (_PAGE_VALID | _PAGE_L_4U)) ==
+		      (_PAGE_VALID | _PAGE_L_4U)) ||
+		     ((it & (_PAGE_VALID | _PAGE_L_4U)) ==
+		      (_PAGE_VALID | _PAGE_L_4U))))
+			error |= 8;
+	}
+	WRITE_ONCE(v_secondary.error, error);
+	/* Publish the captured state before the secondary leaves validation. */
+	wmb();
+	return error;
+}
+
+static void v_secondary_report(unsigned int cpu)
+{
+	unsigned int i;
+
+	pr_debug("V-SMP: CPU%u VER=%lx DCU=%lx MCNTL=%lx UPA=%lx error=%lx\n",
+		cpu, v_secondary.ver, v_secondary.dcu, v_secondary.mcntl,
+		v_secondary.upa, v_secondary.error);
+	for (i = 0; i < 32; i++)
+		if ((v_secondary.itlb[i] | v_secondary.dtlb[i]) & _PAGE_VALID)
+			pr_debug("V-SMP: inherited fTLB[%u] I=%lx D=%lx\n", i,
+				v_secondary.itlb[i], v_secondary.dtlb[i]);
+}
 
 void smp_callin(void)
 {
@@ -358,6 +438,12 @@ static int smp_boot_one_cpu(unsigned int cpu, struct task_struct *idle)
 	callin_flag = 0;
 	if (tlb_type == sparc64_vii)
 		WRITE_ONCE(vii_startup_mcntl, ~0UL);
+	if (tlb_type == sparc64_v) {
+		v_expected_mid = cpu;
+		v_secondary.error = ~0UL;
+		/* Publish the expected MID before firmware starts the secondary. */
+		wmb();
+	}
 	cpu_new_thread = task_thread_info(idle);
 
 	if (tlb_type == hypervisor) {
@@ -381,6 +467,8 @@ static int smp_boot_one_cpu(unsigned int cpu, struct task_struct *idle)
 		udelay(100);
 	}
 
+	if (tlb_type == sparc64_v)
+		v_secondary_report(cpu);
 	if (callin_flag) {
 		ret = 0;
 	} else {
@@ -398,10 +486,10 @@ static int smp_boot_one_cpu(unsigned int cpu, struct task_struct *idle)
 }
 
 /*
- * Serialize targets through BUSY/NACK pair zero for simple retry handling.
- * VII Extensions N.4.3 permits pipelining through multiple pairs.
+ * Serialize one target through BUSY/NACK pair zero (V/VII Appendix N).
+ * JPS1 N.4.2/N.4.3 defines dispatch; VII N.4.3 also permits pipelining.
  */
-static void vii_xcall_deliver(struct trap_per_cpu *tb, int cnt)
+static void fujitsu_xcall_deliver(struct trap_per_cpu *tb, int cnt)
 {
 	u64 *data = __va(tb->cpu_mondo_block_pa);
 	u16 *cpus = __va(tb->cpu_list_pa);
@@ -415,6 +503,14 @@ static void vii_xcall_deliver(struct trap_per_cpu *tb, int cnt)
 		unsigned long status = 0;
 		int retry;
 
+		/* JPS1 Commonality N.4.2/N.4.3: pair zero must be idle. */
+		if (tlb_type == sparc64_v) {
+			__asm__ __volatile__("ldxa [%%g0] %1, %0"
+				: "=r" (status) : "i" (ASI_INTR_DISPATCH_STAT));
+			if (status & 1)
+				panic("V IPI initially busy target=%u status=%lx",
+				      cpus[i], status);
+		}
 		for (retry = 0; retry < 10000; retry++) {
 			int polls = 1000000;
 
@@ -436,13 +532,14 @@ static void vii_xcall_deliver(struct trap_per_cpu *tb, int cnt)
 			__asm__ __volatile__("wrpr %0, 0, %%pstate"
 				: : "r" (pstate) : "memory");
 			if (!polls)
-				panic("VII IPI busy timeout target=%u status=%lx", cpus[i], status);
+				panic("Fujitsu IPI busy timeout target=%u status=%lx",
+				      cpus[i], status);
 			if (!(status & 2))
 				break;
 			udelay(2);
 		}
 		if (retry == 10000)
-			panic("VII IPI NACK timeout target=%u status=%lx", cpus[i], status);
+			panic("Fujitsu IPI NACK timeout target=%u status=%lx", cpus[i], status);
 	}
 }
 
@@ -1257,12 +1354,22 @@ void __irq_entry smp_penguin_jailcell(int irq, struct pt_regs *regs)
 
 void __init smp_prepare_cpus(unsigned int max_cpus)
 {
+	unsigned int cpu;
+
+	if (tlb_type == sparc64_v) {
+		for_each_present_cpu(cpu)
+			if (cpu > 1)
+				set_cpu_present(cpu, false);
+		pr_info("SPARC64 V: present CPUs %*pbl\n",
+			cpumask_pr_args(cpu_present_mask));
+		return;
+	}
 }
 
 void __init smp_setup_processor_id(void)
 {
-	if (tlb_type == sparc64_vii)
-		xcall_deliver_impl = vii_xcall_deliver;
+	if (tlb_type == sparc64_vii || tlb_type == sparc64_v)
+		xcall_deliver_impl = fujitsu_xcall_deliver;
 	else if (tlb_type == spitfire)
 		xcall_deliver_impl = spitfire_xcall_deliver;
 	else if (tlb_type == cheetah || tlb_type == cheetah_plus)
@@ -1395,8 +1502,8 @@ int __cpu_disable(void)
 	cpuinfo_sparc *c;
 	int i;
 
-	/* VII secondary startup does not implement offline/restart. */
-	if (tlb_type == sparc64_vii)
+	/* Fujitsu secondary startup does not implement offline/restart. */
+	if (tlb_type == sparc64_vii || tlb_type == sparc64_v)
 		return -EOPNOTSUPP;
 
 	for_each_cpu(i, &cpu_core_map[cpu])

@@ -53,6 +53,7 @@ tramp_stack:
 	.globl		sparc64_cpu_startup, sparc64_cpu_startup_end
 sparc64_cpu_startup:
 	BRANCH_IF_SUN4V(g1, niagara_startup)
+	BRANCH_IF_SPARC64_V(g1, g5, niagara_startup)
 	BRANCH_IF_SPARC64_VII(g1, g5, vii_startup)
 	BRANCH_IF_CHEETAH_BASE(g1, g5, cheetah_startup)
 	BRANCH_IF_CHEETAH_PLUS_OR_FOLLOWON(g1, g5, cheetah_plus_startup)
@@ -158,6 +159,24 @@ startup_continue:
 	sub		%g1, STACKFRAME_SZ + STACK_BIAS + 256, %sp
 	flushw
 
+	BRANCH_IF_SPARC64_V(g1, g5, v_check_secondary)
+	ba,pt	%xcc, v_secondary_checked
+	 nop
+v_check_secondary:
+	call	sparc64_v_secondary_check
+	 nop
+	brz,pt	%o0, v_secondary_checked
+	 nop
+	/* Fail closed, but release the PROM lock for boot-CPU diagnostics. */
+	sethi	%hi(prom_entry_lock), %g2
+	or	%g2, %lo(prom_entry_lock), %g2
+	membar	#Sync
+	stb	%g0, [%g2 + 3]
+v_secondary_failed:
+	ba,pt	%xcc, v_secondary_failed
+	 nop
+v_secondary_checked:
+
 	/* Setup the loop variables:
 	 * %l3: VADDR base
 	 * %l4: TTE base
@@ -173,6 +192,7 @@ startup_continue:
 	lduw		[%l6 + %lo(num_kernel_image_mappings)], %l6
 
 	mov		15, %l7
+	BRANCH_IF_SPARC64_V(g1,g5,2f)
 	BRANCH_IF_SPARC64_VII(g1,g5,2f)
 	BRANCH_IF_ANY_CHEETAH(g1,g5,2f)
 
@@ -310,6 +330,13 @@ after_lock_tlb:
 	.previous
 
 	membar		#Sync
+	BRANCH_IF_SUN4V(g1, 9f)
+	BRANCH_IF_SPARC64_V(g1, g3, 8f)
+	ba,pt		%xcc, 9f
+	 nop
+8:	sethi		%hi(KERNBASE), %g1
+	flush		%g1
+9:
 	mov		SECONDARY_CONTEXT, %g7
 
 661:	stxa		%g0, [%g7] ASI_DMMU
@@ -319,6 +346,13 @@ after_lock_tlb:
 	.previous
 
 	membar		#Sync
+	BRANCH_IF_SUN4V(g1, 9f)
+	BRANCH_IF_SPARC64_V(g1, g3, 8f)
+	ba,pt		%xcc, 9f
+	 nop
+8:	sethi		%hi(KERNBASE), %g1
+	flush		%g1
+9:
 
 	/* Everything we do here, until we properly take over the
 	 * trap table, must be done with extreme care.  We cannot
@@ -370,6 +404,13 @@ after_lock_tlb:
 	.previous
 
 	membar		#Sync
+	BRANCH_IF_SUN4V(g1, 9f)
+	BRANCH_IF_SPARC64_V(g1, g3, 8f)
+	ba,pt		%xcc, 9f
+	 nop
+8:	sethi		%hi(KERNBASE), %g1
+	flush		%g1
+9:
 
 	wrpr		%g0, 0, %wstate
 

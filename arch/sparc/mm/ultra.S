@@ -1148,8 +1148,12 @@ __vii_xcall_flush_tlb_page:
 
 #endif /* CONFIG_SMP */
 
-	.globl		sparc64_vii_patch_cachetlbops
-sparc64_vii_patch_cachetlbops:
+/*
+ * SPARC64 V shares the JPS1 F.10.1/F.10.11 demap and synchronization rules.
+ * Its context high bits read as zero; user huge pages remain disabled.
+ */
+	.globl		fujitsu_patch_cachetlbops
+fujitsu_patch_cachetlbops:
 	save		%sp, -128, %sp
 
 	sethi		%hi(__flush_tlb_mm), %o0

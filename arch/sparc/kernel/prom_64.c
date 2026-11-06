@@ -377,7 +377,8 @@ char * __init build_path_component(struct device_node *dp)
 
 static const char *get_mid_prop(void)
 {
-	return (tlb_type == spitfire ? "upa-portid" : "portid");
+	return (tlb_type == spitfire || tlb_type == sparc64_v ?
+		"upa-portid" : "portid");
 }
 
 bool arch_find_n_match_cpu_physical_id(struct device_node *cpun,

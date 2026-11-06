@@ -127,7 +127,7 @@ void flush_tsb_user(struct tlb_batch *tb)
 		base = (unsigned long) mm->context.tsb_block[MM_TSB_BASE].tsb;
 		nentries = mm->context.tsb_block[MM_TSB_BASE].tsb_nentries;
 		if (tlb_type == cheetah_plus || tlb_type == hypervisor ||
-		    tlb_type == sparc64_vii)
+		    sparc64_fujitsu_mmu())
 			base = __pa(base);
 		if (tb->hugepage_shift == PAGE_SHIFT)
 			__flush_tsb_one(tb, PAGE_SHIFT, base, nentries);
@@ -142,7 +142,7 @@ void flush_tsb_user(struct tlb_batch *tb)
 		base = (unsigned long) mm->context.tsb_block[MM_TSB_HUGE].tsb;
 		nentries = mm->context.tsb_block[MM_TSB_HUGE].tsb_nentries;
 		if (tlb_type == cheetah_plus || tlb_type == hypervisor ||
-		    tlb_type == sparc64_vii)
+		    sparc64_fujitsu_mmu())
 			base = __pa(base);
 		__flush_huge_tsb_one(tb, REAL_HPAGE_SHIFT, base, nentries,
 				     tb->hugepage_shift);
@@ -162,7 +162,7 @@ void flush_tsb_user_page(struct mm_struct *mm, unsigned long vaddr,
 		base = (unsigned long) mm->context.tsb_block[MM_TSB_BASE].tsb;
 		nentries = mm->context.tsb_block[MM_TSB_BASE].tsb_nentries;
 		if (tlb_type == cheetah_plus || tlb_type == hypervisor ||
-		    tlb_type == sparc64_vii)
+		    sparc64_fujitsu_mmu())
 			base = __pa(base);
 		if (hugepage_shift == PAGE_SHIFT)
 			__flush_tsb_one_entry(base, vaddr, PAGE_SHIFT,
@@ -178,7 +178,7 @@ void flush_tsb_user_page(struct mm_struct *mm, unsigned long vaddr,
 		base = (unsigned long) mm->context.tsb_block[MM_TSB_HUGE].tsb;
 		nentries = mm->context.tsb_block[MM_TSB_HUGE].tsb_nentries;
 		if (tlb_type == cheetah_plus || tlb_type == hypervisor ||
-		    tlb_type == sparc64_vii)
+		    sparc64_fujitsu_mmu())
 			base = __pa(base);
 		__flush_huge_tsb_one_entry(base, vaddr, REAL_HPAGE_SHIFT,
 					   nentries, hugepage_shift);
@@ -274,9 +274,12 @@ static void setup_tsb_params(struct mm_struct *mm, unsigned long tsb_idx, unsign
 	}
 	tte |= pte_sz_bits(page_sz);
 
-	/* VII siblings share TLBs: per-mm TSBs cannot reuse a fixed VA/slot. */
+	/*
+	 * Physical TSBs also avoid locked-slot aliases on VII siblings.
+	 * V supports the same accesses without requiring a shared TLB.
+	 */
 	if (tlb_type == cheetah_plus || tlb_type == hypervisor ||
-	    tlb_type == sparc64_vii) {
+	    sparc64_fujitsu_mmu()) {
 		/* Physical mapping, no locked TLB entry for TSB.  */
 		tsb_reg |= tsb_paddr;
 
@@ -509,7 +512,7 @@ retry_tsb_alloc:
 		unsigned long new_tsb_base = (unsigned long) new_tsb;
 
 		if (tlb_type == cheetah_plus || tlb_type == hypervisor ||
-		    tlb_type == sparc64_vii) {
+		    sparc64_fujitsu_mmu()) {
 			old_tsb_base = __pa(old_tsb_base);
 			new_tsb_base = __pa(new_tsb_base);
 		}

@@ -6,6 +6,7 @@
  */
 
 #include <asm/pstate.h>
+#include <asm/head_64.h>
 #include <asm/cpudata.h>
 #include <asm/thread_info.h>
 
@@ -24,6 +25,14 @@ prom_cif_direct:
 	mov	%l0, %g4
 	mov	%l1, %g5
 	mov	%l3, %g6
+	BRANCH_IF_SUN4V(o2, .Lcif_return)
+	BRANCH_IF_SPARC64_V(o2, o3, .Lv_cif_return)
+.Lcif_return:
+	ret
+	 restore
+.Lv_cif_return:
+	call	sparc64_v_check_mmu_state
+	 nop
 	ret
 	 restore
 

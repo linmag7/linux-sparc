@@ -56,6 +56,9 @@ void sparc64_vii_check_mmu_state(void);
 extern unsigned long sparc64_vii_mmu_fault[4];
 void sparc64_vii_ecc_trap(void);
 void sparc64_vii_ecc_trap_tl1(void);
+void sparc64_v_fatal_trap(void);
+void sparc64_v_ecc_trap(void);
+void sparc64_v_ecc_trap_tl1(void);
 
 /* unaligned_64.c */
 int handle_ldf_stq(u32 insn, struct pt_regs *regs);

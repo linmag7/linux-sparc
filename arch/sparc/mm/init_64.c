@@ -272,7 +272,7 @@ static inline void tsb_insert(struct tsb *ent, unsigned long tag, unsigned long 
 	unsigned long tsb_addr = (unsigned long) ent;
 
 	if (tlb_type == cheetah_plus || tlb_type == hypervisor ||
-	    tlb_type == sparc64_vii)
+	    sparc64_fujitsu_mmu())
 		tsb_addr = __pa(tsb_addr);
 
 	__tsb_insert(tsb_addr, tag, pte);
@@ -502,7 +502,7 @@ EXPORT_SYMBOL(flush_dcache_folio);
 
 void __kprobes flush_icache_range(unsigned long start, unsigned long end)
 {
-	if (tlb_type == sparc64_vii) {
+	if (sparc64_fujitsu_mmu()) {
 		/* Coherent caches still require instruction-stream synchronization. */
 		__asm__ __volatile__("membar #Sync\n\tflush %0"
 				     : : "r" (start) : "memory");
@@ -543,6 +543,8 @@ void mmu_info(struct seq_file *m)
 		seq_printf(m, "MMU Type\t: Cheetah\n");
 	else if (tlb_type == cheetah_plus)
 		seq_printf(m, "MMU Type\t: Cheetah+\n");
+	else if (tlb_type == sparc64_v)
+		seq_puts(m, "MMU Type\t: Fujitsu SPARC64 V\n");
 	else if (tlb_type == sparc64_vii)
 		seq_puts(m, "MMU Type\t: Fujitsu SPARC64 VII\n");
 	else if (tlb_type == spitfire)
@@ -686,12 +688,12 @@ static unsigned long kern_large_tte(unsigned long paddr);
  * associative bank. Check existing reservations, firmware
  * status and physical slot readback before using the mappings.
  */
-static void __init vii_check_slots(void)
+static void __init fujitsu_check_slots(void)
 {
 	int i;
 
 	if (num_kernel_image_mappings > 2) {
-		prom_printf("VII-BOOT: kernel exceeds initial 8MB mapping budget\n");
+		prom_printf("Fujitsu-MMU: kernel exceeds initial 8MB mapping budget\n");
 		prom_halt();
 	}
 	for (i = 16 - num_kernel_image_mappings; i <= 15; i++) {
@@ -702,17 +704,17 @@ static void __init vii_check_slots(void)
 		      (_PAGE_VALID | _PAGE_L_4U)) ||
 		     ((t & (_PAGE_VALID | _PAGE_L_4U)) ==
 		      (_PAGE_VALID | _PAGE_L_4U))) {
-			prom_printf("VII-BOOT: reserved slot %d occupied; halted\n", i);
+			prom_printf("Fujitsu-MMU: reserved slot %d occupied; halted\n", i);
 			prom_halt();
 		}
 	}
 }
 
-static void __init vii_check_mapping(int slot, unsigned long va,
+static void __init fujitsu_check_mapping(int slot, unsigned long va,
 				     unsigned long tte)
 {
 	/* VII F.2 #238 leaves PA/VA bits 21:13 arbitrary on 4MB TLB reads. */
-	unsigned long offset_mask = GENMASK(21, 13);
+	unsigned long offset_mask = tlb_type == sparc64_vii ? GENMASK(21, 13) : 0;
 	unsigned long mask = (_PAGE_VALID | _PAGE_SZALL_4U |
 		_PAGE_PADDR_VII | _PAGE_L_4U) & ~offset_mask;
 	unsigned long d = cheetah_get_ldtlb_data(slot);
@@ -722,7 +724,7 @@ static void __init vii_check_mapping(int slot, unsigned long va,
 
 	if ((d & mask) != (tte & mask) || (t & mask) != (tte & mask) ||
 	    ((dt ^ va) & ~offset_mask) || ((it ^ va) & ~offset_mask)) {
-		prom_printf("VII-BOOT: mapping readback mismatch; halted\n");
+		prom_printf("Fujitsu-MMU: mapping readback mismatch; halted\n");
 		prom_halt();
 	}
 }
@@ -738,8 +740,8 @@ static void __init remap_kernel(void)
 
 	kern_locked_tte_data = tte_data;
 
-	if (tlb_type == sparc64_vii)
-		vii_check_slots();
+	if (sparc64_fujitsu_mmu())
+		fujitsu_check_slots();
 
 	/* Now lock us into the TLBs via Hypervisor or OBP. */
 	if (tlb_type == hypervisor) {
@@ -754,19 +756,19 @@ static void __init remap_kernel(void)
 			long ret;
 
 			ret = prom_dtlb_load(tlb_ent - i, tte_data, tte_vaddr);
-			if (ret && tlb_type == sparc64_vii) {
+			if (ret && sparc64_fujitsu_mmu()) {
 				prom_printf("SUNW,dtlb-load failed: idx=%d va=%lx tte=%lx rc=%lx\n",
 					    tlb_ent - i, tte_vaddr, tte_data, ret);
 				prom_halt();
 			}
 			ret = prom_itlb_load(tlb_ent - i, tte_data, tte_vaddr);
-			if (ret && tlb_type == sparc64_vii) {
+			if (ret && sparc64_fujitsu_mmu()) {
 				prom_printf("SUNW,itlb-load failed: idx=%d va=%lx tte=%lx rc=%lx\n",
 					    tlb_ent - i, tte_vaddr, tte_data, ret);
 				prom_halt();
 			}
-			if (tlb_type == sparc64_vii)
-				vii_check_mapping(tlb_ent - i, tte_vaddr, tte_data);
+			if (sparc64_fujitsu_mmu())
+				fujitsu_check_mapping(tlb_ent - i, tte_vaddr, tte_data);
 			tte_vaddr += 0x400000;
 			tte_data += 0x400000;
 		}
@@ -805,7 +807,7 @@ void __flush_dcache_range(unsigned long start, unsigned long end)
 {
 	unsigned long va;
 
-	if (tlb_type == sparc64_vii) {
+	if (sparc64_fujitsu_mmu()) {
 		__asm__ __volatile__("membar #Sync" : : : "memory");
 		return;
 	}
@@ -2433,8 +2435,8 @@ void __init paging_init(void)
 	else
 		sun4u_pgprot_init();
 
-	/* VII supports ASI_QUAD_LDD_PHYS (0x34); avoid shared-TLB TSB aliases. */
-	if (tlb_type == cheetah_plus || tlb_type == sparc64_vii ||
+	/* V and VII support physical quad loads (V F.11, p104). */
+	if (tlb_type == cheetah_plus || sparc64_fujitsu_mmu() ||
 	    tlb_type == hypervisor) {
 		tsb_phys_patch();
 		ktsb_phys_patch();
@@ -2456,11 +2458,11 @@ void __init paging_init(void)
 	read_obp_memory("available", &pavail[0], &pavail_ents);
 	read_obp_memory("available", &pavail[0], &pavail_ents);
 
-	if (tlb_type == sparc64_vii) {
+	if (sparc64_fujitsu_mmu()) {
 		for (i = 0; i < pall_ents; i++) {
 			if (pall[i].phys_addr >= (1UL << 40) ||
 			    pall[i].reg_size > (1UL << 40) - pall[i].phys_addr) {
-				prom_printf("VII-BOOT: RAM exceeds initial PA layout\n");
+				prom_printf("Fujitsu-MMU: RAM exceeds initial PA layout\n");
 				prom_halt();
 			}
 		}
@@ -2910,11 +2912,11 @@ void __flush_tlb_all(void)
 			}
 		}
 	} else if (tlb_type == cheetah || tlb_type == cheetah_plus ||
-		   tlb_type == sparc64_vii) {
+		   sparc64_fujitsu_mmu()) {
 		cheetah_flush_dtlb_all();
 		cheetah_flush_itlb_all();
-		/* JPS2 F.10.1 requires instruction visibility after demap-all. */
-		if (tlb_type == sparc64_vii)
+		/* JPS1/JPS2 F.10.1: demap-all needs instruction visibility. */
+		if (sparc64_fujitsu_mmu())
 			__asm__ __volatile__("flush %0"
 					     : : "r" (KERNBASE) : "memory");
 	}

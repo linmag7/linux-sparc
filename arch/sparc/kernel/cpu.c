@@ -132,7 +132,11 @@ static const struct manufacturer_info __initconst manufacturer_info[] = {
 		CPU(2, "Texas Instruments, Inc. - MicroSparc II"),
 		CPU(3, "Texas Instruments, Inc. - SuperSparc 51"),
 		CPU(4, "Texas Instruments, Inc. - SuperSparc 61"),
+#ifdef CONFIG_SPARC64
+		CPU(5, "Fujitsu SPARC64 V"),
+#else
 		CPU(5, "Texas Instruments, Inc. - unknown"),
+#endif
 #ifdef CONFIG_SPARC64
 		CPU(7, "Fujitsu SPARC64 VII / VII+"),
 #endif
@@ -144,6 +148,7 @@ static const struct manufacturer_info __initconst manufacturer_info[] = {
 		/* SparcClassic */
 		FPU(4, "TI MicroSparc on chip FPU"),
 #ifdef CONFIG_SPARC64
+		FPU(5, "Fujitsu SPARC64 V integrated FPU"),
 		FPU(7, "Fujitsu SPARC64 VII integrated FPU"),
 #endif
 		FPU(-1, NULL)

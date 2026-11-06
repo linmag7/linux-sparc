@@ -2716,6 +2716,17 @@ void do_privact(struct pt_regs *regs)
 	do_privop(regs);
 }
 
+/* SPARC64 V R1.0 Supplement, Appendix P.7.4. */
+void sparc64_v_ecc_error(struct pt_regs *regs, unsigned long afsr)
+{
+	enum ctx_state prev_state = exception_enter();
+
+	/* Entry acknowledged degradation with IE clear and keeps PIL raised. */
+	pr_warn_ratelimited("SPARC64 V: CPU %u cache/TLB degradation, AFSR=%lx\n",
+			    smp_processor_id(), afsr);
+	exception_exit(prev_state);
+}
+
 /* SPARC64 VII Extensions, Appendix P.7.4. */
 void sparc64_vii_ecc_error(struct pt_regs *regs, unsigned long afsr)
 {

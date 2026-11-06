@@ -45,6 +45,7 @@
 #include <asm/timer.h>
 #include <asm/sections.h>
 #include <asm/setup.h>
+#include <asm/sparc64_v.h>
 #include <asm/mmu.h>
 #include <asm/ns87303.h>
 #include <asm/btext.h>
@@ -158,7 +159,8 @@ static void __init per_cpu_patch(void)
 	unsigned long ver;
 	int is_jbus;
 
-	if (tlb_type == spitfire && !this_is_starfire)
+	if (tlb_type == sparc64_v ||
+	    (tlb_type == spitfire && !this_is_starfire))
 		return;
 
 	is_jbus = 0;
@@ -353,11 +355,10 @@ static void __init pause_patch(void)
 }
 
 /*
- * Route restrainable ECC (0x63) to the VII C handler.
- * Other patched errors record state and halt without touching Spitfire
- * error/cache registers, including at TL>1.
+ * Fujitsu restrainable ECC uses CPU-specific C handlers; other errors halt.
+ * Avoid Spitfire error registers on both Fujitsu implementations.
  */
-static void __init vii_patch_error_traps(void)
+static void __init fujitsu_patch_error_traps(void (*handler)(void))
 {
 	static const unsigned int traps[] = { 0x0a, 0x32, 0x40, 0x63 };
 	unsigned int *tables[] = { sparc64_ttable_tl0, sparc64_ttable_tl1 };
@@ -366,13 +367,15 @@ static void __init vii_patch_error_traps(void)
 	for (i = 0; i < ARRAY_SIZE(tables); i++) {
 		for (j = 0; j < ARRAY_SIZE(traps); j++) {
 			unsigned int *slot = tables[i] + traps[j] * 8;
-			void (*handler)(void) = sparc64_vii_fatal_trap;
+			void (*target)(void) = handler;
 			long delta;
 
-			if (traps[j] == 0x63)
-				handler = i ? sparc64_vii_ecc_trap_tl1 :
-					      sparc64_vii_ecc_trap;
-			delta = (long)handler - (long)slot;
+			if (tlb_type == sparc64_vii && traps[j] == 0x63)
+				target = i ? sparc64_vii_ecc_trap_tl1 :
+					     sparc64_vii_ecc_trap;
+			if (tlb_type == sparc64_v && traps[j] == 0x63)
+				target = i ? sparc64_v_ecc_trap_tl1 : sparc64_v_ecc_trap;
+			delta = (long)target - (long)slot;
 
 			/* ba (disp22), followed by nop. */
 			if (delta < -(1L << 23) || delta >= (1L << 23)) {
@@ -388,10 +391,72 @@ static void __init vii_patch_error_traps(void)
 	}
 }
 
+static void __init sparc64_v_check_boot(void)
+{
+	char name[sizeof("FJSV,GPUZC-M") + 1] = {};
+	char model[sizeof("250") + 1] = {};
+	unsigned long ver, dcu, mcntl, upa, ext;
+	unsigned int offset;
+
+	/* The supported firmware identifies this board by root name and model. */
+	prom_getstring(prom_root_node, "name", name, sizeof(name) - 1);
+	prom_getstring(prom_root_node, "model", model, sizeof(model) - 1);
+	if (strcmp(prom_root_compatible, "sun4us") ||
+	    strcmp(name, "FJSV,GPUZC-M") || strcmp(model, "250")) {
+		prom_printf("SPARC64 V: unsupported platform; expected PRIMEPOWER 250\n");
+		prom_halt();
+	}
+
+	__asm__ __volatile__("rdpr %%ver, %0" : "=r" (ver));
+	__asm__ __volatile__("ldxa [%%g0] 0x45, %0" : "=r" (dcu));
+	__asm__ __volatile__("ldxa [%1] 0x45, %0"
+			     : "=r" (mcntl) : "r" (8UL));
+	__asm__ __volatile__("ldxa [%%g0] 0x4a, %0" : "=r" (upa));
+
+	/* V F.10.1: preserve supported firmware MMU modes. */
+	if ((mcntl & SPARC64_V_MCNTL_UNSUPPORTED) ||
+	    (mcntl & SPARC64_V_MCNTL_RMD_MASK) != SPARC64_V_MCNTL_RMD_2 ||
+	    (dcu & SPARC64_V_DCU_MMU_ENABLE) != SPARC64_V_DCU_MMU_ENABLE ||
+	    (dcu & SPARC64_V_DCU_WEAK_SPCA) ||
+	    ((upa >> SPARC64_V_UPA_AM_SHIFT) & 3) > 1 ||
+	    ((upa >> SPARC64_V_UPA_MID_SHIFT) & 0x1f)) {
+		prom_printf("SPARC64-V: VER=%lx DCUCR=%lx MCNTL=%lx UPA=%lx\n",
+			    ver, dcu, mcntl, upa);
+		prom_printf("SPARC64-V: unsupported controls or nonzero boot MID\n");
+		prom_halt();
+	}
+	/*
+	 * Physical TSB bases must not be XORed with inherited extensions.
+	 * JPS1 Commonality F.10.7 defines extensions for both MMUs.
+	 */
+	for (offset = TSB_EXTENSION_P; offset <= TSB_EXTENSION_N; offset += 8) {
+		__asm__ __volatile__("ldxa [%1] %2, %0"
+				     : "=r" (ext) : "r" (offset), "i" (ASI_DMMU));
+		if (ext) {
+			prom_printf("SPARC64-V: D TSB extension %x=%lx unsupported\n",
+				    offset, ext);
+			prom_halt();
+		}
+		if (offset == TSB_EXTENSION_S)
+			continue;
+		__asm__ __volatile__("ldxa [%1] %2, %0"
+				     : "=r" (ext) : "r" (offset), "i" (ASI_IMMU));
+		if (ext) {
+			prom_printf("SPARC64-V: I TSB extension %x=%lx unsupported\n",
+				    offset, ext);
+			prom_halt();
+		}
+	}
+	/* V F.5 and Appendix P: IAE, DAE, ADE and ECC error. */
+	fujitsu_patch_error_traps(sparc64_v_fatal_trap);
+}
+
 void __init start_early_boot(void)
 {
 	int cpu;
 
+	if (tlb_type == sparc64_v)
+		sparc64_v_check_boot();
 	check_if_starfire();
 	per_cpu_patch();
 	sun4v_patch();
@@ -400,7 +465,7 @@ void __init start_early_boot(void)
 	if (tlb_type == sparc64_vii) {
 		unsigned long mcntl;
 
-		vii_patch_error_traps();
+		fujitsu_patch_error_traps(sparc64_vii_fatal_trap);
 
 		__asm__ __volatile__("ldxa [%1] 0x45, %0"
 				     : "=r" (mcntl) : "r" (8UL));

@@ -76,9 +76,16 @@ enum ultra_tlb_layout {
 	cheetah_plus = 2,
 	hypervisor = 3,
 	sparc64_vii = 4,
+	sparc64_v = 5,
 };
 
 extern enum ultra_tlb_layout tlb_type;
+
+/* Shared JPS MMU/cache operations, not a platform or SMP capability. */
+static inline bool sparc64_fujitsu_mmu(void)
+{
+	return tlb_type == sparc64_vii || tlb_type == sparc64_v;
+}
 
 extern int sun4v_chip_type;
 
