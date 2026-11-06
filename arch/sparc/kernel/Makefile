@@ -98,6 +98,7 @@ obj-$(CONFIG_STACKTRACE)     += stacktrace.o
 # sparc64 PCI
 obj-$(CONFIG_SPARC64_PCI)    += pci.o pci_common.o psycho_common.o
 obj-$(CONFIG_SPARC64_PCI)    += pci_psycho.o pci_sabre.o pci_schizo.o
+obj-$(CONFIG_SPARC64_PCI)    += pci_primepower.o
 obj-$(CONFIG_SPARC64_PCI)    += pci_sun4v.o pci_sun4v_asm.o pci_fire.o
 obj-$(CONFIG_SPARC64_PCI_MSI) += pci_msi.o
 

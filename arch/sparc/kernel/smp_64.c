@@ -1663,6 +1663,12 @@ void __irq_entry smp_receive_signal_client(int irq, struct pt_regs *regs)
 static void stop_this_cpu(void *dummy)
 {
 	set_cpu_online(smp_processor_id(), false);
+	/* Terminal stop cannot transfer the native console from a stopped owner. */
+	if (primepower_irq_supported() && prom_console_retired()) {
+		local_irq_disable();
+		for (;;)
+			cpu_relax();
+	}
 	prom_stopself();
 }
 

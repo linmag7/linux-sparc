@@ -11,7 +11,11 @@
 #include <linux/string.h>
 #include <linux/spinlock.h>
 #include <linux/irqflags.h>
+#include <linux/interrupt.h>
+#include <linux/panic.h>
 
+#include <asm/irq.h>
+#include <asm/setup.h>
 #include <asm/openprom.h>
 #include <asm/oplib.h>
 #include <asm/spitfire.h>
@@ -33,21 +37,78 @@ extern void prom_cif_callback(void);
  */
 DEFINE_RAW_SPINLOCK(prom_entry_lock);
 
-int p1275_cmd_direct(unsigned long *args)
+static bool primepower_cif_allowed(unsigned long *args, unsigned long flags,
+				   bool terminal)
+{
+	if (!primepower_irq_supported() || !prom_console_retired() ||
+	    system_state < SYSTEM_RUNNING)
+		return true;
+	if (terminal)
+		return primepower_uart_handoff_active();
+	/* Only this returning read has been qualified with the native UART active. */
+	return !flags && !in_interrupt() && !preempt_count() &&
+	       args[1] == 2 && args[2] == 1 &&
+	       !strcmp((char *)args[0], "getproplen") &&
+	       args[3] == (unsigned int)prom_root_node &&
+	       !strcmp((char *)args[4], "name");
+}
+
+static int p1275_call(unsigned long *args, bool terminal)
 {
 	unsigned long flags;
+	int admission = 0;
 
+	/* Exceptional entry cannot transfer the native UART or IRQ ownership. */
+	if (primepower_irq_supported() && prom_console_retired() &&
+	    (in_nmi() || READ_ONCE(oops_in_progress) || panic_in_progress()))
+		return -EOPNOTSUPP;
 	local_save_flags(flags);
+	if (!primepower_cif_allowed(args, flags, terminal))
+		return -EOPNOTSUPP;
 	local_irq_restore((unsigned long)PIL_NMI);
-	raw_spin_lock(&prom_entry_lock);
+	if (terminal) {
+		if (!raw_spin_trylock(&prom_entry_lock)) {
+			admission = -EBUSY;
+			goto restore;
+		}
+	} else {
+		admission = primepower_cif_query_begin(args, flags);
+		if (!admission)
+			admission = primepower_cif_begin();
+		if (admission < 0)
+			goto restore;
+		if (admission == PP250_CIF_RETAINED) {
+			if (!raw_spin_trylock(&prom_entry_lock)) {
+				int err = primepower_cif_query_cancel();
+
+				admission = err ?: -EBUSY;
+				goto restore;
+			}
+		} else {
+			raw_spin_lock(&prom_entry_lock);
+		}
+	}
 
 	prom_world(1);
 	prom_cif_direct(args);
 	prom_world(0);
 
 	raw_spin_unlock(&prom_entry_lock);
+	if (admission)
+		admission = primepower_cif_end(admission);
+restore:
 	local_irq_restore(flags);
-	return 0;
+	return admission < 0 ? admission : 0;
+}
+
+int p1275_cmd_direct(unsigned long *args)
+{
+	return p1275_call(args, false);
+}
+
+int p1275_cmd_try_direct(unsigned long *args)
+{
+	return p1275_call(args, true);
 }
 
 void prom_cif_init(void *cif_handler)

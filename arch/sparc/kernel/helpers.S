@@ -367,3 +367,129 @@ sparc64_v_fatal_trap:
 sparc64_v_fault_record:
 	.xword 0, 0, 0, 0, 0, 0, 0, 0
 	.previous
+
+#ifdef CONFIG_PCI
+	/* Aligned physical accesses in the PRIMEPOWER 250's 41-bit I/O aperture. */
+	.align 4
+	.globl pp250_phys_read32
+	.type pp250_phys_read32,#function
+pp250_phys_read32:
+	srlx	%o0, 41, %o2
+	brnz,pn	%o2, .Lpp250_invalid
+	 andcc	%o0, 3, %g0
+	bne,pn	%icc, .Lpp250_invalid
+	 nop
+	membar	#Sync
+.Lpp250_load:
+	lduwa	[%o0] ASI_PHYS_BYPASS_EC_E, %o2
+	membar	#Sync
+	st	%o2, [%o1]
+	retl
+	 clr	%o0
+	.size pp250_phys_read32,.-pp250_phys_read32
+
+	/* Use a single transaction for 64-bit bridge registers. */
+	.globl pp250_phys_read64
+	.type pp250_phys_read64,#function
+pp250_phys_read64:
+	srlx	%o0, 41, %o2
+	brnz,pn	%o2, .Lpp250_invalid
+	 andcc	%o0, 7, %g0
+	bne,pn	%icc, .Lpp250_invalid
+	 nop
+	membar	#Sync
+.Lpp250_load64:
+	ldxa	[%o0] ASI_PHYS_BYPASS_EC_E, %o2
+	membar	#Sync
+	stx	%o2, [%o1]
+	retl
+	 clr	%o0
+	.size pp250_phys_read64,.-pp250_phys_read64
+
+	.globl pp250_phys_write32
+	.type pp250_phys_write32,#function
+pp250_phys_write32:
+	srlx	%o0, 41, %o2
+	brnz,pn	%o2, .Lpp250_invalid
+	 andcc	%o0, 3, %g0
+	bne,pn	%icc, .Lpp250_invalid
+	 nop
+	membar	#Sync
+.Lpp250_store:
+	stwa	%o1, [%o0] ASI_PHYS_BYPASS_EC_E
+	membar	#Sync
+	retl
+	 clr	%o0
+	.size pp250_phys_write32,.-pp250_phys_write32
+
+.Lpp250_invalid:
+	retl
+	 mov	-EINVAL, %o0
+.Lpp250_io_error:
+	retl
+	 mov	-EIO, %o0
+
+	/* SPARC64 V F.10.9, Tables F-8 and F-10. */
+#define PP250_DSFSR_FV		(1 << 0)
+#define PP250_DSFSR_OW		(1 << 1)
+#define PP250_DSFSR_W		(1 << 2)
+#define PP250_DSFSR_PR		(1 << 3)
+#define PP250_DSFSR_E		(1 << 6)
+#define PP250_DSFSR_ASI		(0xff << 16)
+#define PP250_DSFSR_NF		(1 << 24)
+#define PP250_DSFSR_NC		(1 << 25)
+#define PP250_DSFSR_MDTLB	(3 << 26)
+#define PP250_DSFSR_UE		(1 << 31)
+#define PP250_DSFSR_REQUIRED	(PP250_DSFSR_NC | (ASI_PHYS_BYPASS_EC_E << 16) | \
+				 PP250_DSFSR_E | PP250_DSFSR_PR | PP250_DSFSR_FV)
+#define PP250_DSFSR_MASK	(PP250_DSFSR_REQUIRED | PP250_DSFSR_ASI | PP250_DSFSR_UE | \
+				 PP250_DSFSR_MDTLB | PP250_DSFSR_NF | \
+				 PP250_DSFSR_W | PP250_DSFSR_OW)
+
+	.globl pp250_u2u_dae
+	.type pp250_u2u_dae,#function
+pp250_u2u_dae:
+	rdpr	%tstate, %g1
+	btst	TSTATE_PRIV, %g1
+	bz,pn	%icc, sparc64_v_fatal_trap
+	 rdpr	%tpc, %g1
+	set	.Lpp250_load, %g2
+	cmp	%g1, %g2
+	be,pt	%xcc, 1f
+	 clr	%g3
+	set	.Lpp250_load64, %g2
+	cmp	%g1, %g2
+	be,pt	%xcc, 1f
+	 nop
+	set	.Lpp250_store, %g2
+	cmp	%g1, %g2
+	bne,pn	%xcc, sparc64_v_fatal_trap
+	 mov	PP250_DSFSR_W, %g3
+1:	mov	TLB_SFSR, %g1
+	ldxa	[%g1] ASI_DMMU, %g2
+	/* A UPA fault following a TLB miss retains TM (SPARC64 V, Table F-10). */
+	set	PP250_DSFSR_MASK, %g1
+	and	%g2, %g1, %g1
+	set	PP250_DSFSR_REQUIRED, %g4
+	or	%g4, %g3, %g4
+	cmp	%g1, %g4
+	bne,pn	%xcc, sparc64_v_fatal_trap
+	 srlx	%g2, 29, %g2
+	and	%g2, 3, %g2
+	cmp	%g2, 1
+	be,pt	%icc, 2f
+	 cmp	%g2, 2
+	bne,pn	%icc, sparc64_v_fatal_trap
+	 nop
+2:	mov	DMMU_SFAR, %g1
+	ldxa	[%g1] ASI_DMMU, %g2
+	cmp	%g2, %o0
+	bne,pn	%xcc, sparc64_v_fatal_trap
+	 mov	TLB_SFSR, %g1
+	stxa	%g0, [%g1] ASI_DMMU
+	membar	#Sync
+	set	.Lpp250_io_error, %g1
+	wrpr	%g1, 0, %tnpc
+	done
+	.size pp250_u2u_dae,.-pp250_u2u_dae
+#endif

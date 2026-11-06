@@ -72,7 +72,7 @@ char *prom_getbootargs(void);
 /* Miscellaneous routines, don't really fit in any category per se. */
 
 /* Reboot the machine with the command line passed. */
-void prom_reboot(const char *boot_command, bool capture);
+int prom_reboot(const char *boot_command, bool capture);
 
 /* Evaluate the forth string passed. */
 void prom_feval(const char *forth_string);
@@ -249,5 +249,7 @@ int prom_ihandle2path(int handle, char *buffer, int bufsize);
 /* Client interface level routines. */
 void prom_cif_init(void *cif_handler);
 int p1275_cmd_direct(unsigned long *);
+int p1275_cmd_try_direct(unsigned long *);
+bool primepower_uart_handoff_active(void);
 
 #endif /* !(__SPARC64_OPLIB_H) */

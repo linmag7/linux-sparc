@@ -9,8 +9,8 @@
 #include <asm/oplib.h>
 #include <asm/prom.h>
 #include <asm/irq.h>
-#include <asm/upa.h>
 #include <asm/spitfire.h>
+#include <asm/upa.h>
 
 #include "prom.h"
 
@@ -42,34 +42,21 @@ static unsigned long psycho_pcislot_imap_offset(unsigned long ino)
 	((ino & 0x20) ? (PSYCHO_ICLR_SCSI + (((ino) & 0x1f) << 3)) :  \
 			(PSYCHO_ICLR_A_SLOT0 + (((ino) & 0x1f)<<3)))
 
-static unsigned int psycho_irq_build(struct device_node *dp,
-				     unsigned int ino,
-				     void *_data)
+static unsigned long psycho_imap_offset(unsigned int ino)
 {
-	unsigned long controller_regs = (unsigned long) _data;
-	unsigned long imap, iclr;
-	unsigned long imap_off, iclr_off;
-	int inofixup = 0;
+	if (ino < PSYCHO_ONBOARD_IRQ_BASE)
+		return psycho_pcislot_imap_offset(ino);
+	return psycho_onboard_imap_offset(ino);
+}
+
+static unsigned int psycho_irq_build(struct device_node *dp, unsigned int ino,
+				     void *data)
+{
+	unsigned long base = (unsigned long)data;
 
 	ino &= 0x3f;
-	if (ino < PSYCHO_ONBOARD_IRQ_BASE) {
-		/* PCI slot */
-		imap_off = psycho_pcislot_imap_offset(ino);
-	} else {
-		/* Onboard device */
-		imap_off = psycho_onboard_imap_offset(ino);
-	}
-
-	/* Now build the IRQ bucket. */
-	imap = controller_regs + imap_off;
-
-	iclr_off = psycho_iclr_offset(ino);
-	iclr = controller_regs + iclr_off;
-
-	if ((ino & 0x20) == 0)
-		inofixup = ino & 0x03;
-
-	return build_irq(inofixup, iclr, imap);
+	return build_irq(ino < 0x20 ? ino & 3 : 0, base + psycho_iclr_offset(ino),
+			 base + psycho_imap_offset(ino));
 }
 
 static void __init psycho_irq_trans_init(struct device_node *dp)
@@ -81,9 +68,21 @@ static void __init psycho_irq_trans_init(struct device_node *dp)
 	if (tlb_type == sparc64_v &&
 	    of_property_match_string(of_root, "name", "FJSV,GPUZC-M") >= 0 &&
 	    of_property_match_string(of_root, "model", "250") >= 0 &&
-	    of_property_present(dp, "interrupt-extension"))
-		primepower_irq_mask = IMAP_IGN | IMAP_INO;
+	    of_property_present(dp, "interrupt-extension")) {
+		int len;
 
+		regs = of_get_property(dp, "reg", &len);
+		if (!regs || len < 4 * sizeof(*regs) || regs[3].reg_size < 0x90 ||
+		    regs[2].reg_size < psycho_iclr_offset(0x3f) + sizeof(u64)) {
+			prom_printf("PRIMEPOWER: invalid Psycho register windows\n");
+			prom_halt();
+		}
+		primepower_irq_boot_cpu = raw_smp_processor_id();
+		dp->irq_trans->data = primepower_attach_pbm(dp, regs);
+		primepower_irq_mask = IMAP_IGN | IMAP_INO;
+		dp->irq_trans->irq_build = primepower_irq_build;
+		return;
+	}
 
 	regs = of_get_property(dp, "reg", NULL);
 	dp->irq_trans->data = (void *) regs[2].phys_addr;

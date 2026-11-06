@@ -16,6 +16,37 @@
 #include <asm/ptrace.h>
 
 extern unsigned long primepower_irq_mask;
+extern unsigned int primepower_irq_boot_cpu;
+
+static inline bool primepower_irq_supported(void)
+{
+	return primepower_irq_mask != ~0UL;
+}
+
+#ifdef CONFIG_PCI
+#define PP250_CIF_RETAINED 3
+int primepower_cif_query_begin(unsigned long *args, unsigned long flags);
+int primepower_cif_begin(void);
+int primepower_cif_end(int admission);
+int primepower_cif_query_cancel(void);
+int primepower_prom_begin(void);
+void primepower_prom_end(void);
+int primepower_terminal_begin(void);
+int primepower_irq_handoff_begin(void);
+void primepower_irq_handoff_end(void);
+#else
+#define PP250_CIF_RETAINED 3
+static inline int primepower_cif_query_begin(unsigned long *args,
+					   unsigned long flags) { return 0; }
+static inline int primepower_cif_begin(void) { return 0; }
+static inline int primepower_cif_end(int admission) { return 0; }
+static inline int primepower_cif_query_cancel(void) { return 0; }
+static inline int primepower_prom_begin(void) { return 0; }
+static inline void primepower_prom_end(void) {}
+static inline int primepower_terminal_begin(void) { return 0; }
+static inline int primepower_irq_handoff_begin(void) { return 0; }
+static inline void primepower_irq_handoff_end(void) {}
+#endif
 
 /* IMAP/ICLR register defines */
 #define IMAP_VALID		0x80000000UL	/* IRQ Enabled		*/

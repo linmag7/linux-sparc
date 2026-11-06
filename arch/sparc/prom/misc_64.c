@@ -13,9 +13,16 @@
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/module.h>
+#include <linux/cpu.h>
+#include <linux/mutex.h>
+#include <linux/panic.h>
+#include <linux/sunsu_prom.h>
+#include <asm/prom.h>
+#include <asm/setup.h>
 
 #include <asm/openprom.h>
 #include <asm/oplib.h>
+#include <asm/irq.h>
 #include <asm/ldc.h>
 
 static int prom_service_exists(const char *service_name)
@@ -48,16 +55,104 @@ void prom_sun4v_guest_soft_state(void)
 	p1275_cmd_direct(args);
 }
 
+static DEFINE_MUTEX(primepower_monitor_mutex);
+static int primepower_uart_owner = -1;
+
+bool primepower_uart_handoff_active(void)
+{
+	return !in_interrupt() &&
+	       READ_ONCE(primepower_uart_owner) == raw_smp_processor_id();
+}
+
+
+static int primepower_uart_call(struct sunsu_prom_handoff *state, void *arg)
+{
+	unsigned long flags;
+	int ret;
+
+	if (oops_in_progress || panic_in_progress())
+		return -EOPNOTSUPP;
+	local_irq_save(flags);
+#ifdef CONFIG_SMP
+	smp_capture();
+#endif
+	ret = sunsu_prom_begin(state);
+	if (!ret) {
+		ret = primepower_irq_handoff_begin();
+		if (!ret) {
+			WRITE_ONCE(primepower_uart_owner, raw_smp_processor_id());
+			ret = p1275_cmd_try_direct(arg);
+			WRITE_ONCE(primepower_uart_owner, -1);
+			primepower_irq_handoff_end();
+		}
+	}
+	/* Failed restoration must not resume CPUs against uncertain UART state. */
+	if (sunsu_prom_end(state))
+		for (;;)
+			cpu_relax();
+#ifdef CONFIG_SMP
+	smp_release();
+#endif
+	local_irq_restore(flags);
+	return ret;
+}
+
+static int primepower_monitor_call(unsigned long *args)
+{
+	int ret;
+
+	if (!in_task() || preempt_count() || softirq_count() || irqs_disabled() ||
+	    oops_in_progress || panic_in_progress())
+		return -EOPNOTSUPP;
+	if (!mutex_trylock(&primepower_monitor_mutex))
+		return -EBUSY;
+	if (!cpus_read_trylock()) {
+		ret = -EBUSY;
+		goto unlock;
+	}
+	ret = sunsu_prom_handoff(of_console_input_device, of_console_device,
+				 primepower_uart_call, args);
+	cpus_read_unlock();
+unlock:
+	mutex_unlock(&primepower_monitor_mutex);
+	return ret;
+}
+
+static int prom_terminal_call(unsigned long *args)
+{
+	int state;
+
+	if (primepower_irq_supported() && prom_console_retired())
+		return primepower_monitor_call(args);
+	state = primepower_terminal_begin();
+
+	if (state < 0)
+		return state;
+	if (state)
+		return p1275_cmd_try_direct(args);
+	return p1275_cmd_direct(args);
+}
+
 /* Reset and reboot the machine with the command 'bcommand'. */
-void prom_reboot(const char *bcommand, bool capture)
+int prom_reboot(const char *bcommand, bool capture)
 {
 	unsigned long args[4];
 	unsigned long flags;
+	int err = 0;
 
 #ifdef CONFIG_SUN_LDOMS
 	if (ldom_domaining_enabled)
 		ldom_reboot(bcommand);
 #endif
+	if (primepower_irq_supported() && prom_console_retired()) {
+		if (!capture)
+			return -EOPNOTSUPP;
+		args[0] = (unsigned long)"boot";
+		args[1] = 1;
+		args[2] = 0;
+		args[3] = (unsigned long)bcommand;
+		return primepower_monitor_call(args);
+	}
 	local_irq_save(flags);
 #ifdef CONFIG_SMP
 	if (capture)
@@ -68,12 +163,21 @@ void prom_reboot(const char *bcommand, bool capture)
 	args[2] = 0;
 	args[3] = (unsigned long) bcommand;
 
-	p1275_cmd_direct(args);
+	if (capture) {
+		err = primepower_irq_handoff_begin();
+		if (!err) {
+			err = p1275_cmd_direct(args);
+			primepower_irq_handoff_end();
+		}
+	} else {
+		err = prom_terminal_call(args);
+	}
 #ifdef CONFIG_SMP
 	if (capture)
 		smp_release();
 #endif
 	local_irq_restore(flags);
+	return err;
 }
 
 /* Forth evaluate the expression contained in 'fstring'. */
@@ -102,6 +206,13 @@ int prom_cmdline(void)
 	unsigned long flags;
 	int ret;
 
+	if (primepower_irq_supported() && prom_console_retired()) {
+		args[0] = (unsigned long)"enter";
+		args[1] = 0;
+		args[2] = 0;
+		return primepower_monitor_call(args);
+	}
+
 	local_irq_save(flags);
 
 #ifdef CONFIG_SMP
@@ -112,7 +223,12 @@ int prom_cmdline(void)
 	args[1] = 0;
 	args[2] = 0;
 
-	ret = p1275_cmd_direct(args);
+	ret = primepower_irq_handoff_begin();
+	if (!ret) {
+		prom_printf("\n");
+		ret = p1275_cmd_direct(args);
+		primepower_irq_handoff_end();
+	}
 
 #ifdef CONFIG_SMP
 	smp_release();
@@ -137,7 +253,11 @@ again:
 	args[0] = (unsigned long) "exit";
 	args[1] = 0;
 	args[2] = 0;
-	p1275_cmd_direct(args);
+	if (prom_terminal_call(args)) {
+		local_irq_disable();
+		for (;;)
+			cpu_relax();
+	}
 	goto again; /* PROM is out to get me -DaveM */
 }
 
@@ -152,7 +272,7 @@ void prom_halt_power_off(void)
 	args[0] = (unsigned long) "SUNW,power-off";
 	args[1] = 0;
 	args[2] = 0;
-	p1275_cmd_direct(args);
+	prom_terminal_call(args);
 
 	/* if nothing else helps, we just halt */
 	prom_halt();

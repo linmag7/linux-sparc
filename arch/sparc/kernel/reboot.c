@@ -46,11 +46,13 @@ static void sparc_restart(char *cmd, bool capture)
 	p = strchr(reboot_command, '\n');
 	if (p)
 		*p = 0;
-	if (cmd)
-		prom_reboot(cmd, capture);
-	if (*reboot_command)
-		prom_reboot(reboot_command, capture);
-	prom_reboot("", capture);
+	if ((cmd && prom_reboot(cmd, capture)) ||
+	    (*reboot_command && prom_reboot(reboot_command, capture)) ||
+	    prom_reboot("", capture)) {
+		if (capture)
+			pr_emerg("Firmware reboot refused: interrupt handback incomplete\n");
+		return;
+	}
 	panic("Reboot failed!");
 }
 

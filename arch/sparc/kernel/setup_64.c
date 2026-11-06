@@ -31,6 +31,8 @@
 #include <linux/initrd.h>
 #include <linux/module.h>
 #include <linux/start_kernel.h>
+#include <linux/workqueue.h>
+#include <linux/panic.h>
 #include <linux/memblock.h>
 #include <uapi/linux/mount.h>
 
@@ -68,6 +70,21 @@
 DEFINE_SPINLOCK(ns87303_lock);
 EXPORT_SYMBOL(ns87303_lock);
 
+static bool prom_console_has_retired __read_mostly;
+
+bool prom_console_retired(void)
+{
+	/* Pair with exit after the console core has drained its writers. */
+	return smp_load_acquire(&prom_console_has_retired);
+}
+
+static int prom_console_exit(struct console *con)
+{
+	/* Console core has drained registered writers before calling exit. */
+	smp_store_release(&prom_console_has_retired, true);
+	return 0;
+}
+
 static void
 prom_console_write(struct console *con, const char *s, unsigned int n)
 {
@@ -80,6 +97,7 @@ unsigned long cmdline_memory_size = 0;
 static struct console prom_early_console = {
 	.name =		"earlyprom",
 	.write =	prom_console_write,
+	.exit =		prom_console_exit,
 	.flags =	CON_PRINTBUFFER | CON_BOOT | CON_ANYTIME,
 	.index =	-1,
 };
@@ -375,6 +393,10 @@ static void __init fujitsu_patch_error_traps(void (*handler)(void))
 					     sparc64_vii_ecc_trap;
 			if (tlb_type == sparc64_v && traps[j] == 0x63)
 				target = i ? sparc64_v_ecc_trap_tl1 : sparc64_v_ecc_trap;
+#ifdef CONFIG_PCI
+			if (tlb_type == sparc64_v && traps[j] == 0x32 && !i)
+				target = pp250_u2u_dae;
+#endif
 			delta = (long)target - (long)slot;
 
 			/* ba (disp22), followed by nop. */
@@ -803,12 +825,38 @@ void __init setup_arch(char **cmdline_p)
 
 extern int stop_a_enabled;
 
+static atomic_t primepower_break_pending = ATOMIC_INIT(0);
+
+static void primepower_break_workfn(struct work_struct *work)
+{
+	int ret;
+
+	if (READ_ONCE(stop_a_enabled) && system_state == SYSTEM_RUNNING &&
+	    !oops_in_progress && !panic_in_progress()) {
+		flush_user_windows();
+		ret = prom_cmdline();
+		if (ret)
+			pr_warn_ratelimited("PRIMEPOWER: firmware BREAK refused (%d)\n", ret);
+	}
+	atomic_set(&primepower_break_pending, 0);
+}
+
+static DECLARE_WORK(primepower_break_work, primepower_break_workfn);
+
 void sun_do_break(void)
 {
-	if (!stop_a_enabled)
+	if (!READ_ONCE(stop_a_enabled))
 		return;
+	if (primepower_irq_supported() && prom_console_retired()) {
+		if (in_nmi() || system_state != SYSTEM_RUNNING ||
+		    oops_in_progress || panic_in_progress())
+			return;
+		/* The serial interrupt still owns its port lock at this point. */
+		if (!atomic_cmpxchg(&primepower_break_pending, 0, 1))
+			schedule_work(&primepower_break_work);
+		return;
+	}
 
-	prom_printf("\n");
 	flush_user_windows();
 
 	prom_cmdline();
@@ -817,6 +865,11 @@ EXPORT_SYMBOL(sun_do_break);
 
 void sparc_panic_exit(void)
 {
+	if (primepower_irq_supported() && prom_console_retired()) {
+		WRITE_ONCE(stop_a_enabled, 0);
+		pr_emerg("PRIMEPOWER: firmware recovery unavailable; use an external reset\n");
+		return;
+	}
 	stop_a_enabled = 1;
 	pr_emerg("Press Stop-A (L1-A) from sun keyboard or send break\n"
 		 "twice on console to return to the boot prom\n");

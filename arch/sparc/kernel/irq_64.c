@@ -22,6 +22,7 @@
 #include <linux/seq_file.h>
 #include <linux/ftrace.h>
 #include <linux/irq.h>
+#include <linux/irqdesc.h>
 #include <linux/string_choices.h>
 
 #include <asm/ptrace.h>
@@ -46,6 +47,7 @@
 #include <asm/softirq_stack.h>
 
 #include "entry.h"
+#include "prom.h"
 #include "cpumap.h"
 #include "kstack.h"
 
@@ -210,6 +212,7 @@ struct irq_handler_data {
 	unsigned long	iclr;
 	unsigned long	imap;
 	bool		oberon;
+	struct primepower_imap *pp_map;
 };
 
 static inline unsigned int irq_data_to_handle(struct irq_data *data)
@@ -600,6 +603,262 @@ static void sun4v_virq_eoi(struct irq_data *data)
 		       dev_handle, dev_ino, err);
 }
 
+unsigned int primepower_irq_boot_cpu __ro_after_init;
+
+/* A masked IMAP can still name a firmware destination. */
+unsigned long primepower_observe_imap(struct primepower_controller *c,
+				      unsigned long value)
+{
+	unsigned int slot = (value & IMAP_TID_UPA) >> IMAP_TID_SHIFT;
+
+	lockdep_assert_held(&c->lock);
+	c->reserved_selectors |= BIT(slot);
+	return value;
+}
+
+static int primepower_irq_pin(struct primepower_imap *map, unsigned int irq)
+{
+	unsigned int pin;
+
+	for (pin = 0; irq && pin < ARRAY_SIZE(map->irq); pin++)
+		if (map->irq[pin] == irq)
+			return pin;
+	return -EINVAL;
+}
+
+static void primepower_irq_enable(struct irq_data *data)
+{
+	struct irq_handler_data *hd = irq_data_get_irq_handler_data(data);
+	struct primepower_imap *map = hd->pp_map;
+	unsigned long flags, value;
+	int pin = primepower_irq_pin(map, data->irq);
+
+	if (pin < 0)
+		return;
+	raw_spin_lock_irqsave(&map->controller->lock, flags);
+	if (map->controller->handoff_depth || map->quarantined)
+		goto out;
+	if (map->leased_slot && map->phase == PP250_ROUTED) {
+		if (primepower_route_startup(map))
+			goto out;
+		goto enabled;
+	}
+	if (map->phase != PP250_HOME)
+		goto out;
+	value = primepower_observe_imap(map->controller, upa_readq(hd->imap));
+	if (map->programmed && (map->enabled_pins & ~BIT(pin))) {
+		if (value != map->last_programmed) {
+			map->quarantined = true;
+			goto out;
+		}
+		goto enabled;
+	}
+	if (WARN_ON_ONCE((value & IMAP_VALID) && (value & IMAP_TID_UPA)))
+		goto out;
+
+	/* Firmware programs U2U slot zero for the boot CPU. */
+	value = (value & ~IMAP_TID_UPA) | IMAP_VALID;
+	upa_writeq(value, map->addr);
+	if (upa_readq(map->addr) != value) {
+		map->quarantined = true;
+		goto out;
+	}
+	map->last_programmed = value;
+	map->programmed = true;
+	map->target_cpu = primepower_irq_boot_cpu;
+enabled:
+	upa_writeq(ICLR_IDLE, hd->iclr);
+	map->enabled_pins |= BIT(pin);
+	map->masked_pins &= ~BIT(pin);
+	irq_data_update_effective_affinity(data, cpumask_of(map->target_cpu));
+out:
+	raw_spin_unlock_irqrestore(&map->controller->lock, flags);
+}
+
+/* Leave the shared IMAP valid; a disabled pin may remain in the sent state. */
+static void primepower_irq_disable(struct irq_data *data)
+{
+	struct irq_handler_data *hd = irq_data_get_irq_handler_data(data);
+	struct primepower_imap *map = hd->pp_map;
+	unsigned long flags;
+	int pin = primepower_irq_pin(map, data->irq);
+
+	if (pin < 0)
+		return;
+	raw_spin_lock_irqsave(&map->controller->lock, flags);
+	map->enabled_pins &= ~BIT(pin);
+	map->masked_pins |= BIT(pin);
+	raw_spin_unlock_irqrestore(&map->controller->lock, flags);
+	sun4u_irq_disable(data);
+}
+
+/* The IRQ core delays EOI for oneshot threads; masking must not clear a sibling's IMAP. */
+static void primepower_pin_mask(struct irq_data *data)
+{
+	struct irq_handler_data *hd = irq_data_get_irq_handler_data(data);
+	struct primepower_imap *map = hd->pp_map;
+	unsigned long flags;
+	int pin = primepower_irq_pin(map, data->irq);
+
+	if (pin < 0)
+		return;
+	raw_spin_lock_irqsave(&map->controller->lock, flags);
+	map->masked_pins |= BIT(pin);
+	raw_spin_unlock_irqrestore(&map->controller->lock, flags);
+}
+
+static void primepower_pin_unmask(struct irq_data *data)
+{
+	struct irq_handler_data *hd = irq_data_get_irq_handler_data(data);
+	struct primepower_imap *map = hd->pp_map;
+	unsigned long flags;
+	int pin = primepower_irq_pin(map, data->irq);
+
+	if (pin < 0)
+		return;
+	raw_spin_lock_irqsave(&map->controller->lock, flags);
+	map->masked_pins &= ~BIT(pin);
+	raw_spin_unlock_irqrestore(&map->controller->lock, flags);
+}
+
+static void primepower_irq_eoi(struct irq_data *data)
+{
+	struct irq_handler_data *hd = irq_data_get_irq_handler_data(data);
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&hd->pp_map->controller->lock, flags);
+	upa_writeq(ICLR_IDLE, hd->iclr);
+	raw_spin_unlock_irqrestore(&hd->pp_map->controller->lock, flags);
+}
+
+/* Shared pins must retain the common target until group migration is supported. */
+static bool primepower_shared_target(struct primepower_imap *map, unsigned int pin,
+				    const struct cpumask *mask)
+{
+	unsigned int other;
+
+	if (!(map->active_pins & ~BIT(pin)))
+		return true;
+	if (!cpumask_test_cpu(map->target_cpu, mask))
+		return false;
+	for (other = 0; other < ARRAY_SIZE(map->irq); other++) {
+		if (other == pin || !(map->active_pins & BIT(other)))
+			continue;
+		if (!map->requested[other] ||
+		    !cpumask_test_cpu(map->target_cpu, map->requested[other]))
+			return false;
+	}
+	return true;
+}
+
+/* Resource hooks run outside desc->lock; keep the descriptor-to-controller order. */
+static int primepower_pin_user(struct irq_data *data, bool open)
+{
+	struct irq_handler_data *hd = irq_data_get_irq_handler_data(data);
+	struct primepower_imap *map = hd->pp_map;
+	struct primepower_controller *c = map->controller;
+	struct irq_desc *desc = irq_data_to_desc(data);
+	struct cpumask *requested = NULL;
+	unsigned long flags;
+	int pin = primepower_irq_pin(map, data->irq);
+	int ret = 0;
+
+	if (pin < 0)
+		return pin;
+	if (open) {
+		requested = kzalloc(cpumask_size(), GFP_KERNEL);
+		if (!requested)
+			return -ENOMEM;
+	}
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	raw_spin_lock(&c->lock);
+	if (!open) {
+		requested = map->requested[pin];
+		map->requested[pin] = NULL;
+		map->active_pins &= ~BIT(pin);
+		map->enabled_pins &= ~BIT(pin);
+		map->masked_pins &= ~BIT(pin);
+		primepower_route_release(map);
+	} else if (map->quarantined || c->handoff_depth ||
+		   (map == pp250_route_map(c) &&
+		    (c->fw_pending || c->query_active ||
+		     (map->phase != PP250_HOME && (map->phase != PP250_ROUTED || pin))))) {
+		ret = -EBUSY;
+	} else if (map->requested[pin] ||
+		   !primepower_shared_target(map, pin, irq_data_get_affinity_mask(data))) {
+		ret = -EBUSY;
+	} else {
+		cpumask_copy(requested, irq_data_get_affinity_mask(data));
+		map->requested[pin] = requested;
+		requested = NULL;
+		map->active_pins |= BIT(pin);
+	}
+	raw_spin_unlock(&c->lock);
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	kfree(requested);
+	return ret;
+}
+
+static int primepower_request_resources(struct irq_data *data)
+{
+	struct irq_handler_data *hd = irq_data_get_irq_handler_data(data);
+	int err = primepower_route_request(hd->pp_map, data->irq);
+
+	if (err)
+		return err;
+	err = primepower_pin_user(data, true);
+	if (err)
+		primepower_pin_user(data, false);
+	return err;
+}
+
+static void primepower_release_resources(struct irq_data *data)
+{
+	primepower_pin_user(data, false);
+}
+
+static int primepower_set_affinity(struct irq_data *data,
+				   const struct cpumask *mask, bool force)
+{
+	struct irq_handler_data *hd = irq_data_get_irq_handler_data(data);
+	struct primepower_imap *map = hd->pp_map;
+	unsigned long flags;
+	int pin = primepower_irq_pin(map, data->irq);
+	int ret;
+
+	if (pin < 0)
+		return pin;
+	raw_spin_lock_irqsave(&map->controller->lock, flags);
+	if (!primepower_shared_target(map, pin, mask))
+		ret = -EBUSY;
+	else if (map->active_pins && !cpumask_test_cpu(map->target_cpu, mask) &&
+	    (irqd_irq_inprogress(data) || (irqd_irq_disabled(data) && !map->startup_pending)))
+		ret = -EBUSY;
+	else
+		ret = primepower_affinity_target(map, data->irq, mask);
+	if (ret >= 0) {
+		if (map->requested[pin])
+			cpumask_copy(map->requested[pin], mask);
+		irq_data_update_effective_affinity(data, cpumask_of(ret));
+		ret = IRQ_SET_MASK_OK;
+	}
+	raw_spin_unlock_irqrestore(&map->controller->lock, flags);
+	return ret;
+}
+
+static struct irq_chip primepower_irq = {
+	.name			= "pp250",
+	.irq_request_resources	= primepower_request_resources,
+	.irq_release_resources	= primepower_release_resources,
+	.irq_enable		= primepower_irq_enable,
+	.irq_disable		= primepower_irq_disable,
+	.irq_mask		= primepower_pin_mask,
+	.irq_unmask		= primepower_pin_unmask,
+	.irq_eoi		= primepower_irq_eoi,
+	.irq_set_affinity	= primepower_set_affinity,
+	.flags			= IRQCHIP_EOI_IF_HANDLED | IRQCHIP_EOI_THREADED,
+};
+
 static struct irq_chip sun4u_irq = {
 	.name			= "sun4u",
 	.irq_enable		= sun4u_irq_enable,
@@ -627,7 +886,8 @@ static struct irq_chip sun4v_virq = {
 	.flags			= IRQCHIP_EOI_IF_HANDLED,
 };
 
-unsigned int build_irq(int inofixup, unsigned long iclr, unsigned long imap)
+static unsigned int build_sun4u_irq(int inofixup, unsigned long iclr,
+				    unsigned long imap, struct irq_chip *chip)
 {
 	struct irq_handler_data *handler_data;
 	struct ino_bucket *bucket;
@@ -646,7 +906,7 @@ unsigned int build_irq(int inofixup, unsigned long iclr, unsigned long imap)
 			prom_halt();
 		}
 		bucket_set_irq(__pa(bucket), irq);
-		irq_set_chip_and_handler_name(irq, &sun4u_irq,
+		irq_set_chip_and_handler_name(irq, chip,
 					      handle_fasteoi_irq, "IVEC");
 	}
 
@@ -665,6 +925,47 @@ unsigned int build_irq(int inofixup, unsigned long iclr, unsigned long imap)
 	handler_data->iclr  = iclr;
 
 out:
+	return irq;
+}
+
+unsigned int build_irq(int inofixup, unsigned long iclr, unsigned long imap)
+{
+	return build_sun4u_irq(inofixup, iclr, imap, &sun4u_irq);
+}
+
+unsigned int primepower_build_irq(struct primepower_imap *map, unsigned int pbm,
+				  int pin, unsigned long iclr)
+{
+	unsigned long value = upa_readq(map->addr);
+	struct irq_handler_data *hd;
+	unsigned long flags;
+	unsigned int irq;
+
+	if ((value & IMAP_VALID) && (value & IMAP_TID_UPA)) {
+		pr_emerg("PRIMEPOWER: unsupported firmware IRQ target at %lx\n", map->addr);
+		prom_halt();
+	}
+
+	irq = build_sun4u_irq(pin, iclr, map->addr, &primepower_irq);
+	if (!irq)
+		return 0;
+	hd = irq_get_handler_data(irq);
+	raw_spin_lock_irqsave(&map->controller->lock, flags);
+	if (irq_get_chip(irq) != &primepower_irq || hd->iclr != iclr ||
+	    hd->imap != map->addr || (hd->pp_map && hd->pp_map != map) ||
+	    (map->irq[pin] && map->irq[pin] != irq)) {
+		raw_spin_unlock_irqrestore(&map->controller->lock, flags);
+		pr_emerg("PRIMEPOWER: conflicting IRQ mapping %lx/%d\n", map->addr, pin);
+		prom_halt();
+	}
+	if (!map->observed) {
+		map->first = primepower_observe_imap(map->controller, value);
+		map->observed = true;
+	}
+	map->pins[pbm] |= BIT(pin);
+	map->irq[pin] = irq;
+	hd->pp_map = map;
+	raw_spin_unlock_irqrestore(&map->controller->lock, flags);
 	return irq;
 }
 
@@ -840,6 +1141,8 @@ unsigned int sun4v_build_virq(u32 devhandle, unsigned int devino)
 out:
 	return irq;
 }
+
+/* Read by the diagnostic hardware-vector hook before C IRQ dispatch. */
 
 void *hardirq_stack[NR_CPUS];
 void *softirq_stack[NR_CPUS];
