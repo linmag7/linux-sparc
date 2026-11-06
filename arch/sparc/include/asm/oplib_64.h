@@ -80,7 +80,7 @@ void prom_feval(const char *forth_string);
 /* Enter the prom, with possibility of continuation with the 'go'
  * command in newer proms.
  */
-void prom_cmdline(void);
+int prom_cmdline(void);
 
 /* Enter the prom, with no chance of continuation for the stand-alone
  * which calls this.

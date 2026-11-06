@@ -96,10 +96,11 @@ EXPORT_SYMBOL(prom_feval);
 /* Drop into the prom, with the chance to continue with the 'go'
  * prom command.
  */
-void prom_cmdline(void)
+int prom_cmdline(void)
 {
 	unsigned long args[3];
 	unsigned long flags;
+	int ret;
 
 	local_irq_save(flags);
 
@@ -111,13 +112,14 @@ void prom_cmdline(void)
 	args[1] = 0;
 	args[2] = 0;
 
-	p1275_cmd_direct(args);
+	ret = p1275_cmd_direct(args);
 
 #ifdef CONFIG_SMP
 	smp_release();
 #endif
 
 	local_irq_restore(flags);
+	return ret;
 }
 
 /* Drop into the prom, but completely terminate the program.
@@ -432,7 +434,11 @@ void prom_stopself(void)
 	args[0] = (unsigned long) "SUNW,stop-self";
 	args[1] = 0;
 	args[2] = 0;
-	p1275_cmd_direct(args);
+	if (p1275_cmd_direct(args)) {
+		local_irq_disable();
+		for (;;)
+			cpu_relax();
+	}
 }
 
 void prom_idleself(void)

@@ -26,7 +26,8 @@ static int __prom_console_write_buf(const char *buf, int len)
 	args[5] = (unsigned int) len;
 	args[6] = (unsigned long) -1;
 
-	p1275_cmd_direct(args);
+	if (p1275_cmd_direct(args))
+		return -EBUSY;
 
 	ret = (int) args[6];
 	if (ret < 0)
