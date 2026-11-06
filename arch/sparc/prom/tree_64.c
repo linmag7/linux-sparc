@@ -27,7 +27,8 @@ static phandle prom_node_to_node(const char *type, phandle node)
 	args[3] = (unsigned int) node;
 	args[4] = (unsigned long) -1;
 
-	p1275_cmd_direct(args);
+	if (p1275_cmd_direct(args))
+		return (phandle)-1;
 
 	return (phandle) args[4];
 }
@@ -104,7 +105,8 @@ int prom_getproplen(phandle node, const char *prop)
 	args[4] = (unsigned long) prop;
 	args[5] = (unsigned long) -1;
 
-	p1275_cmd_direct(args);
+	if (p1275_cmd_direct(args))
+		return -1;
 
 	return (int) args[5];
 }
@@ -133,7 +135,8 @@ int prom_getproperty(phandle node, const char *prop,
 	args[6] = bufsize;
 	args[7] = (unsigned long) -1;
 
-	p1275_cmd_direct(args);
+	if (p1275_cmd_direct(args))
+		return -1;
 
 	return (int) args[7];
 }
@@ -252,7 +255,8 @@ char *prom_firstprop(phandle node, char *buffer)
 	args[5] = (unsigned long) buffer;
 	args[6] = (unsigned long) -1;
 
-	p1275_cmd_direct(args);
+	if (p1275_cmd_direct(args))
+		*buffer = 0;
 
 	return buffer;
 }
@@ -284,7 +288,8 @@ char *prom_nextprop(phandle node, const char *oprop, char *buffer)
 	args[5] = (unsigned long) buffer;
 	args[6] = (unsigned long) -1;
 
-	p1275_cmd_direct(args);
+	if (p1275_cmd_direct(args))
+		*buffer = 0;
 
 	return buffer;
 }
@@ -302,7 +307,8 @@ phandle prom_finddevice(const char *name)
 	args[3] = (unsigned long) name;
 	args[4] = (unsigned long) -1;
 
-	p1275_cmd_direct(args);
+	if (p1275_cmd_direct(args))
+		return (phandle)-1;
 
 	return (int) args[4];
 }
@@ -350,7 +356,8 @@ prom_setprop(phandle node, const char *pname, char *value, int size)
 	args[6] = size;
 	args[7] = (unsigned long) -1;
 
-	p1275_cmd_direct(args);
+	if (p1275_cmd_direct(args))
+		return -1;
 
 	return (int) args[7];
 }
@@ -367,7 +374,8 @@ inline phandle prom_inst2pkg(int inst)
 	args[3] = (unsigned int) inst;
 	args[4] = (unsigned long) -1;
 
-	p1275_cmd_direct(args);
+	if (p1275_cmd_direct(args))
+		return 0;
 
 	node = (int) args[4];
 	if ((s32)node == -1)
@@ -387,7 +395,8 @@ int prom_ihandle2path(int handle, char *buffer, int bufsize)
 	args[5] = bufsize;
 	args[6] = (unsigned long) -1;
 
-	p1275_cmd_direct(args);
+	if (p1275_cmd_direct(args))
+		return -1;
 
 	return (int) args[6];
 }
