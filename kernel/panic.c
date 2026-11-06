@@ -24,6 +24,9 @@
 #include <linux/delay.h>
 #include <linux/kexec.h>
 #include <linux/panic_notifier.h>
+#ifdef CONFIG_SPARC64
+#include <asm/setup.h>
+#endif
 #include <linux/sched.h>
 #include <linux/string_helpers.h>
 #include <linux/sysrq.h>
@@ -742,7 +745,9 @@ void vpanic(const char *fmt, va_list args)
 			reboot_mode = panic_reboot_mode;
 		emergency_restart();
 	}
-#ifdef __sparc__
+#ifdef CONFIG_SPARC64
+	sparc_panic_exit();
+#elif defined(__sparc__)
 	{
 		extern int stop_a_enabled;
 		/* Make sure the user can actually press Stop-A (L1-A) */

@@ -693,5 +693,12 @@ void sun_do_break(void)
 }
 EXPORT_SYMBOL(sun_do_break);
 
+void sparc_panic_exit(void)
+{
+	stop_a_enabled = 1;
+	pr_emerg("Press Stop-A (L1-A) from sun keyboard or send break\n"
+		 "twice on console to return to the boot prom\n");
+}
+
 int stop_a_enabled = 1;
 EXPORT_SYMBOL(stop_a_enabled);
