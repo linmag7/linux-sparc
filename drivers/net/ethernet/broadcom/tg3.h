@@ -3372,7 +3372,7 @@ struct tg3 {
 
 	struct tg3_hw_stats		*hw_stats;
 	dma_addr_t			stats_mapping;
-	struct work_struct		reset_task;
+	struct delayed_work		reset_task;
 	struct sk_buff			*tx_tstamp_skb;
 	u64				pre_tx_ts;
 

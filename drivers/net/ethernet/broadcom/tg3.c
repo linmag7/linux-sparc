@@ -7238,13 +7238,13 @@ static int tg3_poll_work(struct tg3_napi *tnapi, int work_done, int budget)
 static inline void tg3_reset_task_schedule(struct tg3 *tp)
 {
 	if (!test_and_set_bit(TG3_FLAG_RESET_TASK_PENDING, tp->tg3_flags))
-		schedule_work(&tp->reset_task);
+		schedule_delayed_work(&tp->reset_task, 0);
 }
 
 static inline void tg3_reset_task_cancel(struct tg3 *tp)
 {
 	if (test_and_clear_bit(TG3_FLAG_RESET_TASK_PENDING, tp->tg3_flags))
-		cancel_work_sync(&tp->reset_task);
+		cancel_delayed_work_sync(&tp->reset_task);
 	tg3_flag_clear(tp, TX_RECOVERY_PENDING);
 }
 
@@ -11262,10 +11262,14 @@ static int tg3_restart_hw(struct tg3 *tp, bool reset_phy)
 
 static void tg3_reset_task(struct work_struct *work)
 {
-	struct tg3 *tp = container_of(work, struct tg3, reset_task);
+	struct tg3 *tp = container_of(to_delayed_work(work), struct tg3, reset_task);
 	int err;
 
-	rtnl_lock();
+	/* Close and suspend can cancel this work while holding RTNL. */
+	if (!rtnl_trylock()) {
+		schedule_delayed_work(&tp->reset_task, 1);
+		return;
+	}
 	tg3_full_lock(tp, 0);
 
 	if (tp->pcierr_recovery || !netif_running(tp->dev) ||
@@ -11299,7 +11303,7 @@ static void tg3_reset_task(struct work_struct *work)
 		tp->irq_sync = 0;
 		tg3_napi_enable(tp);
 		/* Clear this flag so that tg3_reset_task_cancel() will not
-		 * call cancel_work_sync() and wait forever.
+		 * call cancel_delayed_work_sync() and wait forever.
 		 */
 		tg3_flag_clear(tp, RESET_TASK_PENDING);
 		netdev_unlock(tp->dev);
@@ -17761,7 +17765,7 @@ static int tg3_init_one(struct pci_dev *pdev,
 #endif
 	spin_lock_init(&tp->lock);
 	spin_lock_init(&tp->indirect_lock);
-	INIT_WORK(&tp->reset_task, tg3_reset_task);
+	INIT_DELAYED_WORK(&tp->reset_task, tg3_reset_task);
 
 	tp->regs = pci_ioremap_bar(pdev, BAR_0);
 	if (!tp->regs) {
