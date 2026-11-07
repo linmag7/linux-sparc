@@ -7303,8 +7303,8 @@ static int tg3_poll_msix(struct napi_struct *napi, int budget)
 
 tx_recovery:
 	/* work_done is guaranteed to be less than budget. */
-	napi_complete(napi);
 	tg3_reset_task_schedule(tp);
+	napi_complete(napi);
 	return work_done;
 }
 
@@ -7386,8 +7386,8 @@ static int tg3_poll(struct napi_struct *napi, int budget)
 
 tx_recovery:
 	/* work_done is guaranteed to be less than budget. */
-	napi_complete(napi);
 	tg3_reset_task_schedule(tp);
+	napi_complete(napi);
 	return work_done;
 }
 
