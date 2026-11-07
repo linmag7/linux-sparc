@@ -3373,6 +3373,9 @@ struct tg3 {
 	struct tg3_hw_stats		*hw_stats;
 	dma_addr_t			stats_mapping;
 	struct delayed_work		reset_task;
+	/* Serialize reset publication against gate transitions. */
+	spinlock_t			reset_lock;
+	bool				reset_enabled, reset_stopping;
 	struct sk_buff			*tx_tstamp_skb;
 	u64				pre_tx_ts;
 
