@@ -18119,6 +18119,8 @@ static void tg3_remove_one(struct pci_dev *pdev)
 		tg3_reset_task_stop(tp);
 		rtnl_unlock();
 
+		unregister_netdev(dev);
+
 		tg3_ptp_fini(tp);
 
 		release_firmware(tp->fw);
@@ -18128,7 +18130,6 @@ static void tg3_remove_one(struct pci_dev *pdev)
 			tg3_mdio_fini(tp);
 		}
 
-		unregister_netdev(dev);
 		if (tp->aperegs) {
 			iounmap(tp->aperegs);
 			tp->aperegs = NULL;
