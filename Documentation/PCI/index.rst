@@ -12,6 +12,7 @@ PCI Bus Subsystem
    pciebus-howto
    pci-iov-howto
    msi-howto
+   msi-delivery-loss
    sysfs-pci
    acpi-info
    pci-error-recovery
