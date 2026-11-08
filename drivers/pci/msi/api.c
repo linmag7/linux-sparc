@@ -10,6 +10,8 @@
 
 #include <linux/export.h>
 #include <linux/irq.h>
+#include <linux/pm_runtime.h>
+#include <linux/suspend.h>
 
 #include "msi.h"
 
@@ -409,3 +411,92 @@ bool pci_msi_enabled(void)
 	return pci_msi_enable;
 }
 EXPORT_SYMBOL(pci_msi_enabled);
+
+/**
+ * pci_msi_notify_lost() - Notify drivers of permanent MSI delivery loss
+ * @dev: referenced PCI device affected by contained MSI delivery failure
+ * @outcome: non-NULL destination for the observed notification outcome
+ *
+ * The caller must block further MSI allocations and hold no device, driver
+ * or MSI-controller locks. This sleepable API must not run from PM callbacks.
+ * The callback runs with the device lock and a runtime-PM reference held.
+ * See Documentation/PCI/msi-delivery-loss.rst for the callback contract.
+ * An error does not establish device quiescence or completion of DMA.
+ *
+ * Return: 0 for completed recovery, 1 if no MSI recovery was needed, or errno.
+ */
+int pci_msi_notify_lost(struct pci_dev *dev,
+			enum pci_msi_loss_outcome *outcome)
+{
+	unsigned int sleep_flags;
+	int ret;
+
+	*outcome = PCI_MSI_LOSS_UNRESOLVED;
+	sleep_flags = lock_system_sleep();
+	ret = pm_runtime_resume_and_get(&dev->dev);
+	if (ret < 0) {
+		*outcome = PCI_MSI_LOSS_PM_FAILED;
+		goto unlock_sleep;
+	}
+	device_lock(&dev->dev);
+	if (!device_is_registered(&dev->dev) || pci_dev_is_disconnected(dev)) {
+		*outcome = PCI_MSI_LOSS_UNAVAILABLE;
+		ret = -ENODEV;
+	} else if (dev->error_state != pci_channel_io_normal ||
+		   dev->current_state != PCI_D0) {
+		*outcome = PCI_MSI_LOSS_BUSY;
+		ret = -EBUSY;
+	} else if (!dev->msi_enabled && !dev->msix_enabled) {
+		*outcome = PCI_MSI_LOSS_NO_MSI;
+		ret = 1;
+	} else if (!dev->driver || !dev->driver->msi_lost) {
+		*outcome = PCI_MSI_LOSS_UNSUPPORTED;
+		ret = -EOPNOTSUPP;
+	} else {
+		ret = dev->driver->msi_lost(dev);
+		if (ret < 0) {
+			*outcome = PCI_MSI_LOSS_DRIVER_FAILED;
+		} else if (dev->msi_enabled || dev->msix_enabled) {
+			*outcome = PCI_MSI_LOSS_STILL_ENABLED;
+			ret = -EBUSY;
+		} else {
+			*outcome = ret ? PCI_MSI_LOSS_NO_MSI : PCI_MSI_LOSS_RECOVERED;
+		}
+	}
+	device_unlock(&dev->dev);
+	pm_runtime_put(&dev->dev);
+unlock_sleep:
+	unlock_system_sleep(sleep_flags);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(pci_msi_notify_lost);
+
+/**
+ * pci_msi_report_failure() - Report unresolved MSI delivery loss
+ * @dev: referenced PCI device whose MSI delivery remains contained
+ *
+ * Call without owner or driver locks, outside PM callbacks. This does not
+ * resume the device or establish hardware/DMA quiescence. The current
+ * binding may differ from an earlier pci_msi_notify_lost() call; the
+ * callback must inspect its own state before marking the device unavailable.
+ *
+ * Return: 0 if marked unavailable, 1 if no MSI user remains, or errno.
+ */
+int pci_msi_report_failure(struct pci_dev *dev)
+{
+	unsigned int sleep_flags;
+	int ret;
+
+	sleep_flags = lock_system_sleep();
+	device_lock(&dev->dev);
+	if (!device_is_registered(&dev->dev) || !dev->driver)
+		ret = -ENODEV;
+	else if (!dev->driver->msi_lost_failed)
+		ret = -EOPNOTSUPP;
+	else
+		ret = dev->driver->msi_lost_failed(dev);
+	device_unlock(&dev->dev);
+	unlock_system_sleep(sleep_flags);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(pci_msi_report_failure);
