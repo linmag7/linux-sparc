@@ -3376,6 +3376,7 @@ struct tg3 {
 	/* Serialize reset publication against gate transitions. */
 	spinlock_t			reset_lock;
 	bool				reset_enabled, reset_stopping;
+	bool				msi_failed;
 	struct sk_buff			*tx_tstamp_skb;
 	u64				pre_tx_ts;
 
