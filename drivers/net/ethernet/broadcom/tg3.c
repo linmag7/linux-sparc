@@ -4695,11 +4695,18 @@ static bool tg3_phy_copper_fetch_rmtadv(struct tg3 *tp, u32 *rmtadv)
 	return true;
 }
 
+static void tg3_carrier_on(struct tg3 *tp)
+{
+	guard(spinlock_irqsave)(&tp->reset_lock);
+	if (!tp->msi_failed)
+		netif_carrier_on(tp->dev);
+}
+
 static bool tg3_test_and_report_link_chg(struct tg3 *tp, bool curr_link_up)
 {
 	if (curr_link_up != tp->link_up) {
 		if (curr_link_up) {
-			netif_carrier_on(tp->dev);
+			tg3_carrier_on(tp);
 		} else {
 			netif_carrier_off(tp->dev);
 			if (tp->phy_flags & TG3_PHYFLG_MII_SERDES)
@@ -7271,7 +7278,7 @@ static void tg3_reset_task_enable(struct tg3 *tp)
 {
 	ASSERT_RTNL();
 	guard(spinlock_irqsave)(&tp->reset_lock);
-	if (!tp->reset_stopping)
+	if (!tp->reset_stopping && !tp->msi_failed)
 		tp->reset_enabled = true;
 }
 
@@ -7504,6 +7511,9 @@ static inline void tg3_netif_stop(struct tg3 *tp)
 /* tp->lock must be held */
 static inline void tg3_netif_start(struct tg3 *tp)
 {
+	if (READ_ONCE(tp->msi_failed))
+		return;
+
 	tg3_ptp_resume(tp);
 
 	/* NOTE: unconditional netif_tx_wake_all_queues is only
@@ -7513,7 +7523,7 @@ static inline void tg3_netif_start(struct tg3 *tp)
 	netif_tx_wake_all_queues(tp->dev);
 
 	if (tp->link_up)
-		netif_carrier_on(tp->dev);
+		tg3_carrier_on(tp);
 
 	tg3_napi_enable(tp);
 	tp->napi[0].hw_status->status |= SD_STATUS_UPDATED;
@@ -8423,7 +8433,7 @@ static void tg3_set_loopback(struct net_device *dev, netdev_features_t features)
 
 		spin_lock_bh(&tp->lock);
 		tg3_mac_loopback(tp, true);
-		netif_carrier_on(tp->dev);
+		tg3_carrier_on(tp);
 		spin_unlock_bh(&tp->lock);
 		netdev_info(dev, "Internal MAC loopback mode enabled.\n");
 	} else {
@@ -11841,6 +11851,9 @@ static int tg3_open(struct net_device *dev)
 {
 	struct tg3 *tp = netdev_priv(dev);
 	int err;
+
+	if (READ_ONCE(tp->msi_failed))
+		return -EIO;
 
 	if (tp->pcierr_recovery) {
 		netdev_err(dev, "Failed to open device. PCI error recovery "
@@ -18217,8 +18230,14 @@ static int tg3_suspend(struct device *device)
 {
 	struct net_device *dev = dev_get_drvdata(device);
 	struct tg3 *tp = netdev_priv(dev);
+	int err = 0;
 
 	rtnl_lock();
+
+	if (READ_ONCE(tp->msi_failed)) {
+		err = -EIO;
+		goto unlock;
+	}
 
 	if (!netif_running(dev))
 		goto unlock;
@@ -18244,7 +18263,7 @@ static int tg3_suspend(struct device *device)
 
 unlock:
 	rtnl_unlock();
-	return 0;
+	return err;
 }
 
 static int tg3_resume(struct device *device)
@@ -18494,6 +18513,9 @@ static void tg3_io_resume(struct pci_dev *pdev)
 
 	rtnl_lock();
 
+	if (READ_ONCE(tp->msi_failed))
+		goto done;
+
 	if (!netdev || !netif_running(netdev))
 		goto done;
 
@@ -18527,6 +18549,85 @@ done:
 	rtnl_unlock();
 }
 
+static int tg3_msi_lost(struct pci_dev *pdev)
+{
+	struct net_device *dev = pci_get_drvdata(pdev);
+	struct tg3 *tp;
+	int ret;
+
+	if (!dev)
+		return -ENODEV;
+	tp = netdev_priv(dev);
+	rtnl_lock();
+	if (READ_ONCE(tp->msi_failed)) {
+		ret = -EIO;
+		goto unlock;
+	}
+	if (dev->reg_state != NETREG_REGISTERED || tp->reset_stopping) {
+		ret = -ENODEV;
+		goto unlock;
+	}
+	if (tp->pcierr_recovery || pdev->error_state != pci_channel_io_normal) {
+		ret = -EBUSY;
+		goto unlock;
+	}
+	if (!netif_running(dev) ||
+	    (!tg3_flag(tp, USING_MSI) && !tg3_flag(tp, USING_MSIX))) {
+		ret = 1;
+		goto unlock;
+	}
+
+	/* Close cancels queued resets; an executing reset serializes on RTNL. */
+	dev_close(dev);
+	if (pdev->msi_enabled || pdev->msix_enabled) {
+		ret = -EIO;
+		goto unlock;
+	}
+	ret = dev_open(dev, NULL);
+	if (!ret && (pdev->msi_enabled || pdev->msix_enabled)) {
+		dev_close(dev);
+		ret = -EIO;
+	}
+	if (ret)
+		netdev_err(dev, "MSI recovery failed (%d); interface left down\n", ret);
+unlock:
+	rtnl_unlock();
+	return ret;
+}
+
+static int tg3_msi_lost_failed(struct pci_dev *pdev)
+{
+	struct net_device *dev = pci_get_drvdata(pdev);
+	struct tg3 *tp;
+	int ret = 0;
+
+	if (!dev)
+		return -ENODEV;
+	tp = netdev_priv(dev);
+	rtnl_lock();
+	if (dev->reg_state != NETREG_REGISTERED || tp->reset_stopping) {
+		ret = -ENODEV;
+		goto unlock;
+	}
+	if (READ_ONCE(tp->msi_failed))
+		goto unlock;
+	if (!tg3_flag(tp, USING_MSI) && !tg3_flag(tp, USING_MSIX)) {
+		ret = 1;
+		goto unlock;
+	}
+	scoped_guard(spinlock_irqsave, &tp->reset_lock)
+		WRITE_ONCE(tp->msi_failed, true);
+	tg3_reset_task_cancel(tp);
+	tg3_timer_stop(tp);
+	netif_device_detach(dev);
+	netif_carrier_off(dev);
+	/* Keep mappings and DMA resources; only software availability changes. */
+	netdev_err(dev, "MSI delivery failed; interface remains unavailable\n");
+unlock:
+	rtnl_unlock();
+	return ret;
+}
+
 static const struct pci_error_handlers tg3_err_handler = {
 	.error_detected	= tg3_io_error_detected,
 	.slot_reset	= tg3_io_slot_reset,
@@ -18538,6 +18639,8 @@ static struct pci_driver tg3_driver = {
 	.id_table	= tg3_pci_tbl,
 	.probe		= tg3_init_one,
 	.remove		= tg3_remove_one,
+	.msi_lost	= tg3_msi_lost,
+	.msi_lost_failed = tg3_msi_lost_failed,
 	.err_handler	= &tg3_err_handler,
 	.driver.pm	= &tg3_pm_ops,
 	.shutdown	= tg3_shutdown,
