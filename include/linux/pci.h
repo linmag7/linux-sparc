@@ -1012,6 +1012,10 @@ struct module;
  *              registers.
  * @sriov_get_vf_total_msix: PF driver callback to get the total number of
  *              MSI-X vectors available for distribution to the VFs.
+ * @msi_lost: Recover permanent MSI loss; see
+ *              Documentation/PCI/msi-delivery-loss.rst.
+ * @msi_lost_failed: Mark an affected MSI user unavailable without initiating
+ *              hardware access; see Documentation/PCI/msi-delivery-loss.rst.
  * @err_handler: See Documentation/PCI/pci-error-recovery.rst
  * @groups:	Sysfs attribute groups.
  * @dev_groups: Attributes attached to the device that will be
@@ -1037,6 +1041,8 @@ struct pci_driver {
 	int  (*sriov_configure)(struct pci_dev *dev, int num_vfs); /* On PF */
 	int  (*sriov_set_msix_vec_count)(struct pci_dev *vf, int msix_vec_count); /* On PF */
 	u32  (*sriov_get_vf_total_msix)(struct pci_dev *pf);
+	int (*msi_lost)(struct pci_dev *dev);
+	int (*msi_lost_failed)(struct pci_dev *dev);
 	const struct pci_error_handlers *err_handler;
 	const struct attribute_group **groups;
 	const struct attribute_group **dev_groups;
@@ -1758,7 +1764,22 @@ struct msix_entry {
 	u16	entry;	/* Driver uses to specify entry, OS writes */
 };
 
+enum pci_msi_loss_outcome {
+	PCI_MSI_LOSS_UNRESOLVED,
+	PCI_MSI_LOSS_PM_FAILED,
+	PCI_MSI_LOSS_UNAVAILABLE,
+	PCI_MSI_LOSS_BUSY,
+	PCI_MSI_LOSS_UNSUPPORTED,
+	PCI_MSI_LOSS_NO_MSI,
+	PCI_MSI_LOSS_DRIVER_FAILED,
+	PCI_MSI_LOSS_STILL_ENABLED,
+	PCI_MSI_LOSS_RECOVERED,
+};
+
 #ifdef CONFIG_PCI_MSI
+int pci_msi_report_failure(struct pci_dev *dev);
+int pci_msi_notify_lost(struct pci_dev *dev,
+			enum pci_msi_loss_outcome *outcome);
 int pci_msi_vec_count(struct pci_dev *dev);
 void pci_disable_msi(struct pci_dev *dev);
 int pci_msix_vec_count(struct pci_dev *dev);
@@ -1812,6 +1833,17 @@ static inline unsigned int pci_irq_type(struct pci_dev *pdev)
 }
 
 #else
+static inline int pci_msi_report_failure(struct pci_dev *dev)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int pci_msi_notify_lost(struct pci_dev *dev,
+				      enum pci_msi_loss_outcome *outcome)
+{
+	*outcome = PCI_MSI_LOSS_UNSUPPORTED;
+	return -EOPNOTSUPP;
+}
 static inline int pci_msi_vec_count(struct pci_dev *dev) { return -ENOSYS; }
 static inline void pci_disable_msi(struct pci_dev *dev) { }
 static inline int pci_msix_vec_count(struct pci_dev *dev) { return -ENOSYS; }
