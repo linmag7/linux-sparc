@@ -1,0 +1,21 @@
+Archive validation -- 2026-11-18
+
+104 original patch/cover files verified byte-for-byte against local exports.
+18 kernel branches plus this catalog branch. Each branch range has exactly
+its documented own-patch count. Original author/date and supplied trailers
+were preserved; reconstructed commit IDs differ with committer metadata.
+Stable patch IDs were checked; dependency-context differences were verified
+by reverse-applying the original diff to recover the exact parent tree.
+
+PRIMEPOWER integration tree: cfef1d209713abf3d8ab4663931361f65b0c2229
+Matches the previously exported and qualified review69 tree exactly.
+M3000 bounded MSI integration tree: c73224d6797ad8db902dd0c78992e0fc53173014
+Matches the previously verified minimal policy-candidate tree exactly.
+
+No new compile or runtime qualification was performed. Existing master,
+drivers, fujitsu-sparc64, sparc32-fixes and sparc64-fixes are unchanged.
+The checked-out worktree remains clean on master. Temporary indexes and
+replay logs were kept outside this archive repository.
+
+This is a personal GitHub archive, not a new submission to Linux maintainers.
+Existing testing limits and RFC status remain; see README.rst and covers.
