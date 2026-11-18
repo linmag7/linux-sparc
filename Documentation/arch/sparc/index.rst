@@ -7,6 +7,7 @@ Sparc Architecture
 
    console
    oberon-msi
+   m3000-full-stack
    oberon-error-interrupts
    adi
 

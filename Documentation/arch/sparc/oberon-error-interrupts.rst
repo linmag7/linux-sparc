@@ -3,6 +3,11 @@
 M3000 v5 error-interrupt development branch
 =========================================
 
+.. note::
+
+   This page records the standalone error-only parent. The combined branch
+   is documented in m3000-full-stack.rst, including its new build results.
+
 Status
 ------
 
