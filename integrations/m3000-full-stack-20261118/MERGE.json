@@ -1,0 +1,9 @@
+{
+  "commit": "f7a2632f69239ed3c31a81d0ce48cc92cf169345",
+  "parents": [
+    "7c9d6f5241d03911a343cf8f95e4b260c0d4efbb",
+    "e6d25a01d3a54f227ef177fb88bcf2991bc8c26f"
+  ],
+  "resolution": "Retain both additive include sets, diagnostic sysfs block and documentation entries",
+  "runtime_tested": false
+}

@@ -1,0 +1,10 @@
+{
+  "msi_block_identical_to_msi_parent": true,
+  "error_diagnostic_block_identical_to_error_parent": true,
+  "error_irq_files_identical": true,
+  "generic_and_driver_files_identical_to_msi_parent": true,
+  "known_warning_files_identical_to_vanilla": true,
+  "error_route_ino": "0x3e",
+  "msi_queue_ino_range": "0x18-0x3b",
+  "live_combined_route_tested": false
+}

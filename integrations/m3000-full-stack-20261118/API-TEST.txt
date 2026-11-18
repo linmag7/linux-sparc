@@ -1,0 +1,2 @@
+PASS: 21 extracted API cases; balanced mock locks/PM references and current-binding dispatch
+Sequential mocked services, not kernel lockdep, runtime-PM hardware or concurrent unbind qualification.

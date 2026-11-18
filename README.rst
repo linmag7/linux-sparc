@@ -164,3 +164,11 @@ ASLR experiment, and exact historical full-stack reproductions. SPARC32
 uses the recorded original bases, not current master. Existing SPARC64 and
 driver entries above are preserved. Personal archive publication may include
 experimental work; Linux submission holds are recorded separately.
+
+
+M3000 full-stack integration (18 November 2026)
+---------------------------------------------
+The integration/m3000-full-stack-20261118 branch combines the v5 error
+work and latest bounded MSI stack, preserving both archive histories.
+UP/SMP builds and mocked tests passed; the combined image is not booted.
+See integrations/m3000-full-stack-20261118/ for dependencies and evidence.

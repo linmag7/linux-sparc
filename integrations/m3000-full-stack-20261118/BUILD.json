@@ -1,0 +1,80 @@
+[
+  {
+    "config": "smp",
+    "commit": "f7a2632f69239ed3c31a81d0ce48cc92cf169345",
+    "release": "7.3.0-rc1-m3000-fullstack-20261118-smp",
+    "hashes": {
+      "vmlinux": "36efbd7b036ae0f6aab6c593bd01f46393bfe6c4c3523e7cd486bf3b215ce88d",
+      ".config": "85baea3fef7f64a8b8f619159377214cc5d2607ee29b920ec9d14e03272c4237",
+      "System.map": "851ce8ffe65d18ec371cd16b71e84f5a9ba5874bc99d99d136f5bf2e2c6fb326"
+    },
+    "warnings": [
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/fs/iomap/iter.c:64 function parameter 'ret' not described in 'iomap_iter_continue'",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/fs/iomap/iter.c:64 function parameter 'ret' not described in 'iomap_iter_continue'",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/ipc/sem.c:629 This comment starts with '/**', but isn't a kernel-doc comment. Refer to Documentation/doc-guide/kernel-doc.rst",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/block/blk-map.c:366 Excess function parameter 'op' description in 'bio_copy_kern'",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/block/blk-map.c:366 Excess function parameter 'op' description in 'bio_copy_kern'",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/block/blk-mq-dma.c:379 Excess function parameter 'state' description in 'blk_rq_integrity_dma_map_iter_next'",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/block/blk-mq-dma.c:379 Excess function parameter 'state' description in 'blk_rq_integrity_dma_map_iter_next'",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/lib/rhashtable.c:1167 function parameter 'key' not described in '__rhashtable_init'",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/lib/rhashtable.c:1167 expecting prototype for rhashtable_init(). Prototype was for __rhashtable_init() instead",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/lib/rhashtable.c:1242 function parameter 'key' not described in '__rhltable_init'",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/lib/rhashtable.c:1242 expecting prototype for rhltable_init(). Prototype was for __rhltable_init() instead",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptbase.c:2299:18: warning: variable \u2018a\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptbase.c:2815:23: warning: variable \u2018sz_last\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptbase.c:2815:13: warning: variable \u2018sz_first\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptbase.c:3964:13: warning: variable \u2018diag1val\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptbase.c:6977:26: warning: variable \u2018time_count\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptbase.c:7146:26: warning: variable \u2018time_count\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptscsih.c:1036:35: warning: variable \u2018id\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptscsih.c:1036:26: warning: variable \u2018channel\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptscsih.c:1148:26: warning: variable \u2018ioc\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptscsih.c:1177:13: warning: variable \u2018sz1\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptscsih.c:1522:26: warning: variable \u2018time_count\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptscsih.c:2345:34: warning: variable \u2018vtarget\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptsas.c:1449:12: warning: variable \u2018fw_id\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptsas.c:1527:12: warning: variable \u2018fw_id\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptsas.c:4790:26: warning: variable \u2018timeleft\u2019 set but not used [-Wunused-but-set-variable]"
+    ],
+    "boot_tested": false
+  },
+  {
+    "config": "up",
+    "commit": "f7a2632f69239ed3c31a81d0ce48cc92cf169345",
+    "release": "7.3.0-rc1-m3000-fullstack-20261118-up",
+    "hashes": {
+      "vmlinux": "1943948c2df36e87533379eda6478e192abe9d3f0f87f80a09ca75cc17df0bfd",
+      ".config": "e711e879938c7fa0a6d6efdd822eb1871b96a2b23beaa310da806a626eb61a05",
+      "System.map": "5ff05f7410dda625e738b2da4dafa8a94ae18cc11a7d419f98ffd491bbdb08db"
+    },
+    "warnings": [
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/ipc/sem.c:629 This comment starts with '/**', but isn't a kernel-doc comment. Refer to Documentation/doc-guide/kernel-doc.rst",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/fs/iomap/iter.c:64 function parameter 'ret' not described in 'iomap_iter_continue'",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/fs/iomap/iter.c:64 function parameter 'ret' not described in 'iomap_iter_continue'",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/block/blk-map.c:366 Excess function parameter 'op' description in 'bio_copy_kern'",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/block/blk-map.c:366 Excess function parameter 'op' description in 'bio_copy_kern'",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/block/blk-mq-dma.c:379 Excess function parameter 'state' description in 'blk_rq_integrity_dma_map_iter_next'",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/block/blk-mq-dma.c:379 Excess function parameter 'state' description in 'blk_rq_integrity_dma_map_iter_next'",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/lib/rhashtable.c:1167 function parameter 'key' not described in '__rhashtable_init'",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/lib/rhashtable.c:1167 expecting prototype for rhashtable_init(). Prototype was for __rhashtable_init() instead",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/lib/rhashtable.c:1242 function parameter 'key' not described in '__rhltable_init'",
+      "Warning: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/lib/rhashtable.c:1242 expecting prototype for rhltable_init(). Prototype was for __rhltable_init() instead",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptbase.c:2299:18: warning: variable \u2018a\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptbase.c:2815:23: warning: variable \u2018sz_last\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptbase.c:2815:13: warning: variable \u2018sz_first\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptbase.c:3964:13: warning: variable \u2018diag1val\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptbase.c:6977:26: warning: variable \u2018time_count\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptbase.c:7146:26: warning: variable \u2018time_count\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptscsih.c:1036:35: warning: variable \u2018id\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptscsih.c:1036:26: warning: variable \u2018channel\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptscsih.c:1148:26: warning: variable \u2018ioc\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptscsih.c:1177:13: warning: variable \u2018sz1\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptscsih.c:1522:26: warning: variable \u2018time_count\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptscsih.c:2345:34: warning: variable \u2018vtarget\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptsas.c:1449:12: warning: variable \u2018fw_id\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptsas.c:1527:12: warning: variable \u2018fw_id\u2019 set but not used [-Wunused-but-set-variable]",
+      "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/m3000/fullstack-integration-20261118/source/drivers/message/fusion/mptsas.c:4790:26: warning: variable \u2018timeleft\u2019 set but not used [-Wunused-but-set-variable]"
+    ],
+    "boot_tested": false
+  }
+]
