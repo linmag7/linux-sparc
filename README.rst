@@ -123,3 +123,17 @@ To extract the mail archive without checking out this branch:
   git archive patch-archive | tar -x -C /path/to/empty/export
 
 GitHub publication uses explicit new refs only; master is not replaced.
+
+Personal repository publication policy
+--------------------------------------
+In this project, "upstream" can mean Magnus Lindholm's personal GitHub
+repository, https://github.com/linmag7/linux-sparc. Publishing here does
+not mean submission to or acceptance by Linux subsystem maintainers.
+
+Experimental, incomplete and partially tested series may be archived and
+pushed here. They need clear commit messages, Magnus's Signed-off-by tag,
+and accurate status/dependency records. Production readiness and full
+hardware qualification are not prerequisites for personal publication.
+Keep Linux-maintainer submission readiness as a separate status. Do not
+change original patch files or overstate testing to make an archive appear
+release-ready. Retain old snapshots and publish later revisions separately.
