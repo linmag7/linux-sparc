@@ -1,0 +1,18 @@
+Local preparation only; user will push after review.
+Explicit refs to publish (no master/category branches, no force):
+
+patch-archive
+archive/2026-11-18/sparc32/bitlock-r7
+archive/2026-11-18/sparc32/generic-v2
+archive/2026-11-18/sparc32/generic-r7-historical
+archive/2026-11-18/sparc32/hypersparc-fixes-r7
+archive/2026-11-18/sparc32/optimizations-r7-held
+archive/2026-11-18/sparc32/viking-demap-r8
+archive/2026-11-18/sparc32/external-prerequisites
+archive/2026-11-18/sparc32/foundation-highload
+archive/2026-11-18/sparc32/foundation-memblock
+archive/2026-11-18/sparc32/foundation-platform-legacy
+archive/2026-11-18/sparc32/kaloz-casa-integration
+archive/2026-11-18/sparc32/aslr-experimental
+archive/2026-11-18/sparc32/fullstack-r5opt-historical
+archive/2026-11-18/sparc32/fullstack-protnone1-historical

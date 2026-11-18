@@ -1,0 +1,45 @@
+From adf5500200bc7b3862830284af5704ae78e3355d Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH 5/9] sparc32: preset modified and referenced bits in kmap PTEs
+
+Preset SRMMU_DIRTY and SRMMU_REF in kernel kmap PTEs, matching
+PAGE_KERNEL. These mappings do not use hardware M/R transitions for user
+dirty/accessed accounting. The protection applies to persistent PKMAP
+entries as well as transient local mappings.
+
+ROSS SPARC RISC User's Guide, section 4.2.1.1, describes hardware table
+walks and PTE updates when a write or translating operation encounters an
+unset M/R bit. Presetting the bits avoids those updates for kernel
+accesses. A whole-context cache flush does not perform that translating
+access.
+
+This also provides the PTE convention needed by subsequent alias
+reconciliation, but does not by itself provide that protocol.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/highmem.h | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/arch/sparc/include/asm/highmem.h b/arch/sparc/include/asm/highmem.h
+index 7253c608bf53..f281ed4da405 100644
+--- a/arch/sparc/include/asm/highmem.h
++++ b/arch/sparc/include/asm/highmem.h
+@@ -33,7 +33,12 @@ void sparc32_kmap_local_cache_flush(unsigned long vaddr);
+ void sparc32_kmap_local_tlb_flush(unsigned long vaddr);
+ void sparc32_kmap_local_post_map(unsigned long vaddr, pte_t pteval);
+ 
+-#define kmap_prot __pgprot(SRMMU_ET_PTE | SRMMU_PRIV | SRMMU_CACHE)
++/*
++ * Kernel kmap mappings do not need hardware dirty/accessed tracking.
++ * Match PAGE_KERNEL and avoid M/R updates during translated accesses.
++ */
++#define kmap_prot __pgprot(SRMMU_ET_PTE | SRMMU_PRIV | SRMMU_CACHE | \
++			   SRMMU_DIRTY | SRMMU_REF)
+ extern pte_t *pkmap_page_table;
+ 
+ /*
+-- 
+2.43.0
+

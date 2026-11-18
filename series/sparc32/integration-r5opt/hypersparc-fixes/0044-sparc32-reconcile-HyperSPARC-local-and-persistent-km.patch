@@ -1,0 +1,477 @@
+From 046e64235f5812f3619e3fa4798af33b57af5a52 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH 44/66] sparc32: reconcile HyperSPARC local and persistent kmap
+ aliases
+
+A highmem page can have concurrent local mappings on different CPUs and a
+persistent PKMAP mapping at different cache colours. Independent cacheable
+aliases can retain conflicting data, including when a mapping is restored
+by the scheduler.
+
+Track live kmap_local mappings and pin any existing highmem PKMAP alias
+before changing its PTE. On a conflict, publish every CPU's cache lines
+before changing cacheability, then demap the old translations. Keep the
+registry stable during the PTE changes and use per-CPU publication flags
+in the cross-call rendezvous, avoiding atomic hash locks at level 15.
+
+Pin PKMAP before taking the registry lock. Hold the registry stable across
+remote publication, PTE changes and demaps, with lock order registry ->
+cross_call_lock. Callbacks must not take the registry lock, kmap_lock or
+generic atomic hash locks; they use native PTE SWAPs and single-writer
+flags. Never acquire kmap_lock under the registry lock.
+
+On unmap, publish locally before removing the registry entry, including
+scheduler teardown. The subsequent remote sweep is outside the registry
+lock. The map/unmap paths retain whole-cache maintenance.
+
+The pin is restricted to highmem pages. The architecture high-get hook
+returns NULL so reuse cannot bypass the post-map maintenance. This hook
+also affects other processors' highmem mapping selection; their existing
+cache/TLB maintenance remains in place.
+
+Earlier integrated kernels passed targeted cross-CPU alias and PKMAP
+recycling tests. The folded implementation still needs fresh hardware
+validation; no matched performance result is claimed here.
+
+Keep the registry, pinned PKMAP lifetime, capture protocol and teardown
+ordering together. A partial implementation must not expose unpinned PTE
+updates, change cacheability before remote publication, or call hashed
+atomic operations from the level-15 callback.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/highmem.h |  18 +-
+ arch/sparc/mm/srmmu.c            | 336 ++++++++++++++++++++++++++++++-
+ 2 files changed, 345 insertions(+), 9 deletions(-)
+
+diff --git a/arch/sparc/include/asm/highmem.h b/arch/sparc/include/asm/highmem.h
+index d451232625d3..dce82a85e4a4 100644
+--- a/arch/sparc/include/asm/highmem.h
++++ b/arch/sparc/include/asm/highmem.h
+@@ -26,7 +26,23 @@
+ #include <asm/vaddrs.h>
+ #include <asm/pgtsrmmu.h>
+ 
++/* Reconcile a pinned persistent mapping after kmap_lock is released. */
++#define ARCH_HAS_KMAP_FLUSH_TLB
++void kmap_flush_tlb(unsigned long addr);
++
++/* Pin PKMAP aliases, but use fixmap slots so the post-map hook runs. */
++#define ARCH_NEEDS_KMAP_HIGH_GET
++void *kmap_high_get(const struct page *page);
++
++static inline void *arch_kmap_local_high_get(const struct page *page)
++{
++	return NULL;
++}
++
++#define arch_kmap_local_high_get arch_kmap_local_high_get
++
+ void sparc32_kmap_local_cache_flush(unsigned long vaddr);
++void sparc32_kmap_local_cache_flush_unmap(unsigned long vaddr);
+ void sparc32_kmap_local_tlb_flush(unsigned long vaddr);
+ void sparc32_kmap_local_post_map(unsigned long vaddr, pte_t pteval);
+ 
+@@ -58,7 +74,7 @@ extern pte_t *pkmap_page_table;
+ 
+ /* FIXME: Use __flush_*_one(vaddr) instead of flush_*_all() -- Anton */
+ #define arch_kmap_local_pre_unmap(vaddr) \
+-	sparc32_kmap_local_cache_flush(vaddr)
++	sparc32_kmap_local_cache_flush_unmap(vaddr)
+ #define arch_kmap_local_post_map(vaddr, pteval) \
+ 	sparc32_kmap_local_post_map(vaddr, pteval)
+ #define arch_kmap_local_post_unmap(vaddr) \
+diff --git a/arch/sparc/mm/srmmu.c b/arch/sparc/mm/srmmu.c
+index aefc4bd5ebe3..af2848f36289 100644
+--- a/arch/sparc/mm/srmmu.c
++++ b/arch/sparc/mm/srmmu.c
+@@ -13,6 +13,7 @@
+ #include <linux/spinlock.h>
+ #include <linux/memblock.h>
+ #include <linux/pagemap.h>
++#include <linux/percpu.h>
+ #include <linux/vmalloc.h>
+ #include <linux/kdebug.h>
+ #include <linux/export.h>
+@@ -88,21 +89,344 @@ static int is_hypersparc;
+ 
+ static int srmmu_cache_pagetables;
+ 
+-void sparc32_kmap_local_cache_flush(unsigned long vaddr)
++/*
++ * Keep the single-mapping case cacheable.  On a colour conflict, publish the
++ * data and make every live alias uncached until it is unmapped.
++ */
++struct hypersparc_kmap_slots {
++	/* Zero denotes an unused slot; live entries encode PFN + 1. */
++	unsigned long pfn[KM_MAX_IDX];
++};
++
++static DEFINE_PER_CPU(struct hypersparc_kmap_slots, hypersparc_kmap_slots);
++static DEFINE_SPINLOCK(hypersparc_kmap_lock);
++
++static int hypersparc_kmap_slot(unsigned long vaddr, int cpu)
+ {
+-	flush_cache_all();
++	int idx = (FIXADDR_TOP - vaddr) >> PAGE_SHIFT;
++
++	return idx - FIX_KMAP_BEGIN - KM_MAX_IDX * cpu;
++}
++
++static bool hypersparc_kmap_alias_active(unsigned long pfn)
++{
++	bool found = false;
++	int cpu;
++	int i;
++
++	for_each_online_cpu(cpu) {
++		struct hypersparc_kmap_slots *slots;
++
++		slots = per_cpu_ptr(&hypersparc_kmap_slots, cpu);
++		for (i = 0; i < KM_MAX_IDX; i++) {
++			if (slots->pfn[i] != pfn + 1)
++				continue;
++			found = true;
++		}
++	}
++	return found;
++}
++
++/* Forward and reverse of one layout; keep them together. */
++static unsigned long hypersparc_kmap_slot_va(int cpu, int slot)
++{
++	return __fix_to_virt(FIX_KMAP_BEGIN + KM_MAX_IDX * cpu + slot);
++}
++
++/*
++ * Change only cacheability, after all CPUs have published their old lines.
++ * The initiator holds the registry lock and pins PKMAP before taking it.
++ * No locks, generic atomics or generic page-table hooks are allowed here:
++ * this also runs from a level-15 cross-call.  set_pte() is the SRMMU's
++ * native SWAP, not the hashed-lock xchg() implementation.
++ */
++static void hypersparc_uncache_one(unsigned long alias, unsigned long pfn)
++{
++	pte_t *ptep = virt_to_kpte(alias);
++	pte_t pte;
++
++	if (!ptep)
++		return;
++	pte = ptep_get(ptep);
++	if (!pte_present(pte) || pte_pfn(pte) != pfn)
++		return;
++	if (pte_val(pte) & SRMMU_CACHE)
++		set_pte(ptep, __pte(pte_val(pte) & ~SRMMU_CACHE));
++}
++
++static void hypersparc_uncache_kmap_aliases(unsigned long pfn)
++{
++	int cpu, i;
++
++	for_each_online_cpu(cpu) {
++		struct hypersparc_kmap_slots *slots;
++
++		slots = per_cpu_ptr(&hypersparc_kmap_slots, cpu);
++		for (i = 0; i < KM_MAX_IDX; i++) {
++			if (slots->pfn[i] == pfn + 1)
++				hypersparc_uncache_one(
++					hypersparc_kmap_slot_va(cpu, i), pfn);
++		}
++	}
++}
++
++#ifdef CONFIG_SMP
++struct hyper_alias_sync {
++	unsigned long published[NR_CPUS];
++	unsigned long updated;
++	unsigned long pfn;
++	unsigned long pkmap;
++	cpumask_t mask;
++	int writer;
++};
++
++static void hypersparc_kmap_sync_wait(struct hyper_alias_sync *sync)
++{
++	int cpu;
++
++	/* Pair with peer acquires: publish this CPU's completed flush. */
++	smp_store_release(&sync->published[smp_processor_id()], 1);
++	for_each_cpu(cpu, &sync->mask)
++		/* Observe every CPU's publication before the following demap. */
++		while (!smp_load_acquire(&sync->published[cpu]))
++			cpu_relax();
++}
++
++static void hypersparc_kmap_remote_sync(unsigned long arg)
++{
++	struct hyper_alias_sync *sync = (struct hyper_alias_sync *)arg;
++
++	local_ops->cache_all();
++	hypersparc_kmap_sync_wait(sync);
++
++	/*
++	 * The initiator is waiting inside xc1(), so one remote performs the
++	 * PTE updates.  All owners are now quiescent, with their old data
++	 * published.  Single-writer flags avoid the atomic hash locks.
++	 */
++	if (smp_processor_id() == sync->writer) {
++		hypersparc_uncache_kmap_aliases(sync->pfn);
++		if (sync->pkmap)
++			hypersparc_uncache_one(sync->pkmap, sync->pfn);
++		/* Publish every PTE update before peers demap or resume. */
++		smp_store_release(&sync->updated, 1);
++	} else {
++		/* Pair with the writer before using the changed PTEs. */
++		while (!smp_load_acquire(&sync->updated))
++			cpu_relax();
++	}
++	local_ops->tlb_all();
++}
++#endif
++
++static void hypersparc_unregister_kmap(unsigned long vaddr)
++{
++	struct hypersparc_kmap_slots *slots;
++	unsigned long flags;
++	int slot;
++
++	slot = hypersparc_kmap_slot(vaddr, smp_processor_id());
++	if (WARN_ON_ONCE(slot < 0 || slot >= KM_MAX_IDX))
++		return;
++
++	spin_lock_irqsave(&hypersparc_kmap_lock, flags);
++	slots = this_cpu_ptr(&hypersparc_kmap_slots);
++	slots->pfn[slot] = 0;
++	spin_unlock_irqrestore(&hypersparc_kmap_lock, flags);
++}
++
++/*
++ * Caller holds the registry lock throughout publication, PTE replacement
++ * and the final local demap.  This prevents both slot reuse and another
++ * mapper or fast-path state reader from seeing a partial transition.
++ *
++ * Lock order is registry -> cross_call_lock.  No cross-call callback may
++ * acquire the registry lock; our callback uses only local cache/TLB ops,
++ * native PTE SWAPs and single-writer flags.  In particular, never acquire
++ * kmap_lock here: PKMAP recycling can cross-call while holding it.
++ */
++static void hypersparc_sync_aliases(unsigned long pfn, unsigned long pkmap)
++{
++#ifdef CONFIG_SMP
++	struct hyper_alias_sync sync;
++
++	memset(&sync, 0, sizeof(sync));
++	/* The set cannot shrink under us: HOTPLUG_CPU depends on SPARC64. */
++	cpumask_copy(&sync.mask, cpu_online_mask);
++	sync.pfn = pfn;
++	sync.pkmap = pkmap;
++	sync.writer = cpumask_any_but(&sync.mask, smp_processor_id());
++
++	local_ops->cache_all();
++	if (sync.writer < nr_cpu_ids) {
++		/*
++		 * Do not touch any mapped data after publishing.  The local
++		 * CPU stays inside xc1() until every remote has demapped;
++		 * it demaps its own translations before dropping the lock.
++		 */
++		/* Publish our completed flush before peers can enter the rendezvous. */
++		smp_store_release(&sync.published[smp_processor_id()], 1);
++		xc1(hypersparc_kmap_remote_sync, (unsigned long)&sync);
++	} else {
++		hypersparc_uncache_kmap_aliases(pfn);
++		if (pkmap)
++			hypersparc_uncache_one(pkmap, pfn);
++	}
++	local_ops->tlb_all();
++#else
++	sparc32_cachetlb_ops->cache_all();
++	hypersparc_uncache_kmap_aliases(pfn);
++	if (pkmap)
++		hypersparc_uncache_one(pkmap, pfn);
++	sparc32_cachetlb_ops->tlb_all();
++#endif
+ }
+ 
+ /*
+- * Nothing has touched the new mapping yet, so flushing other aliases of this
+- * page here is as good as doing it before the pte was set.
++ * Track every live slot.  Conservatively treat any second alias of the
++ * same PFN as a conflict, even if its colour happens to match.
++ */
++static void hypersparc_track_kmap(unsigned long vaddr, pte_t pteval)
++{
++	unsigned long pfn = pte_pfn(pteval);
++	struct hypersparc_kmap_slots *slots;
++	struct page *page;
++	unsigned long flags;
++	void *pkmap;
++	bool conflict;
++	int slot;
++
++	slot = hypersparc_kmap_slot(vaddr, smp_processor_id());
++	if (WARN_ON_ONCE(slot < 0 || slot >= KM_MAX_IDX))
++		return;
++	page = pfn_valid(pfn) ? pfn_to_page(pfn) : NULL;
++	/*
++	 * kmap_local_pfn() also maps lowmem through a fixmap slot.  Its
++	 * page_address() is the direct mapping, not a PKMAP slot that
++	 * kmap_high_get() can pin or index in pkmap_count[].
++	 */
++	if (page && !PageHighMem(page))
++		page = NULL;
++
++	/*
++	 * arch_kmap_local_high_get() may have missed a PKMAP mapping that
++	 * another cpu created a moment later, so look again - and pin it this
++	 * time, because an unpinned mapping can be recycled between reading
++	 * its pte and writing one back.
++	 *
++	 * kmap_high_get() must be called OUTSIDE the registry lock: generic
++	 * PKMAP recycling can cross-call while holding kmap_lock, and nesting
++	 * that inside our lock would be the lock/IPI dependency that hangs
++	 * this machine.
++	 */
++	for (;;) {
++		pkmap = page ? kmap_high_get(page) : NULL;
++
++		spin_lock_irqsave(&hypersparc_kmap_lock, flags);
++		if (!pkmap && page && page_address(page)) {
++			/*
++			 * One appeared between the two.  Retry and pin it.
++			 * page_address() decides only whether to retry; its
++			 * pte is never touched unpinned.
++			 */
++			spin_unlock_irqrestore(&hypersparc_kmap_lock, flags);
++			continue;
++		}
++
++		conflict = hypersparc_kmap_alias_active(pfn) || pkmap;
++		slots = this_cpu_ptr(&hypersparc_kmap_slots);
++		slots->pfn[slot] = pfn + 1;
++		if (conflict)
++			hypersparc_sync_aliases(pfn, (unsigned long)pkmap);
++		spin_unlock_irqrestore(&hypersparc_kmap_lock, flags);
++		break;
++	}
++
++	if (pkmap)
++		kunmap_high(page);
++}
++
++/*
++ * The other ordering: a persistent kmap() created while kmap_local aliases of
++ * the same page are already live.  arch_kmap_local_high_get() cannot help
++ * there - the local mappings exist first - so reconcile from the PKMAP side.
++ *
++ * kmap_flush_tlb() is called from kmap() after kmap_high() has taken the
++ * reference and dropped kmap_lock, so the slot is pinned for the duration and
++ * cannot be recycled underneath us.  That is what makes it safe to touch this
++ * pte at all; page_address() alone would not be.
++ */
++void kmap_flush_tlb(unsigned long addr)
++{
++	unsigned long flags, pfn;
++	bool conflict;
++	pte_t *ptep, pte;
++
++	if (!is_hypersparc)
++		return;
++	if (addr < PKMAP_BASE || addr >= PKMAP_BASE + PKMAP_SIZE)
++		return;
++
++	ptep = virt_to_kpte(addr);
++	if (!ptep)
++		return;
++	pte = ptep_get(ptep);
++	if (!pte_present(pte))
++		return;
++	pfn = pte_pfn(pte);
++
++	spin_lock_irqsave(&hypersparc_kmap_lock, flags);
++	conflict = hypersparc_kmap_alias_active(pfn);
++	if (conflict)
++		hypersparc_sync_aliases(pfn, addr);
++	spin_unlock_irqrestore(&hypersparc_kmap_lock, flags);
++}
++EXPORT_SYMBOL(kmap_flush_tlb);
++
++/*
++ * Runs on both the map and the scheduler restore path, so the tracking stays
++ * correct across a context switch without generic code having to change.
+  */
+ void sparc32_kmap_local_post_map(unsigned long vaddr, pte_t pteval)
+ {
++	/*
++	 * Nothing has touched the new mapping yet, so flushing other aliases
++	 * of this page here is as good as doing it before the pte was set.
++	 */
+ 	sparc32_kmap_local_cache_flush(vaddr);
++	if (is_hypersparc)
++		hypersparc_track_kmap(vaddr, pteval);
+ 	sparc32_kmap_local_tlb_flush(vaddr);
+ }
+ 
++void sparc32_kmap_local_cache_flush(unsigned long vaddr)
++{
++	flush_cache_all();
++}
++
++void sparc32_kmap_local_cache_flush_unmap(unsigned long vaddr)
++{
++	/*
++	 * Whole cache, every cpu.  A page flush would reach only the colour
++	 * being unmapped, and a persistent kmap() alias at another colour is
++	 * not in this registry, so narrowing belongs with the PKMAP work.
++	 */
++	if (is_hypersparc) {
++#ifdef CONFIG_SMP
++		/* kmap_local pins us to the slot owner; publish before removal. */
++		local_ops->cache_all();
++#else
++		sparc32_cachetlb_ops->cache_all();
++#endif
++		hypersparc_unregister_kmap(vaddr);
++#ifdef CONFIG_SMP
++		xc0(local_ops->cache_all);
++#endif
++		return;
++	}
++	flush_cache_all();
++}
++
+ void sparc32_kmap_local_tlb_flush(unsigned long vaddr)
+ {
+ 	/* Remote translating cache operations can populate these entries. */
+@@ -411,7 +735,6 @@ static inline void add_to_ctx_list(struct ctx_list *head, struct ctx_list *entry
+ #define add_to_free_ctxlist(entry) add_to_ctx_list(&ctx_free, entry)
+ #define add_to_used_ctxlist(entry) add_to_ctx_list(&ctx_used, entry)
+ 
+-
+ static inline void alloc_context(struct mm_struct *old_mm, struct mm_struct *mm)
+ {
+ 	struct ctx_list *ctxp;
+@@ -554,7 +877,6 @@ static inline void srmmu_unmapioaddr(unsigned long virt_addr)
+ 	pmd_t *pmdp;
+ 	pte_t *ptep;
+ 
+-
+ 	pgdp = pgd_offset_k(virt_addr);
+ 	p4dp = p4d_offset(pgdp, virt_addr);
+ 	pudp = pud_offset(p4dp, virt_addr);
+@@ -604,7 +926,6 @@ extern void swift_flush_tlb_range(struct vm_area_struct *vma,
+ 				  unsigned long start, unsigned long end);
+ extern void swift_flush_tlb_page(struct vm_area_struct *vma, unsigned long page);
+ 
+-
+ /*
+  * The following are all MBUS based SRMMU modules, and therefore could
+  * be found in a multiprocessor configuration.  On the whole, these
+@@ -1313,7 +1634,6 @@ static void turbosparc_flush_tlb_page(struct vm_area_struct *vma, unsigned long
+ 	FLUSH_END
+ }
+ 
+-
+ static void poke_turbosparc(void)
+ {
+ 	unsigned long mreg = srmmu_get_mmureg();

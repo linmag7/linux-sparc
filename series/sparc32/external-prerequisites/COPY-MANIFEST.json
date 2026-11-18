@@ -1,0 +1,52 @@
+[
+  {
+    "source": "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/sparc32-build-prerequisites-20261018/0001-kaloz-keep-pil-raised.patch",
+    "copy": "sparc32-build-prerequisites-20261018/0001-kaloz-keep-pil-raised.patch",
+    "sha256": "e4cfda282a06c55720d14ecc167d495f855337391c7fc90660d8ca7521aec481"
+  },
+  {
+    "source": "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/sparc32-build-prerequisites-20261018/0002-moussavi-sun4m-observed-ipis.patch",
+    "copy": "sparc32-build-prerequisites-20261018/0002-moussavi-sun4m-observed-ipis.patch",
+    "sha256": "d0b355b7b254650e9c88e0dbfa67b8609a7cf9dabc914523cacd335422cd9cbf"
+  },
+  {
+    "source": "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/sparc32-build-prerequisites-20261018/PROVENANCE.json",
+    "copy": "sparc32-build-prerequisites-20261018/PROVENANCE.json",
+    "sha256": "a9e5582543c6009d777469ae46db584454b82df910f26ad881e4352ee4b8f01a"
+  },
+  {
+    "source": "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/sparc32-build-prerequisites-20261018/README.txt",
+    "copy": "sparc32-build-prerequisites-20261018/README.txt",
+    "sha256": "f5d401fd0221e4e462123717e4db0c03ae2831f8c118309e2eba4804675ccbd7"
+  },
+  {
+    "source": "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/sparc32-build-prerequisites-20261018/verify-imre-prerequisite.py",
+    "copy": "sparc32-build-prerequisites-20261018/verify-imre-prerequisite.py",
+    "sha256": "236760b94f8f57158164bcb142a58e0f8d97d13924ed480f99391577562a9430"
+  },
+  {
+    "source": "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/sparc32-build-prerequisites-20261018/verify-sparc32-prerequisites.py",
+    "copy": "sparc32-build-prerequisites-20261018/verify-sparc32-prerequisites.py",
+    "sha256": "4440ac069c3e9c861ef6cbab996ac025e9187db5f892881bc8005fb26ca6ede1"
+  },
+  {
+    "source": "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/sparc32-fullstack-prerequisites-20261028/0003-moussavi-protnone-present.patch",
+    "copy": "sparc32-fullstack-prerequisites-20261028/0003-moussavi-protnone-present.patch",
+    "sha256": "b716e35a1efb1c05bd57fa57c98dad6ff55477e876bcc072c8c4971502b07d6b"
+  },
+  {
+    "source": "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/sparc32-fullstack-prerequisites-20261028/PROVENANCE.json",
+    "copy": "sparc32-fullstack-prerequisites-20261028/PROVENANCE.json",
+    "sha256": "5f734905f2aa93ab75671e21c30ccb551c3e202b168fc9d5003606b89250908b"
+  },
+  {
+    "source": "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/sparc32-fullstack-prerequisites-20261028/README.txt",
+    "copy": "sparc32-fullstack-prerequisites-20261028/README.txt",
+    "sha256": "a3d34de6be718a54bd8056cb3d768dc705db9db8f35d724c8cf617b73a624fe7"
+  },
+  {
+    "source": "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/sparc32-fullstack-prerequisites-20261028/verify-fullstack-prerequisites.py",
+    "copy": "sparc32-fullstack-prerequisites-20261028/verify-fullstack-prerequisites.py",
+    "sha256": "32261cc787b97f10692a2641ceea5bba436c2f573eb9f88bee901b7a1517154f"
+  }
+]

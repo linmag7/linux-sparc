@@ -1,0 +1,86 @@
+From e250948d9b91fe1f9a7aea51091352eaa9a77769 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH 35/66] sparc32: enroll and order CPUs before switching address
+ spaces
+
+The task-switch macro records a CPU in the incoming active_mm mask, but
+kthread_use_mm() changes address spaces without switching tasks. A
+shootdown can therefore miss a CPU using that mm.
+
+Move enrollment to switch_mm(), before installing the context. User task
+switches and activate_mm() pass here, as does kthread_use_mm(). Lazy
+kernel threads inherit the already active mm on that CPU; they do not
+introduce a different hardware context. Keep CPU bits until mm teardown,
+as in the preceding fix, and remove the duplicate switch_to() update.
+
+SPARC32 smp_mb() currently expands to a compiler barrier. The hash lock in
+set_bit() is acquired before the mask store, so it does not provide a
+hardware StoreLoad fence after enrollment. Use STBAR followed by a native
+LDSTUB of a private stack byte before changing the context. STBAR orders
+prior stores before the atomic operation, including under PSO; LDSTUB
+blocks subsequent memory operations. The memory clobber orders the
+compiler. SPARC Architecture Manual V8 sections 6.2 and 6.3 describe these
+rules.
+
+The shootdown side updates PTEs using native SWAP before inspecting the mm
+mask. A newly enrolling CPU must publish its bit before accessing the new
+address space: either a concurrent shootdown includes it, or it observes
+the updated tables. A returning CPU remains enrolled and cannot be
+omitted. Do not rely on processor-specific cache maintenance or a later
+refcount operation for this ordering. The local helper does not change the
+general SPARC32 barrier implementation and acquires no shared lock.
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/switch_to_32.h |  1 -
+ arch/sparc/mm/srmmu.c                 | 16 ++++++++++++++++
+ 2 files changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/arch/sparc/include/asm/switch_to_32.h b/arch/sparc/include/asm/switch_to_32.h
+index 42eeafcb8a41..1d9855abbc00 100644
+--- a/arch/sparc/include/asm/switch_to_32.h
++++ b/arch/sparc/include/asm/switch_to_32.h
+@@ -58,7 +58,6 @@ extern struct thread_info *current_set[NR_CPUS];
+ #define switch_to(prev, next, last) do {						\
+ 	SWITCH_ENTER(prev);								\
+ 	SWITCH_DO_LAZY_FPU(next);							\
+-	cpumask_set_cpu(smp_processor_id(), mm_cpumask(next->active_mm));		\
+ 	__asm__ __volatile__(								\
+ 	"sethi	%%hi(here - 0x8), %%o7\n\t"						\
+ 	"mov	%%g6, %%g3\n\t"								\
+diff --git a/arch/sparc/mm/srmmu.c b/arch/sparc/mm/srmmu.c
+index 5089ca684645..2b1cec80bde0 100644
+--- a/arch/sparc/mm/srmmu.c
++++ b/arch/sparc/mm/srmmu.c
+@@ -468,6 +468,18 @@ static void __init sparc_context_init(int numctx)
+ 		add_to_free_ctxlist(ctx_list_pool + ctx);
+ }
+ 
++/* Order CPU enrollment before accesses through the new context. */
++static inline void sparc32_mm_context_barrier(void)
++{
++#ifdef CONFIG_SMP
++	unsigned char scratch = 0;
++
++	/* STBAR orders prior stores; LDSTUB blocks subsequent loads. */
++	asm volatile("stbar\n\tldstub %0, %%g0"
++		     : "+m" (scratch) : : "memory");
++#endif
++}
++
+ void switch_mm(struct mm_struct *old_mm, struct mm_struct *mm,
+ 	       struct task_struct *tsk)
+ {
+@@ -480,6 +492,10 @@ void switch_mm(struct mm_struct *old_mm, struct mm_struct *mm,
+ 		srmmu_ctxd_set(&srmmu_context_table[mm->context], mm->pgd);
+ 	}
+ 
++	/* kthread_use_mm() can enter an mm without a task switch. */
++	cpumask_set_cpu(smp_processor_id(), mm_cpumask(mm));
++	sparc32_mm_context_barrier();
++
+ 	if (sparc_cpu_model == sparc_leon)
+ 		leon_switch_mm();
+ 

@@ -1,0 +1,35 @@
+From 1df3fe7e7bae99dad4ec9d1f2d990517524ae87d Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Mon, 28 Sep 2026 00:20:35 +0200
+Subject: [PATCH 03/66] sparc32: advertise relocatable kernel with HdrS 0x0300
+
+HdrS version 0x0300 tells the boot loader that the kernel supports being
+located somewhere other than physical 0x4000, which is where SILO places
+the image on the traditional path. Anything older is copied back down
+there, and refused outright when it no longer fits.
+
+sparc32 could not make that claim before, because setup_arch() took
+phys_base from the lowest memory bank rather than from what PAGE_OFFSET
+maps to. It can now, so say so.
+
+Reviewed-by: Sam Ravnborg <sam@ravnborg.org>
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+Message-ID: <20260928002035.1-4-linmag7@gmail.com>
+Message-ID: <2ed67cfac2dd3847de19eeba566254593a661e93.1790548064.git.linmag7@gmail.com>
+---
+ arch/sparc/kernel/head_32.S | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/sparc/kernel/head_32.S b/arch/sparc/kernel/head_32.S
+index 8c320fa25a67..11a1746829a4 100644
+--- a/arch/sparc/kernel/head_32.S
++++ b/arch/sparc/kernel/head_32.S
+@@ -69,7 +69,7 @@ sun4e_notsup:
+  */
+ 	.ascii	"HdrS"
+ 	.word	LINUX_VERSION_CODE
+-	.half	0x0203		/* HdrS version */
++	.half	0x0300		/* HdrS version */
+ root_flags:
+ 	.half	1
+ root_dev:

@@ -1,0 +1,4 @@
+series/sparc32/integration-r5opt/aslr-experiment/0052-sparc64-Start-bottom-up-mmap-searches-at-mm-mmap_bas.patch
+series/sparc32/integration-r5opt/aslr-experiment/0053-sparc64-Move-the-32-bit-PIE-base-below-the-legacy-mm.patch
+series/sparc32/integration-r5opt/aslr-experiment/0054-sparc64-Randomize-the-load-address-of-PIE-executable.patch
+series/sparc32/integration-r5opt/aslr-experiment/0055-sparc32-experiment-with-colour-preserving-mmap-and-E.patch

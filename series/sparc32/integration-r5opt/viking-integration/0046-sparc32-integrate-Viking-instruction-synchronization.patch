@@ -1,0 +1,68 @@
+From b451a2194aeb65f67e03a80501108de81d0bd1ee Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 13:00:53 +0200
+Subject: [PATCH 46/66] sparc32: integrate Viking instruction synchronization
+ with HyperSPARC
+
+Retain both CPU-specific publication paths in one exported hook. Preserve
+the separately implemented Viking signal-trampoline flush. Based on the
+preserved SuperSPARC instruction-update patch by Magnus Lindholm.
+
+Hardware integration only; held HyperSPARC optimizations are not applied.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/srmmu.c  | 18 +++++++++++++-----
+ arch/sparc/mm/viking.S |  5 +++++
+ 2 files changed, 18 insertions(+), 5 deletions(-)
+
+diff --git a/arch/sparc/mm/srmmu.c b/arch/sparc/mm/srmmu.c
+index 5b71a5e21c4a..f5d8663b7799 100644
+--- a/arch/sparc/mm/srmmu.c
++++ b/arch/sparc/mm/srmmu.c
+@@ -2186,15 +2186,23 @@ static void local_hypersparc_flush_icache_range(unsigned long start,
+ 
+ void flush_icache_range(unsigned long start, unsigned long end)
+ {
+-	if (start >= end || !is_hypersparc)
++	if (start >= end)
+ 		return;
+ 
+-	preempt_disable();
+-	local_hypersparc_flush_icache_range(start, end);
++	if (is_hypersparc) {
++		preempt_disable();
++		local_hypersparc_flush_icache_range(start, end);
+ #ifdef CONFIG_SMP
+-	xc2(local_hypersparc_flush_icache_range, start, end);
++		xc2(local_hypersparc_flush_icache_range, start, end);
+ #endif
+-	preempt_enable();
++		preempt_enable();
++		return;
++	}
++
++	if (poke_srmmu == poke_viking) {
++		/* One local FLUSH synchronizes all preceding instruction stores. */
++		__asm__ __volatile__("flush %0" : : "r" (start) : "memory");
++	}
+ }
+ EXPORT_SYMBOL(flush_icache_range);
+ 
+diff --git a/arch/sparc/mm/viking.S b/arch/sparc/mm/viking.S
+index 8b4e251bbba2..92c80426bca6 100644
+--- a/arch/sparc/mm/viking.S
++++ b/arch/sparc/mm/viking.S
+@@ -201,7 +201,12 @@ viking_flush_tlb_page:
+ 
+ viking_flush_page_to_ram:
+ viking_flush_page_for_dma:
++	retl
++	 nop
++
+ viking_flush_sig_insns:
++	/* FLUSH is not address scoped here, so one covers both words. */
++	flush	%o1
+ 	retl
+ 	 nop
+ 

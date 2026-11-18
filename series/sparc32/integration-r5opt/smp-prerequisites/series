@@ -1,0 +1,3 @@
+0017-sparc32-keep-PIL-raised-on-the-SMP-ticker-and-LEON-I.patch
+0018-sparc32-sun4m-do-not-clear-IPIs-that-were-not-handle.patch
+0019-sparc32-wait-for-secondary-CPUs-by-time-not-by-loop-.patch

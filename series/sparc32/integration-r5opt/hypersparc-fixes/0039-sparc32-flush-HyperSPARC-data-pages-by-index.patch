@@ -1,0 +1,66 @@
+From 2dcba856d5e7f4a2f922bf488362e48c98d407f5 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH 39/66] sparc32: flush HyperSPARC data pages by index
+
+flush_cache_page() uses ASI_M_FLUSH_PAGE, which translates the virtual
+address through the TLB and compares the result with the cache tag. ROSS
+SPARC RISC User's Guide, Third Edition, section 4.4.3: "If the cache flush
+operation does not match the cache tag entry, no action occurs."
+
+A dirty line left at that index by a previous owner of the page therefore
+survives, and is written back later over whatever occupies the page by
+then. The same section describes segment, region and context flushes as
+"unconditional flushes and their virtual address need not be translated
+through the TLB", so an index flush removes it.
+
+Measured on a SPARCstation 20, two ROSS RT626 modules, fork-heavy
+workload:
+
+  tag-matched flush_cache_page   15 faults after  4689 forks
+  index flush_cache_page          0 faults after 25333 forks
+
+Reuse the index range backend for every data page. For VM_EXEC mappings,
+follow it with the existing page backend to preserve instruction-cache
+maintenance. The historical counts above predate this extension to
+executable mappings and are not validation of the revised wrapper.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/srmmu.c | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/arch/sparc/mm/srmmu.c b/arch/sparc/mm/srmmu.c
+index d959aa274e0d..c64426425eb7 100644
+--- a/arch/sparc/mm/srmmu.c
++++ b/arch/sparc/mm/srmmu.c
+@@ -1071,6 +1071,20 @@ static void poke_hypersparc(void)
+ 	clear = srmmu_get_fstatus();
+ }
+ 
++static void hypersparc_flush_cache_page_data(struct vm_area_struct *vma,
++					     unsigned long addr)
++{
++	unsigned long page = addr & PAGE_MASK;
++
++	if (vma->vm_mm->context == NO_CONTEXT)
++		return;
++
++	/* Cover data aliases even when the mapping is executable. */
++	hypersparc_flush_cache_range_index(page, page + PAGE_SIZE);
++	if (vma->vm_flags & VM_EXEC)
++		hypersparc_flush_cache_page(vma, addr);
++}
++
+ static void hypersparc_flush_cache_range_data(struct vm_area_struct *vma,
+ 					      unsigned long start,
+ 					      unsigned long end)
+@@ -1088,7 +1102,7 @@ static void hypersparc_flush_cache_range_data(struct vm_area_struct *vma,
+ static const struct sparc32_cachetlb_ops hypersparc_ops = {
+ 	.cache_all	= hypersparc_flush_cache_all,
+ 	.cache_mm	= hypersparc_flush_cache_mm,
+-	.cache_page	= hypersparc_flush_cache_page,
++	.cache_page	= hypersparc_flush_cache_page_data,
+ 	.cache_range	= hypersparc_flush_cache_range_data,
+ 	.tlb_all	= hypersparc_flush_tlb_all,
+ 	.tlb_mm		= hypersparc_flush_tlb_mm,

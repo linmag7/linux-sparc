@@ -1,0 +1,73 @@
+From 7a497ee1c55b712afb43c46b3106ebd5bbac47cc Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:48 +0200
+Subject: [PATCH 66/66] sparc32: reduce arithmetic in the HyperSPARC combined
+ cache sweep
+
+Compute two and three line strides once, then emit groups of three, three
+and two stores per iteration. Preserve the descending index sequence, ASI
+operations, register-window flush and final whole I-cache invalidation. The
+loop uses 12 instructions instead of 17 per eight stores: four rather than
+nine arithmetic/control instructions, plus the eight stores. Two setup
+instructions are outside the loop.
+
+This changes neither CPU coverage nor ordering policy. Instruction counts
+alone do not establish a wall-time speedup.
+
+The October 5 dual-HyperSPARC comparison retained IWHOLE, excluded the
+rejected cache-flush omission and disabled COW reuse in both kernels. The
+clean repeat ran the candidate first and the baseline second on fresh
+boots, completing 7,200 checked forks and six mini workloads without a new
+core or kernel fault during that bounded exposure.
+
+With diagnostic timing disabled, candidate versus baseline mean elapsed
+time changed by +0.35% for the control, -5.90% with progress writers,
+-4.99% for finite writer work and -1.56% for the mini workload outer
+interval. One boot per kernel, two timing repetitions, fixed order and
+work/allocation variation limit causal confidence. The earlier
+htop-confounded run is excluded. These are historical results, not
+measurements of the exact clean-base release.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/hypersparc.S | 24 +++++++++++-------------
+ 1 file changed, 11 insertions(+), 13 deletions(-)
+
+diff --git a/arch/sparc/mm/hypersparc.S b/arch/sparc/mm/hypersparc.S
+index c20658673e6d..b5d628c0d768 100644
+--- a/arch/sparc/mm/hypersparc.S
++++ b/arch/sparc/mm/hypersparc.S
+@@ -44,22 +44,20 @@ hypersparc_flush_combined_all:
+ 	ld	[%g4 + %lo(vac_cache_size)], %g5
+ 	sethi	%hi(vac_line_size), %g1
+ 	ld	[%g1 + %lo(vac_line_size)], %g2
++	add	%g2, %g2, %g4
++	add	%g4, %g2, %g1
++	/* Keep descending indices; reuse the existing scratch registers. */
+ 1:
+-	sub	%g5, %g2, %g5
++	sub	%g5, %g1, %g5
++	sta	%g0, [%g5 + %g4] ASI_M_FLUSH_CTX
++	sta	%g0, [%g5 + %g2] ASI_M_FLUSH_CTX
+ 	sta	%g0, [%g5] ASI_M_FLUSH_CTX
+-	sub	%g5, %g2, %g5
++	sub	%g5, %g1, %g5
++	sta	%g0, [%g5 + %g4] ASI_M_FLUSH_CTX
++	sta	%g0, [%g5 + %g2] ASI_M_FLUSH_CTX
+ 	sta	%g0, [%g5] ASI_M_FLUSH_CTX
+-	sub	%g5, %g2, %g5
+-	sta	%g0, [%g5] ASI_M_FLUSH_CTX
+-	sub	%g5, %g2, %g5
+-	sta	%g0, [%g5] ASI_M_FLUSH_CTX
+-	sub	%g5, %g2, %g5
+-	sta	%g0, [%g5] ASI_M_FLUSH_CTX
+-	sub	%g5, %g2, %g5
+-	sta	%g0, [%g5] ASI_M_FLUSH_CTX
+-	sub	%g5, %g2, %g5
+-	sta	%g0, [%g5] ASI_M_FLUSH_CTX
+-	subcc	%g5, %g2, %g5
++	subcc	%g5, %g4, %g5
++	sta	%g0, [%g5 + %g2] ASI_M_FLUSH_CTX
+ 	bne	1b
+ 	 sta	%g0, [%g5] ASI_M_FLUSH_CTX
+ 	retl

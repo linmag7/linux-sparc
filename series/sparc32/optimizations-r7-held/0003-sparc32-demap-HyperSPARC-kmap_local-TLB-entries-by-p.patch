@@ -1,0 +1,57 @@
+From d83896ea6c2e48995427ccacfcd863b4a2a803ae Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:48 +0200
+Subject: [PATCH 03/10] sparc32: demap HyperSPARC kmap_local TLB entries by
+ page
+
+Narrow HyperSPARC kmap_local TLB maintenance only after the preceding
+correctness series has replaced remote page-to-RAM operations with a
+non-translating index backend. CPU-local slot addresses must not be used by
+remote callers; cache publication now does not translate them. The generic
+correctness endpoint deliberately retains global flushing.
+
+Use a local page demap for these slots on SMP. ROSS SPARC RISC User's
+Guide, Table 4-5, defines the type-0 match as context or ACC 6/7; kmap_prot
+uses ACC 7, so this removes the supervisor translation even if it was
+loaded under another context. Shared PKMAP mappings and other SRMMU
+implementations retain their existing TLB maintenance.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/srmmu.c | 18 +++++++++++++++++-
+ 1 file changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/arch/sparc/mm/srmmu.c b/arch/sparc/mm/srmmu.c
+index 07625fe173e1..8ad7cf561c2f 100644
+--- a/arch/sparc/mm/srmmu.c
++++ b/arch/sparc/mm/srmmu.c
+@@ -432,9 +432,25 @@ void sparc32_kmap_local_cache_flush_unmap(unsigned long vaddr)
+ 	flush_cache_all();
+ }
+ 
++#ifdef CONFIG_SMP
++static void hypersparc_flush_kmap_tlb(unsigned long vaddr)
++{
++	vaddr &= PAGE_MASK;
++	__asm__ __volatile__("sta %%g0, [%0] %1\n\t" : :
++			     "r" (vaddr), "i" (ASI_M_FLUSH_PROBE) :
++			     "memory");
++}
++
++#endif
++
+ void sparc32_kmap_local_tlb_flush(unsigned long vaddr)
+ {
+-	/* Remote translating cache operations can populate these entries. */
++#ifdef CONFIG_SMP
++	if (is_hypersparc) {
++		hypersparc_flush_kmap_tlb(vaddr);
++		return;
++	}
++#endif
+ 	flush_tlb_all();
+ }
+ 
+-- 
+2.43.0
+

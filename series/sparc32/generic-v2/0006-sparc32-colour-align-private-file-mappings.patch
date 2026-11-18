@@ -1,0 +1,76 @@
+From 207756aba1bc89dcbab3c8328fe8842480f5027c Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH v2 6/9] sparc32: colour-align private file mappings
+
+arch_get_unmapped_area() aligns MAP_SHARED so a file page is mapped at the
+colour its page offset implies, but gives MAP_PRIVATE an align_mask of
+zero. A private file mapping therefore lands at an arbitrary colour, and
+on a virtually indexed cache it aliases any other mapping of the same
+page.
+
+Measured on an SS-20 with a 512 KB VAC: every page of a private file
+mapping sat at the wrong colour, 64 of 64, at three different offsets.
+
+Align them as sparc64 does, whenever there is a file rather than only when
+the mapping is shared. MAP_FIXED is left alone: the ELF loader places
+segments with MAP_PRIVATE|MAP_FIXED at addresses that need not preserve
+colour, so rejecting those makes execve() fail.
+
+Reference: MBus Interface Specification, SPARC International, 1997, signal
+VA[19:12] (MAD[53:46]).
+
+This changes alignment on HyperSPARC, where SHMLBA follows the VAC size.
+Each private file mapping can consume up to SHMLBA of extra virtual space.
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/sys_sparc_32.c | 17 +++++++++++++++--
+ 1 file changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/arch/sparc/kernel/sys_sparc_32.c b/arch/sparc/kernel/sys_sparc_32.c
+index fb31bc0c5b48..e1530cee15b2 100644
+--- a/arch/sparc/kernel/sys_sparc_32.c
++++ b/arch/sparc/kernel/sys_sparc_32.c
+@@ -40,6 +40,15 @@ SYSCALL_DEFINE0(getpagesize)
+ 	return PAGE_SIZE; /* Possibly older binaries want 8192 on sun4's? */
+ }
+ 
++/*
++ * A file page reached at two colours is two cache lines, so a kernel-chosen
++ * mapping of one sits at the colour its page offset implies - private too.
++ */
++static bool sparc_needs_colour_align(struct file *filp, unsigned long flags)
++{
++	return filp || (flags & MAP_SHARED);
++}
++
+ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsigned long len, unsigned long pgoff, unsigned long flags, vm_flags_t vm_flags)
+ {
+ 	struct vm_unmapped_area_info info = {};
+@@ -50,7 +59,11 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsi
+ 
+ 	if (flags & MAP_FIXED) {
+ 		/* We do not accept a shared mapping if it would violate
+-		 * cache aliasing constraints.
++		 * cache aliasing constraints.  Private file mappings are not
++		 * rejected here: the ELF loader places segments with
++		 * MAP_FIXED at offsets that need not preserve colour, and
++		 * refusing them makes execve() fail.  sparc64 draws the line
++		 * in the same place.
+ 		 */
+ 		if (!file_hugepage && (flags & MAP_SHARED) &&
+ 		    ((addr - (pgoff << PAGE_SHIFT)) & (SHMLBA - 1)))
+@@ -68,7 +81,7 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsi
+ 	info.low_limit = addr;
+ 	info.high_limit = TASK_SIZE;
+ 	if (!file_hugepage) {
+-		info.align_mask = (flags & MAP_SHARED) ?
++		info.align_mask = sparc_needs_colour_align(filp, flags) ?
+ 			(PAGE_MASK & (SHMLBA - 1)) : 0;
+ 		info.align_offset = pgoff << PAGE_SHIFT;
+ 	} else {
+-- 
+2.43.0
+

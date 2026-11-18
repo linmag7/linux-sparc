@@ -1,0 +1,44 @@
+Source alias review -- 9 November 2026
+
+Scope: patch 2 of the generic series; same exact for-next base as v1.
+The source change consists of two page_to_ram calls and a clearer comment.
+No backend, ABI, global barrier, diagnostic or optimization changes.
+
+Order:
+1. flush_cache_page(vma, vaddr, pfn) writes back the source USER alias.
+2. Obtain both local mappings.
+3. __flush_page_to_ram(vfrom) removes a pre-existing stale KERNEL alias
+   before copy_page can read it. It follows user writeback, so a clean old
+   kernel line cannot hide the up-to-date memory contents.
+4. copy_page(vto, vfrom).
+5. __flush_page_to_ram(vfrom) retires source lines loaded by the copy before
+   subsequent user writes can make them stale. Pre-flush alone would leave
+   these clean source lines resident; post-flush alone cannot repair an
+   already-stale read in step 4.
+6. __flush_page_to_ram(vto) publishes the destination through its real
+   mapping. Unmap destination then source (nested local mapping LIFO).
+
+Lowmem kmap_local_page returns page_address; kunmap_local returns before
+arch_kmap_local_pre_unmap. Therefore neither hook supplies this maintenance
+for lowmem. Highmem hook maintenance may overlap these explicit calls, but
+patch 2 must not depend on later patch 4 or the HyperSPARC follow-up. Calls
+are deliberately unconditional rather than adding CPU/zone policy here.
+
+On the reviewed generic SMP source, smp_flush_page_to_ram invokes remote
+page_to_ram callbacks and the local backend. This is not a local-only
+flush. On non-aliasing CPUs backend behavior remains its existing policy.
+The existing HyperSPARC page backend selects the given virtual page; the
+new calls explicitly supply the source kernel address rather than relying
+on a user-address or ASI_M_FLUSH_USER sweep to cover supervisor lines.
+
+This reasoning concerns clean source aliases created by kernel reads.
+It does not establish correctness for arbitrary concurrently dirty aliases,
+replace the follow-up backend repairs, or prove an unobserved hardware
+failure. Existing VM synchronization/COW rules still apply. The simple
+clean-alias model in scripts/review.py illustrates the ordering contract;
+it is not a processor model. No new hardware reproduction is claimed.
+
+Relevant paths: arch/sparc/mm/init_32.c copy_user_highpage;
+mm/highmem.c __kmap_local_page_prot and kunmap_local_indexed;
+mm/memory.c wp_page_reuse; arch/sparc/mm/hypersparc.S cache_mm, cache_page
+and page_to_ram; arch/sparc/mm/srmmu.c smp_flush_page_to_ram.

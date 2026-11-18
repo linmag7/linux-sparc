@@ -1,0 +1,7 @@
+Reviewed integration of Imre Kaloz 20260927005821.8369-{2,3,4}:
+Patch 1 replaces the old inline futex implementation with atomic32.c; init/Kconfig already enables SMP futexes. Exception-table handling was already equivalent; retained it and removed duplicate include.
+Patches 2/3 add original CASA/divide sources and shared window helpers; old divide implementation removed, DSE handling retained.
+Legacy ta0x11 entry/HWCAP retained. Its implementation now calls the SAME futex_atomic_cmpxchg_inatomic as CASA, with page faults disabled, then faults writable outside the backend lock. Old separate lock array removed to prevent non-serializing ABIs. Alignment/errno/carry/PC advancement preserved.
+ASLR code is the unchanged tested adaptation plus its three sparc64 prerequisites.
+Guard changes are intentional: five critical files above now pinned to reviewed hashes, alongside new backend/emulation/ASLR files. All other original checks retained. HdrS/image/config checked after build. Old guards/releases untouched.
+Kaloz limits remain: emulated CASA does not serialize against userspace plain stores/SWAP. Existing LEON probes retained; no new HWCAP implies native V9 support. No claim of fresh-stage3 hardware validation yet.

@@ -1,0 +1,409 @@
+From 40dbfd5874e66d442726bb5e2b1839d614bdee45 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Thu, 27 Aug 2026 19:58:26 +0200
+Subject: [PATCH 11/66] sparc32: add a kernel assisted compare-and-swap
+
+Pre-v9 sparc has no compare-and-swap instruction, so userspace can only
+emulate one with a lock, and neither place to put that lock works.  A lock
+private to a process cannot serialise against another process operating on
+the same page, which breaks atomics in shared memory.  A lock kept inside
+the object being updated - what glibc did before 2019, ldstub on the top
+byte of the word itself - is correct across processes but costs value bits,
+so it cannot implement the full width operations a current compiler emits
+calls to.
+
+A lock owned by the kernel has neither problem: it is outside the object,
+so no bits are lost, and it is shared by every process, so it serialises
+across address spaces.  parisc solves the same problem the same way with
+its LWS compare-and-swap.
+
+Add trap 0x91 for this.  A software trap is much cheaper than a full
+syscall, and dispatch follows the existing do_hw_divzero pattern of
+reaching C rather than doing the work in trap assembly.  The ABI is
+
+	%o0	word aligned user address
+	%o1	expected value
+	%o2	new value
+
+returning the value found at the address in %o0, which gives
+__sync_val_compare_and_swap semantics directly, with the carry bit set and
+an errno in %o0 on failure.
+
+The number is SP_TRAP_CAS in asm/traps.h, where the other software trap
+numbers already live, since this one is userspace ABI from now on.  Note
+that the instruction userspace executes is ta 0x11, not ta 0x91: sparc
+forms the trap type by adding 0x80 to the software trap number, which is
+also why the Linux system call is SP_TRAP_LINUX 0x90 and glibc issues
+ta 0x10.
+
+Where the cpu implements the instruction the lock is not used at all and
+the swap is performed directly, with the user data ASI so that the kernel
+reaches the word the same way a binary built for that cpu does.  Choosing
+on the hardware rather than on a build option is what keeps the two in
+step: such a binary uses casa inline and never takes this trap, so a
+kernel serialising on a lock would exclude nothing against it.
+
+One consequence has to be stated because it constrains the caller rather than
+the kernel: where the lock is used, an ordinary store does not take it, so
+userspace building atomic operations out of this service must build every
+atomic write from it - an atomic store and an atomic exchange each become a
+compare-and-swap loop - or those writes are not atomic against it.  Andreas
+Larsson made the same point about kernel-emulated casa in 2016, and parisc
+provides a kernel-assisted atomic store alongside its LWS compare-and-swap for
+this reason.  Documentation/arch/sparc/cas-trap.rst spells it out.
+
+Otherwise the lock array is used.  It is hashed on address bits that lie
+inside the page offset, so the same physical word reached through
+different virtual addresses selects the same lock.  asm/futex_32.h uses
+the same array, so a compare-and-swap from userspace and one performed by
+the futex code exclude each other.
+
+Page faults are disabled while the lock is held, since faulting there
+would take the mmap lock with interrupts off; on failure the lock is
+dropped, the page is faulted in with fault_in_safe_writeable() - not
+fault_in_writeable(), which would zero the word being swapped - and the
+operation is retried.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/cas_32.h     |  27 ++++++
+ arch/sparc/include/uapi/asm/traps.h |   3 +-
+ arch/sparc/kernel/Makefile          |   1 +
+ arch/sparc/kernel/cas_32.c          | 136 ++++++++++++++++++++++++++++
+ arch/sparc/kernel/entry.S           |  17 ++++
+ arch/sparc/kernel/ttable_32.S       |   9 +-
+ arch/sparc/lib/casa_32.S            |  23 ++++-
+ 7 files changed, 207 insertions(+), 9 deletions(-)
+ create mode 100644 arch/sparc/kernel/cas_32.c
+
+diff --git a/arch/sparc/include/asm/cas_32.h b/arch/sparc/include/asm/cas_32.h
+index 3658ff71fa70..73a4a7495ac2 100644
+--- a/arch/sparc/include/asm/cas_32.h
++++ b/arch/sparc/include/asm/cas_32.h
+@@ -2,9 +2,36 @@
+ #ifndef _SPARC_CAS_32_H
+ #define _SPARC_CAS_32_H
+ 
++#include <linux/spinlock.h>
+ #include <linux/types.h>
+ 
++struct pt_regs;
++
++asmlinkage void handle_sparc32_cas(struct pt_regs *regs, unsigned long pc,
++				   unsigned long npc, unsigned long psr);
++
+ /* Returns 0 and stores the value found in *prev, or -EFAULT. */
+ int __sparc32_casa(u32 *addr, u32 oldval, u32 newval, u32 *prev);
+ 
++/* The same on a user address, using the user data ASI. */
++int __sparc32_casa_user(u32 __user *addr, u32 oldval, u32 newval, u32 *prev);
++
++#define SPARC32_ATOMIC_LOCKS	256
++
++extern raw_spinlock_t sparc32_atomic_locks[SPARC32_ATOMIC_LOCKS];
++
++/*
++ * Pick the lock from bits that lie inside the page offset, so the same
++ * physical word reached through different virtual addresses - in
++ * different processes, or through a shared mapping - selects the same
++ * lock.  asm/futex_32.h hashes identically on purpose; the two must not
++ * diverge.
++ */
++static inline raw_spinlock_t *sparc32_atomic_lock(const void __user *uaddr)
++{
++	unsigned long ua = (unsigned long)uaddr;
++
++	return &sparc32_atomic_locks[(ua >> 2) & (SPARC32_ATOMIC_LOCKS - 1)];
++}
++
+ #endif /* _SPARC_CAS_32_H */
+diff --git a/arch/sparc/include/uapi/asm/traps.h b/arch/sparc/include/uapi/asm/traps.h
+index 43fe5b8fe8be..3e4d1c0c5a94 100644
+--- a/arch/sparc/include/uapi/asm/traps.h
++++ b/arch/sparc/include/uapi/asm/traps.h
+@@ -81,6 +81,7 @@
+ #define SP_TRAP_SOLARIS 0x88         /* Solaris System Call */
+ #define SP_TRAP_NETBSD  0x89         /* NetBSD System Call */
+ #define SP_TRAP_LINUX   0x90         /* Linux System Call */
++#define SP_TRAP_CAS     0x91         /* Compare and swap, issued as "ta 0x11" */
+ 
+ /* Names used for compatibility with SunOS */
+ #define ST_SYSCALL              0x00
+@@ -104,7 +105,7 @@
+ 	 (level > SP_TRAP_BADFL && level < SP_TRAP_CPEXP) || \
+ 	 (level > SP_TRAP_DMM && level < SP_TRAP_IMM) || \
+ 	 (level > SP_TRAP_IMM && level < SP_TRAP_SUNOS) || \
+-	 (level > SP_TRAP_LINUX && level < SP_TRAP_KBPT1))
++	 (level > SP_TRAP_CAS && level < SP_TRAP_KBPT1))
+ 
+ /* Is this a Hardware trap? */
+ #define HW_TRAP_P(level) ((level > 0) && (level < SP_TRAP_SUNOS))
+diff --git a/arch/sparc/kernel/Makefile b/arch/sparc/kernel/Makefile
+index 497b5714fa8f..7ae9ab4082ca 100644
+--- a/arch/sparc/kernel/Makefile
++++ b/arch/sparc/kernel/Makefile
+@@ -18,6 +18,7 @@ CFLAGS_REMOVE_pcr.o := -pg
+ endif
+ 
+ obj-y                   := head_$(BITS).o
++obj-$(CONFIG_SPARC32)   += cas_32.o
+ obj-$(CONFIG_SPARC64)   += urtt_fill.o
+ obj-$(CONFIG_SPARC32)   += entry.o wof.o wuf.o
+ obj-$(CONFIG_SPARC32)   += etrap_32.o
+diff --git a/arch/sparc/kernel/cas_32.c b/arch/sparc/kernel/cas_32.c
+new file mode 100644
+index 000000000000..f5f4886787f1
+--- /dev/null
++++ b/arch/sparc/kernel/cas_32.c
+@@ -0,0 +1,136 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Kernel assisted compare-and-swap for pre-v9 sparc.
++ *
++ * v8 and earlier have no compare-and-swap instruction, so userspace can
++ * only emulate one with a lock.  A lock private to a process cannot
++ * serialise against another process operating on the same page, and a
++ * lock kept inside the object costs value bits, which rules out the
++ * full-width operations the compiler expects.  A lock owned by the kernel
++ * has neither problem.  parisc does the same thing for the same reason.
++ *
++ * The array is shared with asm/futex_32.h so that a compare-and-swap from
++ * userspace and one performed by the futex code exclude each other.
++ *
++ * Where the cpu does implement the instruction - LEON3 and later - the lock
++ * is not used at all and the swap is performed directly.  That has to follow
++ * the hardware rather than a build option: a binary built for such a cpu uses
++ * casa inline and never comes here, so a kernel serialising on a lock would
++ * exclude nothing against it.
++ */
++
++#include <linux/kernel.h>
++#include <linux/spinlock.h>
++#include <linux/uaccess.h>
++#include <linux/pagemap.h>
++
++#include <asm/ptrace.h>
++#include <asm/cas_32.h>
++#include <asm/cpu_type.h>
++
++raw_spinlock_t sparc32_atomic_locks[SPARC32_ATOMIC_LOCKS] = {
++	[0 ... (SPARC32_ATOMIC_LOCKS - 1)] =
++		__RAW_SPIN_LOCK_UNLOCKED(sparc32_atomic_locks)
++};
++
++/*
++ * Set the carry bit to report an error, the way the syscall path does,
++ * and step over the trapping instruction.
++ */
++static void cas_return(struct pt_regs *regs, unsigned long value, bool error)
++{
++	regs->u_regs[UREG_I0] = value;
++	if (error)
++		regs->psr |= PSR_C;
++	else
++		regs->psr &= ~PSR_C;
++
++	regs->pc = regs->npc;
++	regs->npc = regs->npc + 4;
++}
++
++/*
++ * ta 0x11, which is trap type SP_TRAP_CAS.  The interface is described in
++ * Documentation/arch/sparc/cas-trap.rst.
++ *
++ *	%o0	word aligned user address
++ *	%o1	expected value
++ *	%o2	new value
++ *
++ * returns the value found at the address in %o0, so the caller can tell
++ * whether the swap happened by comparing it with what it expected.  On
++ * failure %o0 holds an errno and the carry bit is set.
++ */
++asmlinkage void handle_sparc32_cas(struct pt_regs *regs, unsigned long pc,
++				   unsigned long npc, unsigned long psr)
++{
++	u32 __user *uaddr = (u32 __user *)regs->u_regs[UREG_I0];
++	u32 oldval = regs->u_regs[UREG_I1];
++	u32 newval = regs->u_regs[UREG_I2];
++	raw_spinlock_t *lock;
++	unsigned long flags;
++	u32 val;
++	int err;
++
++	if (unlikely((unsigned long)uaddr & 3)) {
++		cas_return(regs, EINVAL, true);
++		return;
++	}
++
++	if (unlikely(!access_ok(uaddr, sizeof(u32)))) {
++		cas_return(regs, EFAULT, true);
++		return;
++	}
++
++	if (sparc32_has_casa) {
++		/*
++		 * No lock: the instruction is atomic against everything else
++		 * touching the word, including a binary doing its own casa.
++		 * A fault here is an ordinary one - we hold nothing - so the
++		 * fault handler resolves it and the instruction is retried;
++		 * the exception table entry only catches an address that
++		 * cannot be made good.
++		 */
++		if (likely(!__sparc32_casa_user(uaddr, oldval, newval, &val)))
++			cas_return(regs, val, false);
++		else
++			cas_return(regs, EFAULT, true);
++		return;
++	}
++
++	lock = sparc32_atomic_lock(uaddr);
++
++retry:
++	/*
++	 * pagefault_disable() turns a fault under the lock into -EFAULT
++	 * instead of a trip through the mmap lock, which must not happen
++	 * while holding a raw spinlock with interrupts off.  On failure the
++	 * lock is dropped, the page is faulted in, and we start again.
++	 */
++	raw_spin_lock_irqsave(lock, flags);
++	pagefault_disable();
++
++	err = __get_user(val, uaddr);
++	if (!err && val == oldval)
++		err = __put_user(newval, uaddr);
++
++	pagefault_enable();
++	raw_spin_unlock_irqrestore(lock, flags);
++
++	if (likely(!err)) {
++		cas_return(regs, val, false);
++		return;
++	}
++
++	/*
++	 * fault_in_safe_writeable() rather than fault_in_writeable(): the
++	 * latter zeroes the range it faults in, which here is the word
++	 * being swapped.
++	 */
++	if (fault_in_safe_writeable((char __user *)uaddr, sizeof(u32))) {
++		cas_return(regs, EFAULT, true);
++		return;
++	}
++
++	goto retry;
++}
+diff --git a/arch/sparc/kernel/entry.S b/arch/sparc/kernel/entry.S
+index ea51ef52c952..4ea23489d790 100644
+--- a/arch/sparc/kernel/entry.S
++++ b/arch/sparc/kernel/entry.S
+@@ -647,6 +647,23 @@ do_cp_exception:
+ 	/* This routine handles Hardware Divide By Zero Exceptions. */
+ 	.align	4
+ 	.globl	do_hw_divzero
++	.align	4
++	.globl	do_sparc32_cas
++do_sparc32_cas:
++	SAVE_ALL
++
++	wr	%l0, PSR_ET, %psr		! re-enable traps
++	WRITE_PAUSE
++
++	add	%sp, STACKFRAME_SZ, %o0
++	mov	%l1, %o1
++	mov	%l2, %o2
++	call	handle_sparc32_cas
++	 mov	%l0, %o3
++
++	RESTORE_ALL
++
++	.align	4
+ do_hw_divzero:
+ 	SAVE_ALL
+ 
+diff --git a/arch/sparc/kernel/ttable_32.S b/arch/sparc/kernel/ttable_32.S
+index e79fd786fbbb..0408f0dbae68 100644
+--- a/arch/sparc/kernel/ttable_32.S
++++ b/arch/sparc/kernel/ttable_32.S
+@@ -89,7 +89,8 @@ t_bad89:BAD_TRAP(0x89)                      /* Net-B.S. System Call          */
+ t_bad8a:BAD_TRAP(0x8a) BAD_TRAP(0x8b) BAD_TRAP(0x8c) BAD_TRAP(0x8d) BAD_TRAP(0x8e)
+ t_bad8f:BAD_TRAP(0x8f)
+ t_linux:LINUX_SYSCALL_TRAP                  /* Linux System Call             */
+-t_bad91:BAD_TRAP(0x91) BAD_TRAP(0x92) BAD_TRAP(0x93) BAD_TRAP(0x94) BAD_TRAP(0x95)
++t_cas:	TRAP_ENTRY(0x91, do_sparc32_cas)  /* Compare and swap             */
++t_bad92:BAD_TRAP(0x92) BAD_TRAP(0x93) BAD_TRAP(0x94) BAD_TRAP(0x95)
+ t_bad96:BAD_TRAP(0x96) BAD_TRAP(0x97) BAD_TRAP(0x98) BAD_TRAP(0x99) BAD_TRAP(0x9a)
+ t_bad9b:BAD_TRAP(0x9b) BAD_TRAP(0x9c) BAD_TRAP(0x9d) BAD_TRAP(0x9e) BAD_TRAP(0x9f)
+ t_getcc:GETCC_TRAP                          /* Get Condition Codes           */
+@@ -186,7 +187,7 @@ trapbase_cpu1:
+ 	BAD_TRAP(0x87) BAD_TRAP(0x88) BAD_TRAP(0x89)
+ 	BAD_TRAP(0x8a) BAD_TRAP(0x8b) BAD_TRAP(0x8c)
+ 	BAD_TRAP(0x8d) BAD_TRAP(0x8e) BAD_TRAP(0x8f)
+-	LINUX_SYSCALL_TRAP BAD_TRAP(0x91)
++	LINUX_SYSCALL_TRAP TRAP_ENTRY(0x91, do_sparc32_cas)
+ 	BAD_TRAP(0x92) BAD_TRAP(0x93) BAD_TRAP(0x94)
+ 	BAD_TRAP(0x95) BAD_TRAP(0x96) BAD_TRAP(0x97) BAD_TRAP(0x98) BAD_TRAP(0x99)
+ 	BAD_TRAP(0x9a) BAD_TRAP(0x9b) BAD_TRAP(0x9c) BAD_TRAP(0x9d) BAD_TRAP(0x9e)
+@@ -286,7 +287,7 @@ trapbase_cpu2:
+ 	BAD_TRAP(0x86) BAD_TRAP(0x87) BAD_TRAP(0x88)
+ 	BAD_TRAP(0x89) BAD_TRAP(0x8a) BAD_TRAP(0x8b) BAD_TRAP(0x8c)
+ 	BAD_TRAP(0x8d) BAD_TRAP(0x8e) BAD_TRAP(0x8f)
+-	LINUX_SYSCALL_TRAP BAD_TRAP(0x91)
++	LINUX_SYSCALL_TRAP TRAP_ENTRY(0x91, do_sparc32_cas)
+ 	BAD_TRAP(0x92) BAD_TRAP(0x93) BAD_TRAP(0x94)
+ 	BAD_TRAP(0x95) BAD_TRAP(0x96) BAD_TRAP(0x97) BAD_TRAP(0x98) BAD_TRAP(0x99)
+ 	BAD_TRAP(0x9a) BAD_TRAP(0x9b) BAD_TRAP(0x9c) BAD_TRAP(0x9d) BAD_TRAP(0x9e)
+@@ -385,7 +386,7 @@ trapbase_cpu3:
+ 	BAD_TRAP(0x89) BAD_TRAP(0x8a) BAD_TRAP(0x8b) BAD_TRAP(0x8c)
+ 	BAD_TRAP(0x8d) BAD_TRAP(0x8e) BAD_TRAP(0x8f)
+ 	LINUX_SYSCALL_TRAP
+-	BAD_TRAP(0x91) BAD_TRAP(0x92) BAD_TRAP(0x93) BAD_TRAP(0x94)
++	TRAP_ENTRY(0x91, do_sparc32_cas) BAD_TRAP(0x92) BAD_TRAP(0x93) BAD_TRAP(0x94)
+ 	BAD_TRAP(0x95) BAD_TRAP(0x96) BAD_TRAP(0x97) BAD_TRAP(0x98) BAD_TRAP(0x99)
+ 	BAD_TRAP(0x9a) BAD_TRAP(0x9b) BAD_TRAP(0x9c) BAD_TRAP(0x9d) BAD_TRAP(0x9e)
+ 	BAD_TRAP(0x9f)
+diff --git a/arch/sparc/lib/casa_32.S b/arch/sparc/lib/casa_32.S
+index b17260e2a186..27640bc82eca 100644
+--- a/arch/sparc/lib/casa_32.S
++++ b/arch/sparc/lib/casa_32.S
+@@ -8,10 +8,10 @@
+  * illegal_instruction, which the exception table entry below turns into
+  * -EFAULT, so the same entry serves both the probe and a faulting address.
+  *
+- * The helper is laid out for the LEON atomic errata: GRLIB-TN-0011 wants the
+- * atomic 16-byte aligned, or an instruction TLB miss can release the bus lock
+- * before the store, and GRLIB-TN-0010 forbids reaching one directly from a
+- * load or a control transfer - which a call with a load in its delay slot
++ * Both helpers are laid out for the LEON atomic errata: GRLIB-TN-0011 wants
++ * the atomic 16-byte aligned, or an instruction TLB miss can release the bus
++ * lock before the store, and GRLIB-TN-0010 forbids reaching one directly from
++ * a load or a control transfer - which a call with a load in its delay slot
+  * does.  A nop at the entry and nop padding up to the boundary cover both, for
+  * less than runtime detection would cost.
+  *
+@@ -43,6 +43,20 @@ ENTRY(__sparc32_casa)
+ 	 clr	%o0
+ ENDPROC(__sparc32_casa)
+ 
++/*
++ * The same on a user address.  ASI 0x0a is user data, which is what a binary
++ * built for such a cpu uses itself, so the kernel and userspace operate on the
++ * word the same way.
++ */
++ENTRY(__sparc32_casa_user)
++	nop
++	.balignl 16, 0x01000000
++4:	casa	[%o0] 0x0a, %o1, %o2
++	st	%o2, [%o3]
++	retl
++	 clr	%o0
++ENDPROC(__sparc32_casa_user)
++
+ 	.section .fixup,#alloc,#execinstr
+ 	.align	4
+ 2:	retl
+@@ -52,4 +66,5 @@ ENDPROC(__sparc32_casa)
+ 	.section __ex_table,#alloc
+ 	.align	4
+ 	.word	1b, 2b
++	.word	4b, 2b
+ 	.previous

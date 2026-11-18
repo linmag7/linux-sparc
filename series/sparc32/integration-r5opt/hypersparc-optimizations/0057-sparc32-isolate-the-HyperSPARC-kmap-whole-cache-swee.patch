@@ -1,0 +1,130 @@
+From 65ff715f32707407582ad1cff6f8bfb2ad4c4de0 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH 57/66] sparc32: isolate the HyperSPARC kmap whole-cache sweep
+
+Give kmap maintenance its own combined-cache sweep helper so subsequent
+optimisations can be scoped to that path. Retain the register-window flush,
+every combined-cache index and the final whole instruction-cache
+invalidation.
+
+An earlier experiment omitted that final invalidation. This series does not
+include that omission; the helper has the full maintenance semantics from
+its introduction.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/ross.h |  1 +
+ arch/sparc/mm/hypersparc.S    | 16 +++++++++++++++-
+ arch/sparc/mm/srmmu.c         | 21 ++++++++++++---------
+ 3 files changed, 28 insertions(+), 10 deletions(-)
+
+diff --git a/arch/sparc/include/asm/ross.h b/arch/sparc/include/asm/ross.h
+index 2191bd910efd..98f8b5ef771b 100644
+--- a/arch/sparc/include/asm/ross.h
++++ b/arch/sparc/include/asm/ross.h
+@@ -126,6 +126,7 @@ static inline void put_ross_icr(unsigned int icreg)
+ 
+ /* HyperSparc specific cache flushing. */
+ 
++void hypersparc_flush_combined_all(void);
+ void hypersparc_flush_cache_range_index(unsigned long start,
+ 					unsigned long end);
+ 
+diff --git a/arch/sparc/mm/hypersparc.S b/arch/sparc/mm/hypersparc.S
+index a2c2fc74d8b9..ba1c1c059742 100644
+--- a/arch/sparc/mm/hypersparc.S
++++ b/arch/sparc/mm/hypersparc.S
+@@ -17,7 +17,8 @@
+ 	.text
+ 	.align	4
+ 
+-	.globl	hypersparc_flush_cache_all, hypersparc_flush_cache_mm
++	.globl	hypersparc_flush_cache_all, hypersparc_flush_combined_all
++	.globl	hypersparc_flush_cache_mm
+ 	.globl	hypersparc_flush_cache_range, hypersparc_flush_cache_page
+ 	.globl	hypersparc_flush_cache_range_index
+ 	.globl	hypersparc_flush_page_for_dma, hypersparc_flush_sig_insns
+@@ -37,6 +38,19 @@ hypersparc_flush_cache_all:
+ 	retl
+ 	 sta	%g0, [%g0] ASI_M_FLUSH_IWHOLE	! hyper_flush_whole_icache
+ 
++hypersparc_flush_combined_all:
++	WINDOW_FLUSH(%g4, %g5)
++	sethi	%hi(vac_cache_size), %g4
++	ld	[%g4 + %lo(vac_cache_size)], %g5
++	sethi	%hi(vac_line_size), %g1
++	ld	[%g1 + %lo(vac_line_size)], %g2
++1:
++	subcc	%g5, %g2, %g5
++	bne	1b
++	 sta	%g0, [%g5] ASI_M_FLUSH_CTX
++	retl
++	 sta	%g0, [%g0] ASI_M_FLUSH_IWHOLE
++
+ 	/* We expand the window flush to get maximum performance. */
+ hypersparc_flush_cache_mm:
+ #ifndef CONFIG_SMP
+diff --git a/arch/sparc/mm/srmmu.c b/arch/sparc/mm/srmmu.c
+index f5d8663b7799..21fec7d20f09 100644
+--- a/arch/sparc/mm/srmmu.c
++++ b/arch/sparc/mm/srmmu.c
+@@ -196,7 +196,7 @@ static void hypersparc_kmap_remote_sync(unsigned long arg)
+ {
+ 	struct hyper_alias_sync *sync = (struct hyper_alias_sync *)arg;
+ 
+-	local_ops->cache_all();
++	hypersparc_flush_combined_all();
+ 	hypersparc_kmap_sync_wait(sync);
+ 
+ 	/*
+@@ -257,7 +257,7 @@ static void hypersparc_sync_aliases(unsigned long pfn, unsigned long pkmap)
+ 	sync.pkmap = pkmap;
+ 	sync.writer = cpumask_any_but(&sync.mask, smp_processor_id());
+ 
+-	local_ops->cache_all();
++	hypersparc_flush_combined_all();
+ 	if (sync.writer < nr_cpu_ids) {
+ 		/*
+ 		 * Do not touch any mapped data after publishing.  The local
+@@ -274,7 +274,7 @@ static void hypersparc_sync_aliases(unsigned long pfn, unsigned long pkmap)
+ 	}
+ 	local_ops->tlb_all();
+ #else
+-	sparc32_cachetlb_ops->cache_all();
++	hypersparc_flush_combined_all();
+ 	hypersparc_uncache_kmap_aliases(pfn);
+ 	if (pkmap)
+ 		hypersparc_uncache_one(pkmap, pfn);
+@@ -401,6 +401,13 @@ void sparc32_kmap_local_post_map(unsigned long vaddr, pte_t pteval)
+ 
+ void sparc32_kmap_local_cache_flush(unsigned long vaddr)
+ {
++	if (is_hypersparc) {
++#ifdef CONFIG_SMP
++		xc0(hypersparc_flush_combined_all);
++#endif
++		hypersparc_flush_combined_all();
++		return;
++	}
+ 	flush_cache_all();
+ }
+ 
+@@ -412,15 +419,11 @@ void sparc32_kmap_local_cache_flush_unmap(unsigned long vaddr)
+ 	 * not in this registry, so narrowing belongs with the PKMAP work.
+ 	 */
+ 	if (is_hypersparc) {
+-#ifdef CONFIG_SMP
+ 		/* kmap_local pins us to the slot owner; publish before removal. */
+-		local_ops->cache_all();
+-#else
+-		sparc32_cachetlb_ops->cache_all();
+-#endif
++		hypersparc_flush_combined_all();
+ 		hypersparc_unregister_kmap(vaddr);
+ #ifdef CONFIG_SMP
+-		xc0(local_ops->cache_all);
++		xc0(hypersparc_flush_combined_all);
+ #endif
+ 		return;
+ 	}

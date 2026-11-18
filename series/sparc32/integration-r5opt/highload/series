@@ -1,0 +1,3 @@
+0001-sparc32-honour-phys_base-in-the-viking-cache-flush-r.patch
+0002-sparc32-derive-phys_base-from-the-PAGE_OFFSET-mappin.patch
+0003-sparc32-advertise-relocatable-kernel-with-HdrS-0x030.patch

@@ -1,0 +1,6 @@
+series/sparc32/integration-r5opt/memblock/0004-sparc32-use-memblock-when-mapping-the-kernel.patch
+series/sparc32/integration-r5opt/memblock/0005-sparc32-use-memblock-to-find-available-system-memory.patch
+series/sparc32/integration-r5opt/memblock/0006-sparc32-populate-memblock-from-the-PROM-memory-map.patch
+series/sparc32/integration-r5opt/memblock/0007-sparc32-drop-unused-valid-address-bitmap.patch
+series/sparc32/integration-r5opt/memblock/0008-sparc32-move-early-memory-setup-to-setup_arch.patch
+series/sparc32/integration-r5opt/memblock/0009-sparc32-drop-sp_banks.patch

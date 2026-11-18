@@ -1,0 +1,38 @@
+From f46d69ff688c2da81d4958551d1b8936d4e191df Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH 37/66] sparc32: discard HyperSPARC cache-probe TLB entries
+
+HyperSPARC cache page flushes probe the mapping for a physical tag, and
+the probe can install a TLB entry on a cpu not covered by a later
+shootdown. Demap each probed page before restoring the previous context.
+
+ROSS SPARC RISC User's Guide, 1993, section 4.4.3: "for the page flush,
+the virtual address undergoes translation through the TLB, a table walk
+may be required if a TLB miss occurs".
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/hypersparc.S | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/arch/sparc/mm/hypersparc.S b/arch/sparc/mm/hypersparc.S
+index 6c2521e85a42..a3a7b3d016c7 100644
+--- a/arch/sparc/mm/hypersparc.S
++++ b/arch/sparc/mm/hypersparc.S
+@@ -149,6 +149,7 @@ hypersparc_flush_cache_range:
+ 	bne	2b
+ 	 sta	%g0, [%o2 + %g5] ASI_M_FLUSH_PAGE
+ 3:
++	sta	%g0, [%o2] ASI_M_FLUSH_PROBE
+ 	cmp	%o2, %o1
+ 	bne	1b
+ 	 add	%o2, -PAGE_SIZE, %o0
+@@ -209,6 +210,7 @@ hypersparc_flush_cache_page:
+ 	mov	SRMMU_FAULT_STATUS, %g7
+ 	mov	SRMMU_CTX_REG, %g4
+ 	lda	[%g7] ASI_M_MMUREGS, %g0
++	sta	%g0, [%o1] ASI_M_FLUSH_PROBE
+ 	sta	%o2, [%g4] ASI_M_MMUREGS
+ hypersparc_flush_cache_page_out:
+ 	retl

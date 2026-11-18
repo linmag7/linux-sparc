@@ -1,0 +1,58 @@
+From 56bc9a6bcecc0d05db8323c3470758d0d4ee33e7 Mon Sep 17 00:00:00 2001
+From: Imre Kaloz <kaloz@kernel.org>
+Date: Sun, 27 Sep 2026 02:56:58 +0200
+Subject: [PATCH 17/66] sparc32: keep PIL raised on the SMP ticker and LEON IPI
+ exit paths
+
+smp4m_ticker returns from smp4m_percpu_timer_interrupt() by writing the
+interrupted %psr back with traps enabled, which drops PIL before
+RESTORE_ALL. A level 14 tick pending again at that point is taken on
+top of the current trap frame, so back-to-back ticks nest one frame per
+tick until the 8K kernel stack runs into thread_info. Keep PIL at 15
+until rett restores the interrupted %psr, as real_irq_continue does.
+
+smp4d_ticker and smpleon_ipi exit the same way and get the same change.
+
+Broken since 2.1.36 (sun4m), 2.1.97 (sun4d) and 2.6.33 (LEON).
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Imre Kaloz <kaloz@kernel.org>
+Message-ID: <20260927005658.8242-1-kaloz@kernel.org>
+---
+ arch/sparc/kernel/entry.S | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/arch/sparc/kernel/entry.S b/arch/sparc/kernel/entry.S
+index d6ff91663b1e..7d4225e48f7f 100644
+--- a/arch/sparc/kernel/entry.S
++++ b/arch/sparc/kernel/entry.S
+@@ -280,7 +280,8 @@ smp4m_ticker:
+ 	WRITE_PAUSE
+ 	call	smp4m_percpu_timer_interrupt
+ 	 add	%sp, STACKFRAME_SZ, %o0
+-	wr	%l0, PSR_ET, %psr
++	or	%l0, PSR_PIL, %g2	! keep PIL raised until rett, or a
++	wr	%g2, PSR_ET, %psr	! re-asserted tick nests on this frame
+ 	WRITE_PAUSE
+ 	RESTORE_ALL
+ 
+@@ -381,7 +382,8 @@ smp4d_ticker:
+ 	WRITE_PAUSE
+ 	call	smp4d_percpu_timer_interrupt
+ 	 add	%sp, STACKFRAME_SZ, %o0
+-	wr	%l0, PSR_ET, %psr
++	or	%l0, PSR_PIL, %g2	! keep PIL raised until rett, or a
++	wr	%g2, PSR_ET, %psr	! re-asserted tick nests on this frame
+ 	WRITE_PAUSE
+ 	RESTORE_ALL
+ 
+@@ -435,7 +437,8 @@ smpleon_ipi:
+ 	WRITE_PAUSE
+ 	call	leonsmp_ipi_interrupt
+ 	 add	%sp, STACKFRAME_SZ, %o1 ! pt_regs
+-	wr	%l0, PSR_ET, %psr
++	or	%l0, PSR_PIL, %g2	! keep PIL raised until rett, or a
++	wr	%g2, PSR_ET, %psr	! re-asserted IPI nests on this frame
+ 	WRITE_PAUSE
+ 	RESTORE_ALL
+ 

@@ -1,0 +1,4 @@
+0052-sparc64-Start-bottom-up-mmap-searches-at-mm-mmap_bas.patch
+0053-sparc64-Move-the-32-bit-PIE-base-below-the-legacy-mm.patch
+0054-sparc64-Randomize-the-load-address-of-PIE-executable.patch
+0055-sparc32-experiment-with-colour-preserving-mmap-and-E.patch

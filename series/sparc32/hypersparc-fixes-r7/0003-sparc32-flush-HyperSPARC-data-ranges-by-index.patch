@@ -1,0 +1,146 @@
+From c9a9e663ea33b97d59ec14da995b72c70598131e Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH 3/9] sparc32: flush HyperSPARC data ranges by index
+
+flush_cache_range() reaches a backend that borrows an MMU context, probes
+each page, flushes the ones present and demaps the translations the probe
+created. Both halves are a problem.
+
+ASI_M_FLUSH_PAGE compares a tag. ROSS SPARC RISC User's Guide, Third
+Edition, section 4.4.3: "If the cache flush operation does not match the
+cache tag entry, no action occurs." A dirty line left at that index by a
+previous owner of the page names a different physical address, so the
+flush steps over it, and the line is written back when evicted into
+whatever occupies the page by then.
+
+When the probe finds no translation the backend skips the page entirely. A
+counter measured that firing on 98% of the pages passed to
+flush_cache_range(), because tlb_start_vma() hands it whole VMAs.
+
+The same section describes segment, region and context flushes as
+"unconditional flushes and their virtual address need not be translated
+through the TLB". Use ASI 0x11 over the range, capped at one cache
+traversal, clamping before line rounding so a large range cannot wrap to
+zero.
+
+Always perform the index data flush, including for VM_EXEC mappings:
+executable mappings can also contain writable data. For VM_EXEC, follow it
+with the existing translating backend to preserve virtual I-cache
+maintenance. A capped index scan alone cannot cover every instruction
+packet in a long range (section 3.6.4.3). The index pass covers supervisor
+data lines even when the old large-range path flushes user lines only.
+This conservative change adds work rather than replacing the existing
+instruction-publication sequence.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/ross.h |  3 +++
+ arch/sparc/mm/hypersparc.S    | 38 +++++++++++++++++++++++++++++++++++
+ arch/sparc/mm/srmmu.c         | 16 ++++++++++++++-
+ 3 files changed, 56 insertions(+), 1 deletion(-)
+
+diff --git a/arch/sparc/include/asm/ross.h b/arch/sparc/include/asm/ross.h
+index 53a42b37495d..2191bd910efd 100644
+--- a/arch/sparc/include/asm/ross.h
++++ b/arch/sparc/include/asm/ross.h
+@@ -126,6 +126,9 @@ static inline void put_ross_icr(unsigned int icreg)
+ 
+ /* HyperSparc specific cache flushing. */
+ 
++void hypersparc_flush_cache_range_index(unsigned long start,
++					unsigned long end);
++
+ /* This is for the on-chip instruction cache. */
+ static inline void hyper_flush_whole_icache(void)
+ {
+diff --git a/arch/sparc/mm/hypersparc.S b/arch/sparc/mm/hypersparc.S
+index a3a7b3d016c7..a68f75e5781e 100644
+--- a/arch/sparc/mm/hypersparc.S
++++ b/arch/sparc/mm/hypersparc.S
+@@ -19,6 +19,7 @@
+ 
+ 	.globl	hypersparc_flush_cache_all, hypersparc_flush_cache_mm
+ 	.globl	hypersparc_flush_cache_range, hypersparc_flush_cache_page
++	.globl	hypersparc_flush_cache_range_index
+ 	.globl	hypersparc_flush_page_to_ram
+ 	.globl	hypersparc_flush_page_for_dma, hypersparc_flush_sig_insns
+ 	.globl	hypersparc_flush_tlb_all, hypersparc_flush_tlb_mm
+@@ -74,6 +75,43 @@ hypersparc_flush_cache_mm_out:
+ 	retl
+ 	 nop
+ 
++/*
++ * Data-only range flush.  ASI 0x11 writes back and invalidates the external
++ * line at this index without a translation or tag check, so unlike
++ * ASI_M_FLUSH_PAGE it cannot step over a line whose tag names another page.
++ * It can evict unrelated data.  Cover the intersecting lines, capped at one
++ * external-cache traversal. The caller rejects empty ranges and separately
++ * preserves instruction-cache maintenance for executable mappings.
++ */
++hypersparc_flush_cache_range_index:
++	WINDOW_FLUSH(%g4, %g5)
++	sethi	%hi(vac_line_size), %g1
++	ld	[%g1 + %lo(vac_line_size)], %o2
++	sethi	%hi(vac_cache_size), %g1
++	ld	[%g1 + %lo(vac_cache_size)], %o3
++	sub	%o1, %o0, %o1
++	sub	%o2, 1, %g1
++	and	%o0, %g1, %g2
++	andn	%o0, %g1, %o0
++	/* Clamp before rounding, so a large range cannot wrap to zero. */
++	cmp	%o1, %o3
++	bgeu	1f
++	 nop
++	add	%o1, %g2, %o1
++	add	%o1, %g1, %o1
++	andn	%o1, %g1, %o1
++	cmp	%o1, %o3
++	blu	2f
++	 nop
++1:
++	mov	%o3, %o1
++2:
++	subcc	%o1, %o2, %o1
++	bne	2b
++	 sta	%g0, [%o0 + %o1] ASI_M_FLUSH_SEG
++	retl
++	 nop
++
+ 	/* The things we do for performance... */
+ hypersparc_flush_cache_range:
+ 	ld	[%o0 + VMA_VM_MM], %o0
+diff --git a/arch/sparc/mm/srmmu.c b/arch/sparc/mm/srmmu.c
+index 84d96c76b241..2d7da3ae8090 100644
+--- a/arch/sparc/mm/srmmu.c
++++ b/arch/sparc/mm/srmmu.c
+@@ -1094,11 +1094,25 @@ static void poke_hypersparc(void)
+ 	clear = srmmu_get_fstatus();
+ }
+ 
++static void hypersparc_flush_cache_range_data(struct vm_area_struct *vma,
++					      unsigned long start,
++					      unsigned long end)
++{
++	if (start >= end || vma->vm_mm->context == NO_CONTEXT)
++		return;
++
++	/* Writable executable mappings need index-based data maintenance too. */
++	hypersparc_flush_cache_range_index(start, end);
++	/* Retain the existing virtual instruction-cache maintenance. */
++	if (vma->vm_flags & VM_EXEC)
++		hypersparc_flush_cache_range(vma, start, end);
++}
++
+ static const struct sparc32_cachetlb_ops hypersparc_ops = {
+ 	.cache_all	= hypersparc_flush_cache_all,
+ 	.cache_mm	= hypersparc_flush_cache_mm,
+ 	.cache_page	= hypersparc_flush_cache_page,
+-	.cache_range	= hypersparc_flush_cache_range,
++	.cache_range	= hypersparc_flush_cache_range_data,
+ 	.tlb_all	= hypersparc_flush_tlb_all,
+ 	.tlb_mm		= hypersparc_flush_tlb_mm,
+ 	.tlb_page	= hypersparc_flush_tlb_page,
+-- 
+2.43.0
+

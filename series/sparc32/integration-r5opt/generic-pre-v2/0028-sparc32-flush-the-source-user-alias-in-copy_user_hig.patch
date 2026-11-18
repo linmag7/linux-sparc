@@ -1,0 +1,94 @@
+From 03b5593c31604b53c5e78e18abf67c3a18d4e635 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH 28/66] sparc32: flush the source user alias in
+ copy_user_highpage()
+
+copy_user_highpage() also handles lowmem pages. A source user alias can be
+dirtied after the fork cache flush but before write protection and its TLB
+shootdown complete on another CPU. This explains why flushing at fork
+alone is insufficient; the historical tests below did not isolate that
+particular interleaving.
+
+The hyperSPARC external cache is virtually indexed, so index bits lie
+above the page offset and one physical page can occupy 64, 128 or 256
+distinct cache locations depending on cache size. Two mappings of a page
+do not see each other's dirty lines.
+
+copy_user_highpage() reads the source through a kmap_local alias, so lines
+dirtied through the user mapping sit in a different set and the copy reads
+stale memory. copy_user_page() then flushes page_address(page), NULL for a
+highmem page, with no NULL check.
+
+Flush the source page's user alias with flush_cache_page() before reading
+it, and flush the destination through the address actually written.
+
+Only observable on HyperSPARC: SuperSPARC's caches are physically indexed
+and MBus snooped, so viking_flush_cache_all() is a window flush and a
+return.
+
+Fork/COW torture on a two-cpu SPARCstation 20: 7 of 20 runs lost writes
+before, 0 of 20 after.
+
+The source-alias omission predates Git history; the later folio conversion
+also removed sparc_flush_page_to_ram()'s NULL guard. This change uses the
+mapped destination address and covers both cases.
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/page_32.h |  6 ++++++
+ arch/sparc/mm/init_32.c          | 23 +++++++++++++++++++++++
+ 2 files changed, 29 insertions(+)
+
+diff --git a/arch/sparc/include/asm/page_32.h b/arch/sparc/include/asm/page_32.h
+index 7429291fb118..c968ec33ee98 100644
+--- a/arch/sparc/include/asm/page_32.h
++++ b/arch/sparc/include/asm/page_32.h
+@@ -28,6 +28,12 @@
+ 		(void)(vaddr);			\
+ 	} while (0)
+ 
++#define __HAVE_ARCH_COPY_USER_HIGHPAGE
++struct page;
++struct vm_area_struct;
++void copy_user_highpage(struct page *to, struct page *from,
++			unsigned long vaddr, struct vm_area_struct *vma);
++
+ /* passing structs on the Sparc slow us down tremendously... */
+ 
+ /* #define STRICT_MM_TYPECHECKS */
+diff --git a/arch/sparc/mm/init_32.c b/arch/sparc/mm/init_32.c
+index 2f693b70dbd8..7b53ee9f061f 100644
+--- a/arch/sparc/mm/init_32.c
++++ b/arch/sparc/mm/init_32.c
+@@ -103,6 +103,29 @@ void sparc_flush_page_to_ram(struct page *page)
+ }
+ EXPORT_SYMBOL(sparc_flush_page_to_ram);
+ 
++/*
++ * The kernel reads the source page through a kmap alias, which on a
++ * virtually indexed cache lands in a different set than the user mapping
++ * userspace has been dirtying.  Flush that alias first, and flush the
++ * destination through the address actually written rather than
++ * page_address(), which is NULL for a highmem page.
++ */
++void copy_user_highpage(struct page *to, struct page *from,
++			unsigned long vaddr, struct vm_area_struct *vma)
++{
++	char *vfrom, *vto;
++
++	if (vma)
++		flush_cache_page(vma, vaddr, page_to_pfn(from));
++
++	vfrom = kmap_local_page(from);
++	vto = kmap_local_page(to);
++	copy_page(vto, vfrom);
++	__flush_page_to_ram((unsigned long)vto);
++	kunmap_local(vto);
++	kunmap_local(vfrom);
++}
++
+ void sparc_flush_folio_to_ram(struct folio *folio)
+ {
+ 	unsigned long vaddr = (unsigned long)folio_address(folio);

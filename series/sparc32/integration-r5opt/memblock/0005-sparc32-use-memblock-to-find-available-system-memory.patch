@@ -1,0 +1,46 @@
+From b811766c91d0f39170f98951763cfdb0d294b9bd Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Tue, 1 Sep 2026 23:45:46 +0200
+Subject: [PATCH 05/66] sparc32: use memblock to find available system memory
+
+The SRMMU nocache pool is sized after memblock has been populated. Use
+memblock_phys_mem_size() instead of summing the private sp_banks array.
+
+Suggested-by: Sam Ravnborg <sam@ravnborg.org>
+Reviewed-by: Sam Ravnborg <sam@ravnborg.org>
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/srmmu.c | 14 +-------------
+ 1 file changed, 1 insertion(+), 13 deletions(-)
+
+diff --git a/arch/sparc/mm/srmmu.c b/arch/sparc/mm/srmmu.c
+index 110e2f248c60..7b57a10c961f 100644
+--- a/arch/sparc/mm/srmmu.c
++++ b/arch/sparc/mm/srmmu.c
+@@ -226,25 +226,13 @@ void srmmu_free_nocache(void *addr, int size)
+ static void srmmu_early_allocate_ptable_skeleton(unsigned long start,
+ 						 unsigned long end);
+ 
+-/* Return how much physical memory we have.  */
+-static unsigned long __init probe_memory(void)
+-{
+-	unsigned long total = 0;
+-	int i;
+-
+-	for (i = 0; sp_banks[i].num_bytes; i++)
+-		total += sp_banks[i].num_bytes;
+-
+-	return total;
+-}
+-
+ /*
+  * Reserve nocache dynamically proportionally to the amount of
+  * system RAM. -- Tomas Szepe <szepe@pinerecords.com>, June 2002
+  */
+ static void __init srmmu_nocache_calcsize(void)
+ {
+-	unsigned long sysmemavail = probe_memory() / 1024;
++	unsigned long sysmemavail = memblock_phys_mem_size() / 1024;
+ 	int srmmu_nocache_npages;
+ 
+ 	srmmu_nocache_npages =

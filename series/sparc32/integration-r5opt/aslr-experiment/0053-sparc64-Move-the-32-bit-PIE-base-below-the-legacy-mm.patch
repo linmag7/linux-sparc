@@ -1,0 +1,37 @@
+From 14c95065a425742517fa7d94408787c1f2879684 Mon Sep 17 00:00:00 2001
+From: Stian Halseth <stian@itx.no>
+Date: Sun, 18 Oct 2026 14:27:33 +0200
+Subject: [PATCH 53/66] sparc64: Move the 32-bit PIE base below the legacy mmap
+ base
+
+COMPAT_ELF_ET_DYN_BASE is 0x70000000, the same address as
+TASK_UNMAPPED_BASE for 32-bit tasks. With the legacy bottom-up layout
+the mmap area therefore starts where a 32-bit PIE is loaded, and once
+ARCH_HAS_ELF_RANDOMIZE is selected binfmt_elf also moves the brk of an
+explicitly executed loader there, on top of the loader itself.
+
+Move it to 1GB. x86, arm64 and powerpc use 4MB, but binfmt_elf now
+rounds the load address down to the PIE's p_align, and from a 4MB base
+an alignment of 8MB or more can round it down to 0. 1GB keeps every
+alignment the old base allowed and leaves room for brk below the mmap
+area.
+
+Signed-off-by: Stian Halseth <stian@itx.no>
+Message-ID: <20261018122734.2594904-3-stian@itx.no>
+---
+ arch/sparc/include/asm/elf_64.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/sparc/include/asm/elf_64.h b/arch/sparc/include/asm/elf_64.h
+index 950521c92194..1514926d067f 100644
+--- a/arch/sparc/include/asm/elf_64.h
++++ b/arch/sparc/include/asm/elf_64.h
+@@ -192,7 +192,7 @@ typedef struct {
+    that it will "exec", and that there is sufficient room for the brk.  */
+ 
+ #define ELF_ET_DYN_BASE		0x0000010000000000UL
+-#define COMPAT_ELF_ET_DYN_BASE	0x0000000070000000UL
++#define COMPAT_ELF_ET_DYN_BASE	0x0000000040000000UL
+ 
+ extern unsigned long sparc64_elf_hwcap;
+ #define ELF_HWCAP	sparc64_elf_hwcap

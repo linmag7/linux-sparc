@@ -1,0 +1,26 @@
+[
+  {
+    "checker": "sparc32-fullstack-prerequisites-20261028/verify-fullstack-prerequisites.py",
+    "source": "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/ss20-ef-full-protnone1-20261026/source",
+    "expected": "PASS",
+    "returncode": 0,
+    "stdout": "PASS: Imre raised-PIL exits and Ramin observed-IPI acknowledgement present\nPASS: PROT_NONE resident/COW predicate present; all three external prerequisites verified\n",
+    "stderr": ""
+  },
+  {
+    "checker": "sparc32-build-prerequisites-20261018/verify-sparc32-prerequisites.py",
+    "source": "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/sparc32-generic-v2-20261109/validation",
+    "expected": "PASS",
+    "returncode": 0,
+    "stdout": "PASS: Imre raised-PIL exits and Ramin observed-IPI acknowledgement present\n",
+    "stderr": ""
+  },
+  {
+    "checker": "sparc32-fullstack-prerequisites-20261028/verify-fullstack-prerequisites.py",
+    "source": "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/sparc32-generic-v2-20261109/validation",
+    "expected": "reject missing PROT_NONE",
+    "returncode": 1,
+    "stdout": "PASS: Imre raised-PIL exits and Ramin observed-IPI acknowledgement present\n",
+    "stderr": "FAIL: PROT_NONE resident/COW predicate absent or changed; manual equivalent-code review required\n"
+  }
+]

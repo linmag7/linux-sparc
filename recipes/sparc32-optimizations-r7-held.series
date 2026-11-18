@@ -1,0 +1,10 @@
+series/sparc32/optimizations-r7-held/0001-sparc32-isolate-the-HyperSPARC-kmap-whole-cache-swee.patch
+series/sparc32/optimizations-r7-held/0002-sparc32-avoid-no-op-HyperSPARC-DMA-cross-calls.patch
+series/sparc32/optimizations-r7-held/0003-sparc32-demap-HyperSPARC-kmap_local-TLB-entries-by-p.patch
+series/sparc32/optimizations-r7-held/0004-sparc32-track-highmem-pages-exposed-through-vmap.patch
+series/sparc32/optimizations-r7-held/0005-sparc32-avoid-redundant-HyperSPARC-kmap-flushes.patch
+series/sparc32/optimizations-r7-held/0006-sparc32-narrow-safe-HyperSPARC-kmap-unmap-flushes.patch
+series/sparc32/optimizations-r7-held/0007-sparc32-avoid-duplicate-publication-of-HyperSPARC-hi.patch
+series/sparc32/optimizations-r7-held/0008-sparc32-unroll-the-HyperSPARC-combined-cache-sweep-e.patch
+series/sparc32/optimizations-r7-held/0009-sparc32-narrow-guarded-HyperSPARC-copy-source-unmaps.patch
+series/sparc32/optimizations-r7-held/0010-sparc32-reduce-arithmetic-in-the-HyperSPARC-combined.patch

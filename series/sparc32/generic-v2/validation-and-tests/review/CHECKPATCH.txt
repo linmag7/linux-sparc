@@ -1,0 +1,5 @@
+Strict checkpatch retains the existing exceptions: one ERROR for
+ARCH_HAS_FLUSH_ANON_PAGE (required preprocessor hook in include/linux/highmem.h,
+not a Kconfig symbol), and four warnings for stable Cc without a verified
+Fixes tag. No new code-style findings in patch 2. No provenance fabricated.
+See checkpatch.log for the complete output.

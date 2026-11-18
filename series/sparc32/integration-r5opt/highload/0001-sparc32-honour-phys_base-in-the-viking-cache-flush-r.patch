@@ -1,0 +1,64 @@
+From 26a332e094d0272a91e4ddae60d16363127f0e66 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Mon, 28 Sep 2026 00:20:35 +0200
+Subject: [PATCH 01/66] sparc32: honour phys_base in the viking cache flush
+ routines
+
+viking_flush_page() and viking_mxcc_flush_page() derive the physical
+address of the page they are asked to flush by subtracting PAGE_OFFSET
+from the kernel virtual address:
+
+	sethi	%hi(PAGE_OFFSET), %g2
+	sub	%o0, %g2, %g3
+
+That is only the physical address when phys_base is zero. The C side spells
+the same conversion __pa(), which adds phys_base, and every caller passes a
+kernel virtual address expecting exactly that.
+
+With a kernel loaded away from the start of RAM the two disagree by
+phys_base. viking_flush_page() then compares cache tags against the wrong
+page and flushes nothing, and viking_mxcc_flush_page() streams a page that
+is phys_base lower than the one it was given, so the intended lines stay
+dirty in the cache while unrelated ones are pushed out.
+
+The visible effect is that anything relying on a flush to make memory
+visible to another bus master silently keeps working from stale data. On a
+SPARCstation 20 this shows up as every SCSI transfer failing with a DMA
+error: iommu_flush_iotlb() cannot get the IOPTEs out to RAM, so the IOMMU
+walks stale entries and the ESP DMA faults.
+
+Add phys_base, so these agree with __pa() again. No change when phys_base
+is zero, which is why this went unnoticed.
+
+Reviewed-by: Sam Ravnborg <sam@ravnborg.org>
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+Message-ID: <20260928002035.1-2-linmag7@gmail.com>
+Message-ID: <55357ed4f6270c81595a018af2fbe391d8b912ab.1790548064.git.linmag7@gmail.com>
+---
+ arch/sparc/mm/viking.S | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/arch/sparc/mm/viking.S b/arch/sparc/mm/viking.S
+index 48f062de7a7f..8b4e251bbba2 100644
+--- a/arch/sparc/mm/viking.S
++++ b/arch/sparc/mm/viking.S
+@@ -38,6 +38,9 @@ sun4dsmp_flush_tlb_spin:
+ viking_flush_page:
+ 	sethi	%hi(PAGE_OFFSET), %g2
+ 	sub	%o0, %g2, %g3
++	sethi	%hi(phys_base), %g2
++	ld	[%g2 + %lo(phys_base)], %g2
++	add	%g3, %g2, %g3		! + phys_base = physical address
+ 	srl	%g3, 12, %g1		! ppage >> 12
+ 
+ 	clr	%o1			! set counter, 0 - 127
+@@ -91,6 +94,9 @@ viking_flush_page:
+ viking_mxcc_flush_page:
+ 	sethi	%hi(PAGE_OFFSET), %g2
+ 	sub	%o0, %g2, %g3
++	sethi	%hi(phys_base), %g2
++	ld	[%g2 + %lo(phys_base)], %g2
++	add	%g3, %g2, %g3			! + phys_base = physical address
+ 	sub	%g3, -PAGE_SIZE, %g3		! ppage + PAGE_SIZE
+ 	sethi	%hi(MXCC_SRCSTREAM), %o3	! assume %hi(MXCC_SRCSTREAM) == %hi(MXCC_DESTSTREAM)
+ 	mov	0x10, %g2			! set cacheable bit

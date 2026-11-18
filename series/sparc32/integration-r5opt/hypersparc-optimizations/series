@@ -1,0 +1,10 @@
+0057-sparc32-isolate-the-HyperSPARC-kmap-whole-cache-swee.patch
+0058-sparc32-avoid-no-op-HyperSPARC-DMA-cross-calls.patch
+0059-sparc32-demap-HyperSPARC-kmap_local-TLB-entries-by-p.patch
+0060-sparc32-track-highmem-pages-exposed-through-vmap.patch
+0061-sparc32-avoid-redundant-HyperSPARC-kmap-flushes.patch
+0062-sparc32-narrow-safe-HyperSPARC-kmap-unmap-flushes.patch
+0063-sparc32-avoid-duplicate-publication-of-HyperSPARC-hi.patch
+0064-sparc32-unroll-the-HyperSPARC-combined-cache-sweep-e.patch
+0065-sparc32-narrow-guarded-HyperSPARC-copy-source-unmaps.patch
+0066-sparc32-reduce-arithmetic-in-the-HyperSPARC-combined.patch

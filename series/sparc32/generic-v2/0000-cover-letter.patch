@@ -1,0 +1,66 @@
+From 3fdab781ed54bb9a1613cc6ab8fe8f4d6f46e306 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Mon, 9 Nov 2026 11:42:55 +0100
+Subject: [PATCH v2 0/9] sparc32: repair cache hooks, mappings and TLB
+ tracking
+
+I am submitting nine fixes for SPARC32 cache geometry, user-page copying,
+cache hooks, mappings and CPU-mask tracking. They apply to the recorded
+linux-sparc for-next commit, independently of my posted bit-lock fix.
+
+Since summer 2026, I have been working on booting and running Linux
+reliably on SMP HyperSPARC, with native GDB builds as my main workload.
+These fixes came out of that work but address common SPARC32 paths;
+I plan to submit the HyperSPARC-specific fixes separately on top.
+
+Changes in v2:
+- Patch 2 flushes the source kernel alias before and after copying,
+  including lowmem mappings that bypass the kmap cache hooks. This
+  addresses the stale supervisor-alias case raised by Sashiko's review.
+- Clarify that the historical hardware results predate this change.
+  The other eight patches are unchanged.
+
+I previously completed a native GDB 18.1 build on a dual-CPU HyperSPARC
+RT626 SPARCstation 20 with 512 MB RAM and a native SPARC32 SMP kernel
+containing the combined series and separate platform prerequisites,
+without core dumps, livelock or new kernel messages. That integration
+run predates this rebase and v2; it is not isolated per-patch validation.
+
+For v2, SMP and UP builds and repeated COW/reuse tests passed under QEMU
+SS-20. The tests check copied contents, parent isolation and rewrites
+across virtual page colours. QEMU does not validate HyperSPARC cache
+alias behaviour; physical validation of the new case remains pending.
+Validation kernels include the separate PIL and IPI fixes, not submitted
+here. The standalone test source is kept separately from these patches.
+
+The previously posted SuperSPARC demap series remains separate and needs
+a follow-up to retain mm_cpumask, consistent with patch 8 here.
+HyperSPARC-specific fixes and optimizations are not included.
+
+Codex assisted with preparation, review and local validation.
+
+Magnus Lindholm (9):
+  sparc32: inspect every PROM CPU cache geometry
+  sparc32: flush the source user alias in copy_user_highpage()
+  sparc32: do not flush a NULL address in flush_dcache_folio
+  sparc32: flush the cache when a kmap_local mapping is installed
+  sparc32: preset modified and referenced bits in kmap PTEs
+  sparc32: colour-align private file mappings
+  sparc32: implement flush_anon_page
+  sparc32: retain mm_cpumask across TLB shootdowns
+  sparc32: enroll and order CPUs before switching address spaces
+
+ arch/sparc/include/asm/cacheflush_32.h |  6 +++
+ arch/sparc/include/asm/highmem.h       | 21 +++++++---
+ arch/sparc/include/asm/page_32.h       |  6 +++
+ arch/sparc/include/asm/switch_to_32.h  |  1 -
+ arch/sparc/kernel/sys_sparc_32.c       | 17 +++++++-
+ arch/sparc/mm/init_32.c                | 46 +++++++++++++++++++++
+ arch/sparc/mm/srmmu.c                  | 56 ++++++++++++++++++++------
+ 7 files changed, 132 insertions(+), 21 deletions(-)
+
+
+base-commit: a9e88d617a25306fa7e532b0b8be08df778872cc
+-- 
+2.43.0
+

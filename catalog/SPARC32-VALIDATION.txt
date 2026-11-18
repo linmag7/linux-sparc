@@ -1,0 +1,12 @@
+SPARC32 archive import verification -- 18 November 2026
+
+14 new kernel branch records; 109 replayed patch commits.
+All original files copied byte-for-byte and SHA256 checked.
+Every replayed diff has the same stable patch-id as its source mail and
+reverse-applies to the exact parent tree. Every new patch commit carries
+Magnus Lindholm's requested sign-off; original authors/trailers retained.
+The r5opt and PROT_NONE complete trees equal their preserved source trees.
+No kernel builds or runtime tests were run; inherited validation is labelled.
+All pre-existing kernel branches and the checked-out master are unchanged.
+The shared patch-archive branch is extended with these records and files.
+No GitHub push. No SS-20 contact. No rebases of preserved snapshots.

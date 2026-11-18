@@ -152,3 +152,15 @@ archive/2026-11-18/fujitsu/m3000-error-interrupts-v5
   foundation delta verified. Not newly built or booted. The historical v4
   branch and all prior snapshots remain intact. See
   series/fujitsu/m3000-error-interrupts-v5/ and its cover letter.
+
+
+SPARC32 and HyperSPARC collection (18 November 2026)
+--------------------------------------------------
+See series/sparc32/README.rst for the new grouped archive and its dependency
+boundaries, and catalog/sparc32-branches.json for exact bases and tips.
+This adds current generic v2, bit-lock, HyperSPARC fixes and optimizations,
+Viking demap, external prerequisites, platform foundation, CASA integration,
+ASLR experiment, and exact historical full-stack reproductions. SPARC32
+uses the recorded original bases, not current master. Existing SPARC64 and
+driver entries above are preserved. Personal archive publication may include
+experimental work; Linux submission holds are recorded separately.

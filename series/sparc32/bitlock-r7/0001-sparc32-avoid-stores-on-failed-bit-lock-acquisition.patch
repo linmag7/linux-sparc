@@ -1,0 +1,86 @@
+From eb8404d322443bd8a86d14b6ff7d5d793db70ab1 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH 1/1] sparc32: do not write back unchanged values in emulated
+ atomics
+
+A failed bit-lock acquisition can restore an unlinked hlist_bl head and
+leave pathname lookup retrying a dead dentry indefinitely. The owner
+updates the pointer bits with a plain store while holding the bit lock.
+SPARC32's hashed atomic lock does not exclude that store: an unconditional
+fetch-or can write back a stale pointer even when the lock bit was set.
+
+Skip unchanged stores in the emulated atomic fetch operations and legacy
+set/clear bit helpers. This covers current test_and_set_bit()-based locks
+and older generic bit-lock implementations. Keep the hash lock and IRQ
+exclusion on every path, preserving ordering, return values and
+changed-value updates.
+
+This fixes the bit-lock owner/waiter protocol, not arbitrary races between
+plain stores and changed-value emulated atomic operations.
+
+Fixes: 26333576fd0d ("bitops: introduce lock ops")
+Cc: stable@vger.kernel.org
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+Validation: forced-interleaving host regression; SMP/UP builds and QEMU
+smoke boots. A native GDB 18.1 build also passed on dual-CPU HyperSPARC
+as part of the combined integration; see the cover letter for scope.
+
+ arch/sparc/lib/atomic32.c | 20 +++++++++++++-------
+ 1 file changed, 13 insertions(+), 7 deletions(-)
+
+diff --git a/arch/sparc/lib/atomic32.c b/arch/sparc/lib/atomic32.c
+index 8ae880ebf07a..30b4e0c12c07 100644
+--- a/arch/sparc/lib/atomic32.c
++++ b/arch/sparc/lib/atomic32.c
+@@ -28,15 +28,19 @@ static DEFINE_SPINLOCK(dummy);
+ 
+ #endif /* SMP */
+ 
++/* Failed bit-lock acquisition must not overwrite an owner's plain store. */
+ #define ATOMIC_FETCH_OP(op, c_op)					\
+ int arch_atomic_fetch_##op(int i, atomic_t *v)				\
+ {									\
+-	int ret;							\
++	int ret, new;							\
+ 	unsigned long flags;						\
+ 	spin_lock_irqsave(ATOMIC_HASH(v), flags);			\
+ 									\
+-	ret = v->counter;						\
+-	v->counter c_op i;						\
++	ret = READ_ONCE(v->counter);					\
++	new = ret;							\
++	new c_op i;							\
++	if (new != ret)							\
++		WRITE_ONCE(v->counter, new);				\
+ 									\
+ 	spin_unlock_irqrestore(ATOMIC_HASH(v), flags);			\
+ 	return ret;							\
+@@ -125,8 +129,9 @@ unsigned long sp32___set_bit(unsigned long *addr, unsigned long mask)
+ 	unsigned long old, flags;
+ 
+ 	spin_lock_irqsave(ATOMIC_HASH(addr), flags);
+-	old = *addr;
+-	*addr = old | mask;
++	old = READ_ONCE(*addr);
++	if (!(old & mask))
++		WRITE_ONCE(*addr, old | mask);
+ 	spin_unlock_irqrestore(ATOMIC_HASH(addr), flags);
+ 
+ 	return old & mask;
+@@ -138,8 +143,9 @@ unsigned long sp32___clear_bit(unsigned long *addr, unsigned long mask)
+ 	unsigned long old, flags;
+ 
+ 	spin_lock_irqsave(ATOMIC_HASH(addr), flags);
+-	old = *addr;
+-	*addr = old & ~mask;
++	old = READ_ONCE(*addr);
++	if (old & mask)
++		WRITE_ONCE(*addr, old & ~mask);
+ 	spin_unlock_irqrestore(ATOMIC_HASH(addr), flags);
+ 
+ 	return old & mask;
+-- 
+2.43.0
+

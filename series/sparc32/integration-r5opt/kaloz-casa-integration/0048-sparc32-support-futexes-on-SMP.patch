@@ -1,0 +1,343 @@
+From a8fc38660c2deeb82200b559682d5215cdb7b15c Mon Sep 17 00:00:00 2001
+From: Imre Kaloz <kaloz@kernel.org>
+Date: Sun, 27 Sep 2026 02:58:19 +0200
+Subject: [PATCH 48/66] sparc32: support futexes on SMP
+
+asm-generic/futex.h provides the futex atomic ops for UP only, so FUTEX
+has depended on !(SPARC32 && SMP).
+
+Implement them in atomic32.c for both. LEON parts that implement casa
+run it on the user word, as user code updates the word with casa there
+and takes no kernel lock. Other CPUs have no compare-and-swap; the ops
+serialize on __atomic_hash, which lets a kernel emulation of user casa
+share the lock.
+
+casa is optional on LEON, so it is probed once at boot. On a part
+without it the kernel-mode illegal_instruction is fixed up from the
+exception table.
+
+Signed-off-by: Imre Kaloz <kaloz@kernel.org>
+Message-ID: <20260927005821.8369-2-kaloz@kernel.org>
+---
+ arch/sparc/include/asm/futex_32.h | 156 +-----------------------------
+ arch/sparc/kernel/traps_32.c      |   1 +
+ arch/sparc/lib/atomic32.c         | 122 +++++++++++++++++++++++
+ 3 files changed, 128 insertions(+), 151 deletions(-)
+
+diff --git a/arch/sparc/include/asm/futex_32.h b/arch/sparc/include/asm/futex_32.h
+index d77ee65f6739..2271aad566f8 100644
+--- a/arch/sparc/include/asm/futex_32.h
++++ b/arch/sparc/include/asm/futex_32.h
+@@ -1,156 +1,10 @@
+-/* SPDX-License-Identifier: GPL-2.0 */
+ #ifndef _ASM_FUTEX_H
+ #define _ASM_FUTEX_H
+ 
+-#include <linux/futex.h>
+-#include <linux/uaccess.h>
+-#include <asm/errno.h>
+-#include <asm/cas_32.h>
+-#include <asm/cpu_type.h>
++#include <linux/types.h>
+ 
+-/*
+- * Pre-v9 sparc has no compare-and-swap, so these serialise on the same lock
+- * array the compare-and-swap trap uses.  sparc32_atomic_lock() must hash
+- * identically for both, or a futex operation and a userspace compare-and-swap
+- * on one word could run concurrently.
+- *
+- * Where the cpu has the instruction that lock is not enough: a binary built
+- * for such a cpu does its own casa and never takes it, so both operations here
+- * are built out of casa as well.
+- *
+- * Both entry points are called with page faults already disabled, so the
+- * accesses below fail rather than sleeping under the lock.
+- */
++int arch_futex_atomic_op_inuser(int op, u32 oparg, int *oval, u32 __user *uaddr);
++int futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *uaddr,
++				  u32 oldval, u32 newval);
+ 
+-static inline int sparc32_futex_op(int op, int oparg, u32 oldval, u32 *newval)
+-{
+-	switch (op) {
+-	case FUTEX_OP_SET:
+-		*newval = oparg;
+-		break;
+-	case FUTEX_OP_ADD:
+-		*newval = oldval + oparg;
+-		break;
+-	case FUTEX_OP_OR:
+-		*newval = oldval | oparg;
+-		break;
+-	case FUTEX_OP_ANDN:
+-		*newval = oldval & ~oparg;
+-		break;
+-	case FUTEX_OP_XOR:
+-		*newval = oldval ^ oparg;
+-		break;
+-	default:
+-		return -ENOSYS;
+-	}
+-
+-	return 0;
+-}
+-
+-static inline int
+-arch_futex_atomic_op_inuser(int op, int oparg, int *oval, u32 __user *uaddr)
+-{
+-	raw_spinlock_t *lock;
+-	unsigned long flags;
+-	u32 oldval, newval, prev;
+-	int ret = 0;
+-
+-	if (sparc32_has_casa) {
+-		if (!access_ok(uaddr, sizeof(u32)))
+-			return -EFAULT;
+-
+-		if (unlikely(get_user(oldval, uaddr) != 0))
+-			return -EFAULT;
+-
+-		/*
+-		 * Retry until the word is still what the new value was
+-		 * computed from, so the read-modify-write is one atomic
+-		 * step against a binary using casa on the same word.
+-		 */
+-		for (;;) {
+-			ret = sparc32_futex_op(op, oparg, oldval, &newval);
+-			if (ret)
+-				return ret;
+-
+-			if (unlikely(__sparc32_casa_user(uaddr, oldval,
+-							 newval, &prev) != 0))
+-				return -EFAULT;
+-
+-			if (likely(prev == oldval))
+-				break;
+-
+-			oldval = prev;
+-		}
+-
+-		*oval = oldval;
+-		return 0;
+-	}
+-
+-	lock = sparc32_atomic_lock(uaddr);
+-	raw_spin_lock_irqsave(lock, flags);
+-
+-	if (unlikely(get_user(oldval, uaddr) != 0)) {
+-		ret = -EFAULT;
+-		goto out;
+-	}
+-
+-	ret = sparc32_futex_op(op, oparg, oldval, &newval);
+-	if (ret)
+-		goto out;
+-
+-	if (unlikely(put_user(newval, uaddr) != 0))
+-		ret = -EFAULT;
+-
+-out:
+-	raw_spin_unlock_irqrestore(lock, flags);
+-
+-	if (!ret)
+-		*oval = oldval;
+-
+-	return ret;
+-}
+-
+-static inline int
+-futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *uaddr,
+-			      u32 oldval, u32 newval)
+-{
+-	raw_spinlock_t *lock;
+-	unsigned long flags;
+-	u32 val;
+-
+-	if (!access_ok(uaddr, sizeof(u32)))
+-		return -EFAULT;
+-
+-	/*
+-	 * Where the cpu has the instruction, use it: it is atomic against a
+-	 * binary doing its own casa on the same word, which a lock of ours
+-	 * would not be.  Page faults are already disabled by the caller, so
+-	 * an unresolved address returns -EFAULT through the exception table.
+-	 */
+-	if (sparc32_has_casa) {
+-		if (__sparc32_casa_user(uaddr, oldval, newval, &val))
+-			return -EFAULT;
+-		*uval = val;
+-		return 0;
+-	}
+-
+-	lock = sparc32_atomic_lock(uaddr);
+-	raw_spin_lock_irqsave(lock, flags);
+-
+-	if (unlikely(get_user(val, uaddr) != 0)) {
+-		raw_spin_unlock_irqrestore(lock, flags);
+-		return -EFAULT;
+-	}
+-
+-	if (val == oldval && unlikely(put_user(newval, uaddr) != 0)) {
+-		raw_spin_unlock_irqrestore(lock, flags);
+-		return -EFAULT;
+-	}
+-
+-	raw_spin_unlock_irqrestore(lock, flags);
+-
+-	*uval = val;
+-	return 0;
+-}
+-
+-#endif /* _ASM_FUTEX_H */
++#endif
+diff --git a/arch/sparc/kernel/traps_32.c b/arch/sparc/kernel/traps_32.c
+index 7919a7460bc1..96a05fabef40 100644
+--- a/arch/sparc/kernel/traps_32.c
++++ b/arch/sparc/kernel/traps_32.c
+@@ -11,6 +11,7 @@
+  */
+ 
+ #include <linux/cpu.h>
++#include <linux/extable.h>
+ #include <linux/sched/mm.h>
+ #include <linux/sched/debug.h>
+ #include <linux/mm_types.h>
+diff --git a/arch/sparc/lib/atomic32.c b/arch/sparc/lib/atomic32.c
+index 30b4e0c12c07..70c043f55d78 100644
+--- a/arch/sparc/lib/atomic32.c
++++ b/arch/sparc/lib/atomic32.c
+@@ -9,8 +9,13 @@
+  */
+ 
+ #include <linux/atomic.h>
++#include <linux/futex.h>
++#include <linux/init.h>
+ #include <linux/spinlock.h>
+ #include <linux/module.h>
++#include <linux/uaccess.h>
++#include <asm/cpu_type.h>
++#include <asm/futex.h>
+ 
+ #ifdef CONFIG_SMP
+ #define ATOMIC_HASH_SIZE	4
+@@ -201,3 +206,120 @@ unsigned long __xchg_u32(volatile u32 *ptr, u32 new)
+ 	return (unsigned long)prev;
+ }
+ EXPORT_SYMBOL(__xchg_u32);
++
++/* Only some LEON parts implement casa. */
++static bool sparc32_casa __ro_after_init;
++
++static int __casa_user(u32 *uval, u32 __user *uaddr, u32 oldval, u32 newval)
++{
++	/*
++	 * casa [%o0] 0xb, %o1, %o2, as a word any assembler accepts. ASI
++	 * 0x0b is the supervisor address space; the emulated casa in
++	 * cas_emu_32.c instead accepts the user ASIs 0x0a and 0x80.
++	 */
++	register u32 __user *uaddr_r asm("o0") = uaddr;
++	register u32 oldval_r asm("o1") = oldval;
++	register u32 newval_r asm("o2") = newval;
++	int ret = 0;
++
++	__asm__ __volatile__(
++	"1:	.word	0xd5e20169\n"
++	"2:\n"
++	"	.section .fixup,#alloc,#execinstr\n"
++	"	.align	4\n"
++	"3:	sethi	%%hi(2b), %0\n"
++	"	jmpl	%0 + %%lo(2b), %%g0\n"
++	"	 mov	%4, %0\n"
++	"	.previous\n"
++	"	.section __ex_table,#alloc\n"
++	"	.align	4\n"
++	"	.word	1b, 3b\n"
++	"	.previous\n"
++	: "+r" (ret), "+r" (newval_r)
++	: "r" (uaddr_r), "r" (oldval_r), "i" (-EFAULT)
++	: "memory");
++
++	*uval = newval_r;
++	return ret;
++}
++
++/* Without casa the illegal_instruction trap takes the fixup above. */
++static int __init sparc32_casa_probe(void)
++{
++	u32 word = 0, val;
++
++	if (sparc_cpu_model == sparc_leon)
++		sparc32_casa = !__casa_user(&val, (u32 __force __user *)&word,
++					    0, 1);
++	return 0;
++}
++early_initcall(sparc32_casa_probe);
++
++/*
++ * Without casa, user CAS is emulated under the same lock. ATOMIC_HASH()
++ * uses page offset bits only, so every mapping of a word takes one lock.
++ */
++int futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *uaddr,
++				  u32 oldval, u32 newval)
++{
++	unsigned long flags;
++	u32 val;
++	int ret;
++
++	if (!access_ok(uaddr, sizeof(u32)))
++		return -EFAULT;
++	if (sparc32_casa)
++		return __casa_user(uval, uaddr, oldval, newval);
++
++	/* Every caller already runs with page faults disabled. */
++	spin_lock_irqsave(ATOMIC_HASH(uaddr), flags);
++	ret = __get_user(val, uaddr);
++	if (!ret && val == oldval)
++		ret = __put_user(newval, uaddr);
++	spin_unlock_irqrestore(ATOMIC_HASH(uaddr), flags);
++
++	if (!ret)
++		*uval = val;
++	return ret;
++}
++
++int arch_futex_atomic_op_inuser(int op, u32 oparg, int *oval, u32 __user *uaddr)
++{
++	u32 oldval, newval, val;
++	int ret;
++
++	if (get_user(oldval, uaddr))
++		return -EFAULT;
++
++	for (;;) {
++		switch (op) {
++		case FUTEX_OP_SET:
++			newval = oparg;
++			break;
++		case FUTEX_OP_ADD:
++			newval = oldval + oparg;
++			break;
++		case FUTEX_OP_OR:
++			newval = oldval | oparg;
++			break;
++		case FUTEX_OP_ANDN:
++			newval = oldval & ~oparg;
++			break;
++		case FUTEX_OP_XOR:
++			newval = oldval ^ oparg;
++			break;
++		default:
++			return -ENOSYS;
++		}
++
++		ret = futex_atomic_cmpxchg_inatomic(&val, uaddr, oldval, newval);
++		if (ret)
++			return ret;
++		if (val == oldval)
++			break;
++		oldval = val;
++	}
++
++	*oval = oldval;
++	return 0;
++}

@@ -1,0 +1,16 @@
+series/sparc32/integration-r5opt/legacy-cas-divide/0010-sparc32-detect-the-compare-and-swap-instruction-at-b.patch
+series/sparc32/integration-r5opt/legacy-cas-divide/0011-sparc32-add-a-kernel-assisted-compare-and-swap.patch
+series/sparc32/integration-r5opt/legacy-cas-divide/0012-sparc32-implement-futex-atomic-ops-with-the-compare-.patch
+series/sparc32/integration-r5opt/legacy-cas-divide/0013-sparc32-advertise-the-compare-and-swap-trap-in-AT_HW.patch
+series/sparc32/integration-r5opt/legacy-cas-divide/0014-sparc32-document-the-compare-and-swap-trap-ABI.patch
+series/sparc32/integration-r5opt/legacy-cas-divide/0015-sparc32-emulate-UDIV-SDIV-on-illegal_instruction.patch
+series/sparc32/integration-r5opt/platform-diagnostics/0016-sparc32-capture-SuperSPARC-data-store-error-state.patch
+series/sparc32/integration-r5opt/smp-prerequisites/0017-sparc32-keep-PIL-raised-on-the-SMP-ticker-and-LEON-I.patch
+series/sparc32/integration-r5opt/smp-prerequisites/0018-sparc32-sun4m-do-not-clear-IPIs-that-were-not-handle.patch
+series/sparc32/integration-r5opt/smp-prerequisites/0019-sparc32-wait-for-secondary-CPUs-by-time-not-by-loop-.patch
+series/sparc32/integration-r5opt/vmalloc/0020-sparc32-Fix-pgd-lookup-in-vmalloc-fault-handling.patch
+series/sparc32/integration-r5opt/seccomp/0021-sparc32-Split-common-syscall_trace-to-syscall_trace_.patch
+series/sparc32/integration-r5opt/seccomp/0022-sparc64-add-seccomp-filter-support.patch
+series/sparc32/integration-r5opt/seccomp/0023-selftests-seccomp-add-sparc64-support.patch
+series/sparc32/integration-r5opt/seccomp/0024-sparc32-add-seccomp-filter-support.patch
+series/sparc32/integration-r5opt/seccomp/0025-selftests-seccomp-add-sparc32-support.patch

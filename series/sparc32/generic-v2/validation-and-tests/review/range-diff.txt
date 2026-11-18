@@ -1,0 +1,64 @@
+ 1:  06261111e712 =  1:  a3edc7eea93b sparc32: inspect every PROM CPU cache geometry
+ 2:  cecc164cc4c2 !  2:  6331558ca87b sparc32: flush the source user alias in copy_user_highpage()
+    @@ Commit message
+         Flush the source page's user alias with flush_cache_page() before reading
+         it, and flush the destination through the address actually written.
+     
+    +    For lowmem, kmap_local_page() returns the direct mapping and kunmap_local()
+    +    does not invoke the kmap cache hooks. A previous kernel read can therefore
+    +    leave clean supervisor cache lines at the source's kernel address. After
+    +    the surviving process reuses and modifies the page through a different
+    +    user alias, flushing that user alias alone does not remove those lines.
+    +
+    +    Flush the source kernel alias immediately before copy_page(), after the
+    +    user alias flush, to discard stale source lines. Flush it again after the
+    +    copy to retire the clean lines just loaded before later user writes.
+    +    Keep both flushes explicit for lowmem and highmem; correctness must not
+    +    depend on the kmap hooks introduced later in this series.
+    +
+         Only observable on HyperSPARC: SuperSPARC's caches are physically indexed
+         and MBus snooped, so viking_flush_cache_all() is a window flush and a
+         return.
+     
+    -    Fork/COW torture on a two-cpu SPARCstation 20: 7 of 20 runs lost writes
+    -    before, 0 of 20 after.
+    +    Historical fork/COW torture on a two-cpu SPARCstation 20: 7 of 20 runs
+    +    lost writes before the user-alias fix, 0 of 20 after. These results predate
+    +    the source kernel-alias flushes and do not validate the new reuse case.
+     
+         The source-alias omission predates Git history; the later folio conversion
+         also removed sparc_flush_page_to_ram()'s NULL guard. This change uses the
+    @@ arch/sparc/mm/init_32.c: void sparc_flush_page_to_ram(struct page *page)
+      EXPORT_SYMBOL(sparc_flush_page_to_ram);
+      
+     +/*
+    -+ * The kernel reads the source page through a kmap alias, which on a
+    -+ * virtually indexed cache lands in a different set than the user mapping
+    -+ * userspace has been dirtying.  Flush that alias first, and flush the
+    -+ * destination through the address actually written rather than
+    -+ * page_address(), which is NULL for a highmem page.
+    ++ * Write back the source user alias before copying through the kernel alias.
+    ++ * Lowmem kmap_local mappings bypass the cache hooks, so explicitly flush
+    ++ * the source kernel alias both before reading and after filling it. This
+    ++ * avoids stale reads and leaves no source alias behind for later user writes.
+    ++ * Flush the destination through its mapped address, also valid for highmem.
+     + */
+     +void copy_user_highpage(struct page *to, struct page *from,
+     +			unsigned long vaddr, struct vm_area_struct *vma)
+    @@ arch/sparc/mm/init_32.c: void sparc_flush_page_to_ram(struct page *page)
+     +
+     +	vfrom = kmap_local_page(from);
+     +	vto = kmap_local_page(to);
+    ++	__flush_page_to_ram((unsigned long)vfrom);
+     +	copy_page(vto, vfrom);
+    ++	__flush_page_to_ram((unsigned long)vfrom);
+     +	__flush_page_to_ram((unsigned long)vto);
+     +	kunmap_local(vto);
+     +	kunmap_local(vfrom);
+ 3:  227aaa19c7c4 =  3:  f532b4cee817 sparc32: do not flush a NULL address in flush_dcache_folio
+ 4:  e399ad3c8e6d =  4:  b2a15fdd8832 sparc32: flush the cache when a kmap_local mapping is installed
+ 5:  4e8c678ccbd1 =  5:  b930553593fa sparc32: preset modified and referenced bits in kmap PTEs
+ 6:  f8dc93773eaf =  6:  207756aba1bc sparc32: colour-align private file mappings
+ 7:  64bf2fd471fc =  7:  8194aa7ad30c sparc32: implement flush_anon_page
+ 8:  31d458cc7b0c =  8:  51ab7e9713df sparc32: retain mm_cpumask across TLB shootdowns
+ 9:  614913714edd =  9:  3fdab781ed54 sparc32: enroll and order CPUs before switching address spaces

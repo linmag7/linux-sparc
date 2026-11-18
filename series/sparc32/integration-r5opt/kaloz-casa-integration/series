@@ -1,0 +1,5 @@
+0047-Revert-sparc32-emulate-UDIV-SDIV-on-illegal_instruct.patch
+0048-sparc32-support-futexes-on-SMP.patch
+0049-sparc32-emulate-casa-on-V8-CPUs.patch
+0050-sparc32-emulate-integer-divide-taken-as-illegal_inst.patch
+0051-sparc32-keep-legacy-CAS-trap-on-the-CASA-and-futex-b.patch

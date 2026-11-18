@@ -1,0 +1,9 @@
+{
+  "repository": "/media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/linux-sparc",
+  "branch": "for-next",
+  "commit": "a9e88d617a25306fa7e532b0b8be08df778872cc",
+  "reported_version": "7.3.0-rc1",
+  "requested_version": "v7.4-rc1",
+  "note": "Exact user-specified local for-next; no local v7.4-rc1 tag. Original checkout has unresolved merge; untouched.",
+  "user_confirmed_current_for_next": true
+}

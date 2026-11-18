@@ -1,0 +1,117 @@
+From f2ad603e435a669b0cd296bf7fc4af3c52001ed8 Mon Sep 17 00:00:00 2001
+From: Ludwig Rydberg <ludwig.rydberg@gaisler.com>
+Date: Wed, 14 Oct 2026 10:07:29 +0200
+Subject: [PATCH 24/66] sparc32: add seccomp filter support
+
+Add handling of seccomp_permit_syscall() in syscall_trace_enter() to filter
+system calls. Make the syscall_trace_enter() return -1 (skipped syscall)
+and adapt callers to the new return value convention.
+
+Signed-off-by: Ludwig Rydberg <ludwig.rydberg@gaisler.com>
+Message-ID: <20261014080730.8817-3-ludwig.rydberg@gaisler.com>
+---
+ arch/sparc/Kconfig                      |  2 +-
+ arch/sparc/include/asm/thread_info_32.h |  2 ++
+ arch/sparc/kernel/entry.S               | 12 ++++++++----
+ arch/sparc/kernel/ptrace_32.c           | 11 +++++++++--
+ 4 files changed, 20 insertions(+), 7 deletions(-)
+
+diff --git a/arch/sparc/Kconfig b/arch/sparc/Kconfig
+index 8dd15256edf6..56d5ac7b228a 100644
+--- a/arch/sparc/Kconfig
++++ b/arch/sparc/Kconfig
+@@ -23,7 +23,7 @@ config SPARC
+ 	select HAVE_ASM_MODVERSIONS
+ 	select HAVE_ARCH_KGDB if !SMP || SPARC64
+ 	select HAVE_ARCH_TRACEHOOK
+-	select HAVE_ARCH_SECCOMP_FILTER if SPARC64
++	select HAVE_ARCH_SECCOMP_FILTER
+ 	select HAVE_EXIT_THREAD
+ 	select HAVE_PCI
+ 	select SYSCTL_EXCEPTION_TRACE
+diff --git a/arch/sparc/include/asm/thread_info_32.h b/arch/sparc/include/asm/thread_info_32.h
+index fdaf7b171e0a..b51b080f1810 100644
+--- a/arch/sparc/include/asm/thread_info_32.h
++++ b/arch/sparc/include/asm/thread_info_32.h
+@@ -110,6 +110,7 @@ register struct thread_info *current_thread_info_reg asm("g6");
+ #define TIF_POLLING_NRFLAG	9	/* true if poll_idle() is polling
+ 					 * TIF_NEED_RESCHED */
+ #define TIF_MEMDIE		10	/* is terminating due to OOM killer */
++#define TIF_SECCOMP		11	/* secure computing */
+ 
+ /* as above, but as bit values */
+ #define _TIF_SYSCALL_TRACE	(1<<TIF_SYSCALL_TRACE)
+@@ -119,6 +120,7 @@ register struct thread_info *current_thread_info_reg asm("g6");
+ #define _TIF_NOTIFY_SIGNAL	(1<<TIF_NOTIFY_SIGNAL)
+ #define _TIF_USEDFPU		(1<<TIF_USEDFPU)
+ #define _TIF_POLLING_NRFLAG	(1<<TIF_POLLING_NRFLAG)
++#define _TIF_SECCOMP		(1<<TIF_SECCOMP)
+ 
+ #define _TIF_DO_NOTIFY_RESUME_MASK	(_TIF_NOTIFY_RESUME | \
+ 					 _TIF_SIGPENDING | _TIF_NOTIFY_SIGNAL)
+diff --git a/arch/sparc/kernel/entry.S b/arch/sparc/kernel/entry.S
+index 5d0993ecd734..6b8c456f9034 100644
+--- a/arch/sparc/kernel/entry.S
++++ b/arch/sparc/kernel/entry.S
+@@ -978,9 +978,9 @@ linux_sparc_ni_syscall:
+ linux_syscall_trace:
+ 	call	syscall_trace_enter
+ 	 add	%sp, STACKFRAME_SZ, %o0
+-	cmp	%o0, 0
+-	bne	3f
+-	 mov	-ENOSYS, %o0
++	cmp	%o0, -1
++	be	linux_syscall_trace_exit
++	 nop
+ 
+ 	/* Syscall tracing can modify the registers.  */
+ 	ld	[%sp + STACKFRAME_SZ + PT_G1], %g1
+@@ -1052,7 +1052,7 @@ do_syscall:
+ 
+ 	ld	[%curptr + TI_FLAGS], %l5
+ 	mov	%i3, %o3
+-	andcc	%l5, _TIF_SYSCALL_TRACE, %g0
++	andcc	%l5, _TIF_SYSCALL_TRACE | _TIF_SECCOMP, %g0
+ 	mov	%i4, %o4
+ 	bne	linux_syscall_trace
+ 	 mov	%i0, %l6
+@@ -1095,6 +1095,10 @@ ret_sys_call:
+ 	b	ret_trap_entry
+ 	 st	%l2, [%sp + STACKFRAME_SZ + PT_NPC]
+ 
++linux_syscall_trace_exit:
++	/* The syscall was skipped - exit tracing */
++	ld	[%sp + STACKFRAME_SZ + PT_NPC], %l1
++
+ linux_syscall_trace2:
+ 	call	syscall_trace_leave
+ 	 add	%sp, STACKFRAME_SZ, %o0
+diff --git a/arch/sparc/kernel/ptrace_32.c b/arch/sparc/kernel/ptrace_32.c
+index 3cd3a31ce677..25d10c1b075f 100644
+--- a/arch/sparc/kernel/ptrace_32.c
++++ b/arch/sparc/kernel/ptrace_32.c
+@@ -24,6 +24,7 @@
+ 
+ #include <linux/uaccess.h>
+ #include <asm/cacheflush.h>
++#include <asm/syscall.h>
+ 
+ #include "kernel.h"
+ 
+@@ -436,8 +437,14 @@ long arch_ptrace(struct task_struct *child, long request,
+ asmlinkage int syscall_trace_enter(struct pt_regs *regs)
+ {
+ 	if (test_thread_flag(TIF_SYSCALL_TRACE) &&
+-	    !ptrace_report_syscall_permit_entry(regs))
+-		return 1;
++	    !ptrace_report_syscall_permit_entry(regs)) {
++		syscall_set_return_value(current, regs, -ENOSYS, 0);
++		return -1;
++	}
++
++	/* Do seccomp after ptrace; syscall may have changed. */
++	if (!seccomp_permit_syscall())
++		return -1;
+ 
+ 	return 0;
+ }

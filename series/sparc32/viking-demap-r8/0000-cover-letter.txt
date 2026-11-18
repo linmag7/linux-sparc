@@ -1,0 +1,16 @@
+Subject: [PATCH 0/1] sparc32: serialize SuperSPARC demap operations
+
+I am posting this as a separate companion to the generic SPARC32 cache
+and TLB fixes. It serializes complete sun4m Viking shootdowns at their
+initiator, using synchronous singleton cross-calls and lock-free remote
+callbacks. It retains the accumulated mm CPU mask.
+
+The patch applies before or after the generic series, producing the
+same source tree. SMP/UP builds and QEMU SS-20 fork/COW smoke tests
+passed with the separate PIL/IPI prerequisites. Physical SuperSPARC
+validation remains pending. The Viking instruction-cache change is
+outside this patch.
+
+Codex assisted with rebase, review, validation and submission preparation.
+
+base-commit: a9e88d617a25306fa7e532b0b8be08df778872cc

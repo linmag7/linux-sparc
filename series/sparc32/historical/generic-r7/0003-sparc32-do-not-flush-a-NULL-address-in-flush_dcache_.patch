@@ -1,0 +1,66 @@
+From ff4797a4519cf50d0b9b0657c2e11728fb9d5622 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH 3/9] sparc32: do not flush a NULL address in
+ flush_dcache_folio
+
+sparc_flush_folio_to_ram() is sparc32's flush_dcache_folio() and takes the
+address to flush from folio_address(). For a highmem folio that is NULL,
+so it flushes virtual address 0, and 0 + PAGE_SIZE and so on for a multi-
+page folio.
+
+On HyperSPARC, hypersparc_flush_page_to_ram() probes with
+ASI_M_FLUSH_PROBE, finds nothing mapped at 0 and returns, so nothing is
+flushed at all.
+
+Returning early would be wrong: flush_dcache_folio() is also the barrier
+taken before reading a folio userspace may have dirtied, as in
+filemap_read() when the folio is writably mapped. Fall back to the whole-
+cache operation, which reaches user aliases at any colour and on SMP is
+cross-called to every cpu.
+
+Do that only when the folio is mapped by userspace; otherwise the only
+other mapping is the kmap_local slot, which arch_kmap_local_pre_unmap()
+writes back on teardown. Without that test block_write_end() makes every
+buffered write discard 512 KB of VAC, which cost 106 s against 56 s on a
+64 MB dd.
+
+With the mapping live and a reader on another cpu, 150 of 150 reads
+returned stale data before and 0 of 150 after, every first mismatch on a
+32-byte boundary, the VAC line size.
+
+The separate HyperSPARC mapped-folio fix completes the lowmem and PKMAP
+colour handling. The highmem fallback can be expensive for GUP: each
+mapped folio may require whole-cache maintenance on all CPUs.
+
+Fixes: 665f64029454 ("sparc32: implement the new page table range API")
+Cc: stable@vger.kernel.org
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/init_32.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/arch/sparc/mm/init_32.c b/arch/sparc/mm/init_32.c
+index c0b80d512eab..4088627d6cba 100644
+--- a/arch/sparc/mm/init_32.c
++++ b/arch/sparc/mm/init_32.c
+@@ -296,6 +296,16 @@ void sparc_flush_folio_to_ram(struct folio *folio)
+ 	unsigned long vaddr = (unsigned long)folio_address(folio);
+ 	unsigned int i, nr = folio_nr_pages(folio);
+ 
++	/*
++	 * No kernel address to aim at. Only a user alias can be incoherent
++	 * here; the kmap the kernel used is flushed when it is unmapped.
++	 */
++	if (!vaddr) {
++		if (folio_mapped(folio))
++			flush_cache_all();
++		return;
++	}
++
+ 	for (i = 0; i < nr; i++)
+ 		__flush_page_to_ram(vaddr + i * PAGE_SIZE);
+ }
+-- 
+2.43.0
+

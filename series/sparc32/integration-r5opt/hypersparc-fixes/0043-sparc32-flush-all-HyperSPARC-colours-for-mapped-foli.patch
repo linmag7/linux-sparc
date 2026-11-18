@@ -1,0 +1,48 @@
+From df47ac644886ef2c50a874d63f9e8378c81bcda8 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH 43/66] sparc32: flush all HyperSPARC colours for mapped folios
+
+A mapped folio may have a dirty user alias at a different cache colour
+from its kernel mapping. Flush all indices on all CPUs for mapped folios
+instead of using only the kernel address, even when that address is a
+valid lowmem or persistent mapping. This includes callers such as GUP; it
+deliberately pays for whole-cache, all-CPU maintenance rather than
+assuming the kernel mapping has the user's colour. Other processors are
+unchanged. Narrower maintenance requires a separate alias-lifetime proof.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/init_32.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/arch/sparc/mm/init_32.c b/arch/sparc/mm/init_32.c
+index d0ce9d23561e..b4058fe4afa3 100644
+--- a/arch/sparc/mm/init_32.c
++++ b/arch/sparc/mm/init_32.c
+@@ -25,6 +25,7 @@
+ #include <linux/pagemap.h>
+ #include <linux/gfp.h>
+ 
++#include <asm/mbus.h>
+ #include <asm/sections.h>
+ #include <asm/page.h>
+ #include <asm/vaddrs.h>
+@@ -142,6 +143,17 @@ void sparc_flush_folio_to_ram(struct folio *folio)
+ 	unsigned long vaddr = (unsigned long)folio_address(folio);
+ 	unsigned int i, nr = folio_nr_pages(folio);
+ 
++	/*
++	 * A mapped folio can have a dirty user alias at a different cache
++	 * colour even when a direct or persistent kernel mapping exists.
++	 * Flushing only that kernel address misses the user alias. Use the
++	 * existing all-CPU, all-index operation to cover every colour.
++	 */
++	if (srmmu_modtype == HyperSparc && folio_mapped(folio)) {
++		flush_cache_all();
++		return;
++	}
++
+ 	/*
+ 	 * No kernel address to aim at. Only a user alias can be incoherent
+ 	 * here; the kmap the kernel used is flushed when it is unmapped.

@@ -1,0 +1,55 @@
+From b3a6e82f334d11e0af45c5a566a0d3d743868702 Mon Sep 17 00:00:00 2001
+From: Ramin Moussavi <ramin.moussavi@yacoub.de>
+Date: Sun, 18 Oct 2026 14:53:11 +0200
+Subject: [PATCH 18/66] sparc32: sun4m: do not clear IPIs that were not handled
+
+maybe_smp4m_msg reads the per-cpu interrupt pending register and then
+writes 0x70000000 to the clear register, acknowledging all three soft
+interrupt levels used for IPIs (12, 13 and 14) whether or not they were
+pending in the value it read. An IPI that another CPU raises between the
+read and the write is acknowledged without ever being handled.
+
+For IRQ_IPI_SINGLE this is not just a delay. __smp_call_single_queue()
+only sends the IPI when the target's call_single_queue was empty, so
+once one IPI is lost no further IPI is sent to that CPU, and every
+remote wakeup queued there waits until the CPU next goes idle and
+flushes the queue. Under CPU-bound load that does not happen: woken
+tasks show up as R in /proc, with a vruntime below that of the tasks
+that keep running, and still do not run until the load ends.
+
+Seen on a 4-CPU SPARCstation 20 under qemu with eight threads doing
+syscalls and window flushes next to threads that wake each other
+through condition variables and pipes: 7 of 8 runs had tasks starving
+for as long as the load lasted (up to 25 minutes), 0 of 4 runs with a
+single CPU. With this change 0 of 8 runs starved.
+
+Acknowledge only the levels that were seen. A level raised after the
+read stays pending and traps again once PIL allows.
+
+Fixes: ecbc42b70acb ("sparc32, sun4m: Implemented SMP IPIs support for SUN4M machines")
+Cc: stable@vger.kernel.org
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Ramin Moussavi <ramin.moussavi@yacoub.de>
+---
+ arch/sparc/kernel/entry.S | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/arch/sparc/kernel/entry.S b/arch/sparc/kernel/entry.S
+index 7d4225e48f7f..47134994d280 100644
+--- a/arch/sparc/kernel/entry.S
++++ b/arch/sparc/kernel/entry.S
+@@ -304,11 +304,11 @@ maybe_smp4m_msg:
+ 	sethi	%hi(0x70000000), %o2	! Check all soft-IRQs
+ 	ld	[%o5 + %o3], %o1
+ 	ld	[%o1 + 0x00], %o3	! sun4m_irq_percpu[cpu]->pending
+-	andcc	%o3, %o2, %g0
++	andcc	%o3, %o2, %o4
+ 	be,a	smp4m_ticker
+ 	 cmp	%l7, 14
+-	/* Soft-IRQ IPI */
+-	st	%o2, [%o1 + 0x04]	! sun4m_irq_percpu[cpu]->clear=0x70000000
++	/* Soft-IRQ IPI: clear only the ones we saw, a later one must stay */
++	st	%o4, [%o1 + 0x04]	! sun4m_irq_percpu[cpu]->clear
+ 	WRITE_PAUSE
+ 	ld	[%o1 + 0x00], %g0	! sun4m_irq_percpu[cpu]->pending
+ 	WRITE_PAUSE

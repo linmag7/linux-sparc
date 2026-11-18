@@ -1,0 +1,59 @@
+From f0246384c6f6e432d42a7020c74a43377d480c3e Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH 41/66] sparc32: flush supervisor lines in the HyperSPARC
+ whole-mm sweep
+
+flush_cache_mm() runs before an mm's pages are freed and reused, but this
+sweep used ASI_M_FLUSH_USER, which ROSS UG 4.4.3 defines as flushing a
+line only "if the cache line is marked as user (SU = 0)". The kernel's own
+dirty alias of those same pages - the direct map, the page cache, a kmap -
+is a supervisor line and survives it, so it can write back after the frame
+has been handed out again.
+
+ASI_M_FLUSH_CTX is unconditional at the index, needs no translation either,
+and costs the same loop.
+
+With 190 MB installed, so that every page is lowmem and the kernel reaches
+user pages through the direct map, the machine cannot boot without this.
+Same binary, one bit of a debug knob, 2 cpus:
+
+        ASI_M_FLUSH_USER   init dies in malloc with corrupted chunk headers
+        ASI_M_FLUSH_CTX    clean
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/hypersparc.S | 18 +++++++++---------
+ 1 file changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/arch/sparc/mm/hypersparc.S b/arch/sparc/mm/hypersparc.S
+index f0b36907f9d8..a2c2fc74d8b9 100644
+--- a/arch/sparc/mm/hypersparc.S
++++ b/arch/sparc/mm/hypersparc.S
+@@ -60,16 +60,16 @@ hypersparc_flush_cache_mm:
+ 
+ 	/* BLAMMO! */
+ 1:
+-	subcc	%o0, %o5, %o0				! hyper_flush_cache_user
+-	sta	%g0, [%o0 + %g0] ASI_M_FLUSH_USER
+-	sta	%g0, [%o0 + %o1] ASI_M_FLUSH_USER
+-	sta	%g0, [%o0 + %g1] ASI_M_FLUSH_USER
+-	sta	%g0, [%o0 + %g2] ASI_M_FLUSH_USER
+-	sta	%g0, [%o0 + %g3] ASI_M_FLUSH_USER
+-	sta	%g0, [%o0 + %g4] ASI_M_FLUSH_USER
+-	sta	%g0, [%o0 + %g5] ASI_M_FLUSH_USER
++	subcc	%o0, %o5, %o0				! hyper_flush_cache_ctx
++	sta	%g0, [%o0 + %g0] ASI_M_FLUSH_CTX
++	sta	%g0, [%o0 + %o1] ASI_M_FLUSH_CTX
++	sta	%g0, [%o0 + %g1] ASI_M_FLUSH_CTX
++	sta	%g0, [%o0 + %g2] ASI_M_FLUSH_CTX
++	sta	%g0, [%o0 + %g3] ASI_M_FLUSH_CTX
++	sta	%g0, [%o0 + %g4] ASI_M_FLUSH_CTX
++	sta	%g0, [%o0 + %g5] ASI_M_FLUSH_CTX
+ 	bne	1b
+-	 sta	%g0, [%o0 + %o4] ASI_M_FLUSH_USER
++	 sta	%g0, [%o0 + %o4] ASI_M_FLUSH_CTX
+ hypersparc_flush_cache_mm_out:
+ 	retl
+ 	 nop

@@ -1,0 +1,33 @@
+Independent PAGE_NONE cleanup and permission tests, 27 October 2026
+
+UNPATCHED QEMU (separate fresh 4-CPU SS-20 guests, 384 MiB):
+Unmap: one child populates 8 anonymous pages, applies PROT_NONE, explicitly
+munmaps and exits. Bad swap entries and WARNING at mm/swapfile.c:2130 via
+__zap_vma_range/unmap_region/__vm_munmap. Program returns zero, but kernel
+validation FAILS. Explicit munmap returned after the warning.
+Exit: one child populates 8 pages, applies PROT_NONE and exits without
+munmap. Bad swap entries, same warning via exit_mmap/__mmput/do_exit,
+then Bad rss-counter MM_ANONPAGES +8 and MM_SWAPENTS -7 (reported under
+init PID1). Program returns zero, but kernel validation FAILS.
+Both source paths verified in saved traces. No baseline retries.
+
+PATCHED HARDWARE (same two-CPU HyperSPARC RT626 SS-20, full RAM):
+Kernel7.3.0-rc1-ef-full-protnone1+, boot56dde840-f8fc-4990-aef9-be23371c4901.
+Unmap:200rounds x8pages, exit0,5.878459s, dmesg unchanged.
+Exit:200rounds x8pages, exit0,5.8171465s, dmesg unchanged.
+Permissions/COW:200rounds, exit0,15.1666385s. Each round checks SIGSEGV for
+both prohibited read and write, preserved contents across fork, isolated
+child write after restoring RW, NONE unmap, and unpopulated NONE restored.
+All400 expected SIGSEGVs are checked by waitpid. Only expected user-fault
+messages and printk rate-limit notices were added; no MM warnings/errors.
+Core files deliberately disabled only for that expected-fault test.
+No new cores, taint0, no timeouts; all owned process groups stopped.
+Whole boot log previously reviewed; exact dmesg continuity through cleanup
+cases and expected-only delta for permissions. Final dmesg matches live.
+All remote/local record SHA256 match. Hardware unchanged, no reboot.
+
+Interpretation: independent coverage confirms the fix addresses both
+explicit unmapping and process teardown, while retaining inaccessible-page
+protection and COW isolation. User exit status alone misses the old bug.
+These cases do not establish general MM correctness or swap-pressure and
+file-backed mapping coverage. Existing supplied-reproducer evidence retained.

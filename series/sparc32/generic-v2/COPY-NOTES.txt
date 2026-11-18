@@ -1,0 +1,5 @@
+Copied 18 November 2026
+Source: /media/lindholm/545a6254-41a9-48f3-a207-cbea64457d45/linux/sparc32-generic-v2-20261109/submission-generic
+
+Prepared v2, 9 November 2026. Local build/QEMU validation passed; new source-alias handling awaits physical HyperSPARC validation. Base a9e88d617a25306fa7e532b0b8be08df778872cc.
+Original patch and cover-letter contents are unchanged.

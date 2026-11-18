@@ -1,0 +1,9 @@
+0036-sparc32-synchronize-HyperSPARC-instruction-updates.patch
+0037-sparc32-discard-HyperSPARC-cache-probe-TLB-entries.patch
+0038-sparc32-flush-HyperSPARC-data-ranges-by-index.patch
+0039-sparc32-flush-HyperSPARC-data-pages-by-index.patch
+0040-sparc32-flush-HyperSPARC-pages-to-RAM-by-index.patch
+0041-sparc32-flush-supervisor-lines-in-the-HyperSPARC-who.patch
+0042-sparc32-do-not-gate-HyperSPARC-cache-cross-calls-on-.patch
+0043-sparc32-flush-all-HyperSPARC-colours-for-mapped-foli.patch
+0044-sparc32-reconcile-HyperSPARC-local-and-persistent-km.patch

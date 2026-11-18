@@ -1,0 +1,92 @@
+From f6cfd66bc3abf9eb03162457929278eac16acf77 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:48 +0200
+Subject: [PATCH 04/10] sparc32: track highmem pages exposed through vmap
+
+HyperSPARC fast paths need to know whether a highmem page may have a vmap
+alias, which the mapcount and kmap registry do not cover.
+
+Set PG_arch_2 for each managed highmem page seen by flush_cache_vmap(). The
+bit means the page has been exposed through vmap at some point in its
+current allocation rather than that an alias exists now, which avoids
+having to decide when the last one disappeared. Keep it set through vunmap;
+page preparation clears it before reuse.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/Kconfig                     |  1 +
+ arch/sparc/include/asm/cacheflush_32.h |  3 ++-
+ arch/sparc/mm/srmmu.c                  | 31 ++++++++++++++++++++++++++
+ 3 files changed, 34 insertions(+), 1 deletion(-)
+
+diff --git a/arch/sparc/Kconfig b/arch/sparc/Kconfig
+index ab77d3f2536e..286d0fa8e0ad 100644
+--- a/arch/sparc/Kconfig
++++ b/arch/sparc/Kconfig
+@@ -56,6 +56,7 @@ config SPARC32
+ 	select ARCH_32BIT_OFF_T
+ 	select ARCH_HAS_CPU_FINALIZE_INIT if !SMP
+ 	select ARCH_HAS_SYNC_DMA_FOR_CPU
++	select ARCH_USES_PG_ARCH_2
+ 	select CLZ_TAB
+ 	select DMA_DIRECT_REMAP
+ 	select GENERIC_ATOMIC64
+diff --git a/arch/sparc/include/asm/cacheflush_32.h b/arch/sparc/include/asm/cacheflush_32.h
+index 243050fa7073..3c18c667fa20 100644
+--- a/arch/sparc/include/asm/cacheflush_32.h
++++ b/arch/sparc/include/asm/cacheflush_32.h
+@@ -53,7 +53,8 @@ static inline void flush_dcache_page(struct page *page)
+ #define flush_dcache_mmap_lock(mapping)		do { } while (0)
+ #define flush_dcache_mmap_unlock(mapping)	do { } while (0)
+ 
+-#define flush_cache_vmap(start, end)		flush_cache_all()
++void sparc32_flush_cache_vmap(unsigned long start, unsigned long end);
++#define flush_cache_vmap(start, end)		sparc32_flush_cache_vmap(start, end)
+ #define flush_cache_vmap_early(start, end)	do { } while (0)
+ #define flush_cache_vunmap(start, end)		flush_cache_all()
+ 
+diff --git a/arch/sparc/mm/srmmu.c b/arch/sparc/mm/srmmu.c
+index 8ad7cf561c2f..c7a3fa450e7a 100644
+--- a/arch/sparc/mm/srmmu.c
++++ b/arch/sparc/mm/srmmu.c
+@@ -91,6 +91,37 @@ static int is_hypersparc;
+ 
+ static int srmmu_cache_pagetables;
+ 
++void sparc32_flush_cache_vmap(unsigned long start, unsigned long end)
++{
++	unsigned long addr;
++
++	flush_cache_all();
++	if (!is_hypersparc)
++		return;
++
++	for (addr = start; addr < end; addr += PAGE_SIZE) {
++		unsigned long pfn;
++		struct page *page;
++		pte_t *ptep, pte;
++
++		ptep = virt_to_kpte(addr);
++		if (!ptep)
++			continue;
++		pte = ptep_get(ptep);
++		if (!pte_present(pte))
++			continue;
++		pfn = pte_pfn(pte);
++		if (!pfn_valid(pfn))
++			continue;
++		page = pfn_to_page(pfn);
++		if (PageHighMem(page))
++			/* Taint this allocation for any vmap exposure until
++			 * the page is reused; the allocator clears it then.
++			 */
++			set_bit(PG_arch_2, &page->flags.f);
++	}
++}
++
+ /*
+  * Keep the single-mapping case cacheable.  On a colour conflict, publish the
+  * data and make every live alias uncached until it is unmapped.
+-- 
+2.43.0
+

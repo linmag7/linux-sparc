@@ -1,0 +1,219 @@
+From 3c5ef5ed2e45bccabca9931f8e18452325807e34 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Thu, 27 Aug 2026 19:58:27 +0200
+Subject: [PATCH 12/66] sparc32: implement futex atomic ops with the
+ compare-and-swap locks
+
+sparc32 had no futex implementation of its own and fell back to the
+asm-generic one, which on SMP cannot work: it needs to update a user word
+atomically, and pre-v9 sparc has no instruction for that.  CONFIG_FUTEX
+was therefore made to depend on !(SPARC32 && SMP), and since glibc has
+required futex for its internal locking for a decade, an SMP sparc32
+kernel cannot run a current userland at all.
+
+Now that the kernel owns a compare-and-swap on behalf of userspace, the
+futex code can use the same mechanism.  Where the cpu has the instruction
+both sides use it directly; where it does not, both serialise on the lock
+array used by the trap type 0x91 handler, so a compare-and-swap performed by a
+process and one performed here exclude each other.  Both callers go
+through sparc32_atomic_lock(), so the two hashes cannot drift apart -
+parisc keeps the same invariant with a comment asking that the futex hash
+match its LWS code.
+
+On a cpu that has the instruction the lock cannot serve for the
+read-modify-write either.  A binary built for such a cpu does its own casa
+and knows nothing about the array, so a lock, get_user, put_user, unlock
+sequence can lose that binary's update between the two accesses while both
+operations appear to have succeeded - and FUTEX_WAKE_OP defines its update
+of uaddr2 as atomic.  arch_futex_atomic_op_inuser() therefore retries a
+casa until the word is still the one the new value was computed from, the
+way sparc64 does it.  Only the pre-v9 path takes the lock, where it is
+correct because userspace takes the same lock through the trap.
+
+Both entry points are called with page faults already disabled, so the
+user accesses fail rather than sleeping under the lock.
+
+With a real cmpxchg available the Kconfig dependency can go, and
+FUTEX_PI and robust futexes work rather than being refused.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/futex_32.h | 154 +++++++++++++++++++++++++++++-
+ init/Kconfig                      |   1 -
+ 2 files changed, 152 insertions(+), 3 deletions(-)
+
+diff --git a/arch/sparc/include/asm/futex_32.h b/arch/sparc/include/asm/futex_32.h
+index 6a332a9f099c..d77ee65f6739 100644
+--- a/arch/sparc/include/asm/futex_32.h
++++ b/arch/sparc/include/asm/futex_32.h
+@@ -1,6 +1,156 @@
++/* SPDX-License-Identifier: GPL-2.0 */
+ #ifndef _ASM_FUTEX_H
+ #define _ASM_FUTEX_H
+ 
+-#include <asm-generic/futex.h>
++#include <linux/futex.h>
++#include <linux/uaccess.h>
++#include <asm/errno.h>
++#include <asm/cas_32.h>
++#include <asm/cpu_type.h>
+ 
+-#endif
++/*
++ * Pre-v9 sparc has no compare-and-swap, so these serialise on the same lock
++ * array the compare-and-swap trap uses.  sparc32_atomic_lock() must hash
++ * identically for both, or a futex operation and a userspace compare-and-swap
++ * on one word could run concurrently.
++ *
++ * Where the cpu has the instruction that lock is not enough: a binary built
++ * for such a cpu does its own casa and never takes it, so both operations here
++ * are built out of casa as well.
++ *
++ * Both entry points are called with page faults already disabled, so the
++ * accesses below fail rather than sleeping under the lock.
++ */
++
++static inline int sparc32_futex_op(int op, int oparg, u32 oldval, u32 *newval)
++{
++	switch (op) {
++	case FUTEX_OP_SET:
++		*newval = oparg;
++		break;
++	case FUTEX_OP_ADD:
++		*newval = oldval + oparg;
++		break;
++	case FUTEX_OP_OR:
++		*newval = oldval | oparg;
++		break;
++	case FUTEX_OP_ANDN:
++		*newval = oldval & ~oparg;
++		break;
++	case FUTEX_OP_XOR:
++		*newval = oldval ^ oparg;
++		break;
++	default:
++		return -ENOSYS;
++	}
++
++	return 0;
++}
++
++static inline int
++arch_futex_atomic_op_inuser(int op, int oparg, int *oval, u32 __user *uaddr)
++{
++	raw_spinlock_t *lock;
++	unsigned long flags;
++	u32 oldval, newval, prev;
++	int ret = 0;
++
++	if (sparc32_has_casa) {
++		if (!access_ok(uaddr, sizeof(u32)))
++			return -EFAULT;
++
++		if (unlikely(get_user(oldval, uaddr) != 0))
++			return -EFAULT;
++
++		/*
++		 * Retry until the word is still what the new value was
++		 * computed from, so the read-modify-write is one atomic
++		 * step against a binary using casa on the same word.
++		 */
++		for (;;) {
++			ret = sparc32_futex_op(op, oparg, oldval, &newval);
++			if (ret)
++				return ret;
++
++			if (unlikely(__sparc32_casa_user(uaddr, oldval,
++							 newval, &prev) != 0))
++				return -EFAULT;
++
++			if (likely(prev == oldval))
++				break;
++
++			oldval = prev;
++		}
++
++		*oval = oldval;
++		return 0;
++	}
++
++	lock = sparc32_atomic_lock(uaddr);
++	raw_spin_lock_irqsave(lock, flags);
++
++	if (unlikely(get_user(oldval, uaddr) != 0)) {
++		ret = -EFAULT;
++		goto out;
++	}
++
++	ret = sparc32_futex_op(op, oparg, oldval, &newval);
++	if (ret)
++		goto out;
++
++	if (unlikely(put_user(newval, uaddr) != 0))
++		ret = -EFAULT;
++
++out:
++	raw_spin_unlock_irqrestore(lock, flags);
++
++	if (!ret)
++		*oval = oldval;
++
++	return ret;
++}
++
++static inline int
++futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *uaddr,
++			      u32 oldval, u32 newval)
++{
++	raw_spinlock_t *lock;
++	unsigned long flags;
++	u32 val;
++
++	if (!access_ok(uaddr, sizeof(u32)))
++		return -EFAULT;
++
++	/*
++	 * Where the cpu has the instruction, use it: it is atomic against a
++	 * binary doing its own casa on the same word, which a lock of ours
++	 * would not be.  Page faults are already disabled by the caller, so
++	 * an unresolved address returns -EFAULT through the exception table.
++	 */
++	if (sparc32_has_casa) {
++		if (__sparc32_casa_user(uaddr, oldval, newval, &val))
++			return -EFAULT;
++		*uval = val;
++		return 0;
++	}
++
++	lock = sparc32_atomic_lock(uaddr);
++	raw_spin_lock_irqsave(lock, flags);
++
++	if (unlikely(get_user(val, uaddr) != 0)) {
++		raw_spin_unlock_irqrestore(lock, flags);
++		return -EFAULT;
++	}
++
++	if (val == oldval && unlikely(put_user(newval, uaddr) != 0)) {
++		raw_spin_unlock_irqrestore(lock, flags);
++		return -EFAULT;
++	}
++
++	raw_spin_unlock_irqrestore(lock, flags);
++
++	*uval = val;
++	return 0;
++}
++
++#endif /* _ASM_FUTEX_H */
+diff --git a/init/Kconfig b/init/Kconfig
+index 8583d9f06c52..9eb8086af7db 100644
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -1875,7 +1875,6 @@ config BASE_SMALL
+ 
+ config FUTEX
+ 	bool "Enable futex support" if EXPERT
+-	depends on !(SPARC32 && SMP)
+ 	default y
+ 	imply RT_MUTEXES
+ 	help

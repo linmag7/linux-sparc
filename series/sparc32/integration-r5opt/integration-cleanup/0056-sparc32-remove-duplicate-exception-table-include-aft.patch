@@ -1,0 +1,22 @@
+From 57ee658505e9513e163360fa6137b6b23ecd3c88 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Tue, 20 Oct 2026 00:15:41 +0200
+Subject: [PATCH 56/66] sparc32: remove duplicate exception-table include after
+ integration
+
+---
+ arch/sparc/kernel/traps_32.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/arch/sparc/kernel/traps_32.c b/arch/sparc/kernel/traps_32.c
+index 6b83fc9c8fa0..35aadb9e0d29 100644
+--- a/arch/sparc/kernel/traps_32.c
++++ b/arch/sparc/kernel/traps_32.c
+@@ -11,7 +11,6 @@
+  */
+ 
+ #include <linux/cpu.h>
+-#include <linux/extable.h>
+ #include <linux/sched/mm.h>
+ #include <linux/sched/debug.h>
+ #include <linux/mm_types.h>

@@ -1,0 +1,9 @@
+series/sparc32/generic-v2/0001-sparc32-inspect-every-PROM-CPU-cache-geometry.patch
+series/sparc32/generic-v2/0002-sparc32-flush-the-source-user-alias-in-copy_user_hig.patch
+series/sparc32/generic-v2/0003-sparc32-do-not-flush-a-NULL-address-in-flush_dcache_.patch
+series/sparc32/generic-v2/0004-sparc32-flush-the-cache-when-a-kmap_local-mapping-is.patch
+series/sparc32/generic-v2/0005-sparc32-preset-modified-and-referenced-bits-in-kmap-.patch
+series/sparc32/generic-v2/0006-sparc32-colour-align-private-file-mappings.patch
+series/sparc32/generic-v2/0007-sparc32-implement-flush_anon_page.patch
+series/sparc32/generic-v2/0008-sparc32-retain-mm_cpumask-across-TLB-shootdowns.patch
+series/sparc32/generic-v2/0009-sparc32-enroll-and-order-CPUs-before-switching-addre.patch

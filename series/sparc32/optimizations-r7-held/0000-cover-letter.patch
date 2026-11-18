@@ -1,0 +1,60 @@
+From a13b0e4ef7013725f7f0a545a147dc39420b0598 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:59 +0200
+Subject: [PATCH 00/10] sparc32: guarded HyperSPARC maintenance optimizations (HOLD)
+
+I am keeping these ten optimizations on hold. They follow the generic
+and HyperSPARC correctness series. Geometry guards, VM_PFNMAP coverage,
+interface choices and a fresh matched hardware comparison remain pending.
+
+I completed a native GDB 18.1 build on a dual-CPU HyperSPARC RT626
+SPARCstation 20 with 512 MB RAM and a native SPARC32 SMP kernel containing
+the combined fixes and optimizations, plus separate platform prerequisites.
+I observed no core dumps, livelock or new kernel messages during the run.
+This validates the combined integration, not each patch in isolation.
+This run does not establish performance gains or resolve those concerns.
+
+Magnus Lindholm (10):
+  sparc32: isolate the HyperSPARC kmap whole-cache sweep
+  sparc32: avoid no-op HyperSPARC DMA cross-calls
+  sparc32: demap HyperSPARC kmap_local TLB entries by page
+  sparc32: track highmem pages exposed through vmap
+  sparc32: avoid redundant HyperSPARC kmap flushes
+  sparc32: narrow safe HyperSPARC kmap unmap flushes
+  sparc32: avoid duplicate publication of HyperSPARC highmem copies
+  sparc32: unroll the HyperSPARC combined cache sweep eight ways
+  sparc32: narrow guarded HyperSPARC copy-source unmaps
+  sparc32: reduce arithmetic in the HyperSPARC combined cache sweep
+
+ arch/sparc/Kconfig                     |   1 +
+ arch/sparc/include/asm/cacheflush_32.h |   3 +-
+ arch/sparc/include/asm/highmem.h       |   1 +
+ arch/sparc/include/asm/ross.h          |   1 +
+ arch/sparc/mm/hypersparc.S             |  28 ++-
+ arch/sparc/mm/init_32.c                |  16 +-
+ arch/sparc/mm/srmmu.c                  | 254 +++++++++++++++++++++++--
+ 7 files changed, 285 insertions(+), 19 deletions(-)
+
+
+base-commit: cee9395acd8043be0644b25c34bfa86623f2b935
+prerequisite-patch-id: 226d370d6165ca56e762fc3837ea50390143b7df
+prerequisite-patch-id: a8f4c613c7832c004b0307562df53957e7849639
+prerequisite-patch-id: 6089177cff5a7489daab72557949c28960c1e506
+prerequisite-patch-id: eaa67856e6f843b9401ff7fc774e67be59854b34
+prerequisite-patch-id: a00962dc178012e52e48bcab3e66f833f45eae02
+prerequisite-patch-id: 0f50451dba4d8fd86bd9986f18d972c4015b7b31
+prerequisite-patch-id: afad983fa48834da93fde037992b059399f4af1c
+prerequisite-patch-id: f4142189700ce7c766378c481a47244a7dd13140
+prerequisite-patch-id: d2a8aa69c22fd06cbd2dae10f81e1c6db1b95a6d
+prerequisite-patch-id: 4b2991884bfde4679400b5523ac4272cd58aa01c
+prerequisite-patch-id: b6ed24d640e0b6d403e95ff7442be420d27dbe93
+prerequisite-patch-id: 4b6e28be0d46442e02da98339a60529a808b51c0
+prerequisite-patch-id: 599b15d5998547f29ce2a6b7dd8dd0c23af0cf4b
+prerequisite-patch-id: f45d605cc7cb0f737054ddc3c7fc64ae00d8c25f
+prerequisite-patch-id: bd09dbe52f32c750b23f36c1008dba32c3ad2453
+prerequisite-patch-id: 3e60fc0394f049f7d34d38188bc53692a4b17c6e
+prerequisite-patch-id: ed20551a02bf8817bc0365aab0b5b19daa7b4d31
+prerequisite-patch-id: 32e4c6dcf12f9975f3d314503932d741ac8797cf
+-- 
+2.43.0
+

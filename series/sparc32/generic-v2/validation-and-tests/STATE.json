@@ -1,0 +1,22 @@
+{
+  "status": "V2_PREPARED_LOCAL_VALIDATION_COMPLETE_HARDWARE_PENDING",
+  "date": "2026-11-09",
+  "base": "a9e88d617a25306fa7e532b0b8be08df778872cc",
+  "source_commit": "3fdab781ed54bb9a1613cc6ab8fe8f4d6f46e306",
+  "code_changed_patches": [
+    2
+  ],
+  "ss20_accessed": false,
+  "emails_sent": false,
+  "old_series_preserved": true,
+  "initial_qemu_oversized_harness_failures_preserved": true,
+  "successful_qemu_runs": [
+    "focused-smp",
+    "focused-up",
+    "compact-smp",
+    "compact-up",
+    "lowmem-smp",
+    "lowmem-up"
+  ],
+  "optimizations": "HELD"
+}

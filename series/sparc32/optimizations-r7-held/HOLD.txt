@@ -1,0 +1,6 @@
+HOLD -- not included in initial correctness posting.
+Rebased here to preserve applicability, not promoted to release status.
+Pending: unusual managed-page VM_PFNMAP alias coverage; supported unrolled
+geometry/fallback; intentional decisions on helper consolidation/squashing;
+fresh physical correctness-versus-optimized comparison on the posting base.
+Do not use older GDB results as validation of these revised fast paths.

@@ -1,0 +1,64 @@
+From 042bbe28cfa444f978c963b9b75d5055a841b43b Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH 33/66] sparc32: implement flush_anon_page
+
+Generic GUP calls flush_anon_page() after pinning a page it is about to
+reach through a kernel mapping. sparc32 never implemented it, so the user
+alias can still hold dirty lines the kernel mapping cannot see.
+
+The SMP wrapper checks whether the mm mask contains another CPU and then
+uses the existing cross-call mechanism; it does not target exactly that
+mask. HyperSPARC's unconditional all-CPU coverage is a separate fix.
+
+The anonymous-page hook was introduced with a generic no-op fallback, and
+SPARC32 has used that fallback since then. Supply the missing architecture
+operation for the GUP coherency contract.
+
+Fixes: 03beb07664d7 ("[PATCH] Add API for flushing Anon pages")
+Cc: stable@vger.kernel.org
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/cacheflush_32.h |  6 ++++++
+ arch/sparc/mm/init_32.c                | 11 +++++++++++
+ 2 files changed, 17 insertions(+)
+
+diff --git a/arch/sparc/include/asm/cacheflush_32.h b/arch/sparc/include/asm/cacheflush_32.h
+index 9fee0ccfccb8..a65ee310e860 100644
+--- a/arch/sparc/include/asm/cacheflush_32.h
++++ b/arch/sparc/include/asm/cacheflush_32.h
+@@ -35,6 +35,12 @@
+ #define flush_page_for_dma(addr) \
+ 	sparc32_cachetlb_ops->page_for_dma(addr)
+ 
++struct vm_area_struct;
++
++#define ARCH_HAS_FLUSH_ANON_PAGE
++void flush_anon_page(struct vm_area_struct *vma, struct page *page,
++		     unsigned long vaddr);
++
+ void sparc_flush_page_to_ram(struct page *page);
+ void sparc_flush_folio_to_ram(struct folio *folio);
+ 
+diff --git a/arch/sparc/mm/init_32.c b/arch/sparc/mm/init_32.c
+index 9cf0065fc2d4..d0ce9d23561e 100644
+--- a/arch/sparc/mm/init_32.c
++++ b/arch/sparc/mm/init_32.c
+@@ -95,6 +95,17 @@ void __init arch_mm_preinit(void)
+ 	}
+ }
+ 
++/*
++ * Called after generic code pins an anon page it will reach through a kernel
++ * mapping; the user alias may hold dirty lines that mapping cannot see.
++ */
++void flush_anon_page(struct vm_area_struct *vma, struct page *page,
++		     unsigned long vaddr)
++{
++	if (PageAnon(page))
++		flush_cache_page(vma, vaddr, page_to_pfn(page));
++}
++
+ void sparc_flush_page_to_ram(struct page *page)
+ {
+ 	unsigned long vaddr = (unsigned long)page_address(page);

@@ -287,5 +287,288 @@
     ],
     "implementation_tip": "7f306d3d46a546bba6c02f99dee33ab436704fa5",
     "historical_implementation_tip": "6e75fedce50a17808e9737c629f8b630d0d7f4b8"
+  },
+  {
+    "branch": "archive/2026-11-18/sparc32/bitlock-r7",
+    "base": "cee9395acd8043be0644b25c34bfa86623f2b935",
+    "tip": "59053e0300aa9aa65a4d736743d8351bbc83c6cb",
+    "patches": [
+      "series/sparc32/bitlock-r7/0001-sparc32-avoid-stores-on-failed-bit-lock-acquisition.patch"
+    ],
+    "status": "Posted according to owner; latest preserved editorial packaging",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/sparc32/generic-v2",
+    "base": "a9e88d617a25306fa7e532b0b8be08df778872cc",
+    "tip": "9235373b5434cf9ae9ab14d4ce0865fb00e0cbf8",
+    "patches": [
+      "series/sparc32/generic-v2/0001-sparc32-inspect-every-PROM-CPU-cache-geometry.patch",
+      "series/sparc32/generic-v2/0002-sparc32-flush-the-source-user-alias-in-copy_user_hig.patch",
+      "series/sparc32/generic-v2/0003-sparc32-do-not-flush-a-NULL-address-in-flush_dcache_.patch",
+      "series/sparc32/generic-v2/0004-sparc32-flush-the-cache-when-a-kmap_local-mapping-is.patch",
+      "series/sparc32/generic-v2/0005-sparc32-preset-modified-and-referenced-bits-in-kmap-.patch",
+      "series/sparc32/generic-v2/0006-sparc32-colour-align-private-file-mappings.patch",
+      "series/sparc32/generic-v2/0007-sparc32-implement-flush_anon_page.patch",
+      "series/sparc32/generic-v2/0008-sparc32-retain-mm_cpumask-across-TLB-shootdowns.patch",
+      "series/sparc32/generic-v2/0009-sparc32-enroll-and-order-CPUs-before-switching-addre.patch"
+    ],
+    "status": "Latest submission v2; source-alias correction; local validation passed, new hardware validation pending",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/sparc32/generic-r7-historical",
+    "base": "59053e0300aa9aa65a4d736743d8351bbc83c6cb",
+    "tip": "cf88571fdedfc27b91db1a9cf5f22eef9d424865",
+    "patches": [
+      "series/sparc32/historical/generic-r7/0001-sparc32-inspect-every-PROM-CPU-cache-geometry.patch",
+      "series/sparc32/historical/generic-r7/0002-sparc32-flush-the-source-user-alias-in-copy_user_hig.patch",
+      "series/sparc32/historical/generic-r7/0003-sparc32-do-not-flush-a-NULL-address-in-flush_dcache_.patch",
+      "series/sparc32/historical/generic-r7/0004-sparc32-flush-the-cache-when-a-kmap_local-mapping-is.patch",
+      "series/sparc32/historical/generic-r7/0005-sparc32-preset-modified-and-referenced-bits-in-kmap-.patch",
+      "series/sparc32/historical/generic-r7/0006-sparc32-colour-align-private-file-mappings.patch",
+      "series/sparc32/historical/generic-r7/0007-sparc32-implement-flush_anon_page.patch",
+      "series/sparc32/historical/generic-r7/0008-sparc32-retain-mm_cpumask-across-TLB-shootdowns.patch",
+      "series/sparc32/historical/generic-r7/0009-sparc32-enroll-CPUs-in-mm_cpumask-when-switching-add.patch"
+    ],
+    "status": "Historical generic dependency for unrebased r7 HyperSPARC/optimization branches; superseded by generic-v2 for submission",
+    "dependencies": [
+      "archive/2026-11-18/sparc32/bitlock-r7"
+    ]
+  },
+  {
+    "branch": "archive/2026-11-18/sparc32/hypersparc-fixes-r7",
+    "base": "cf88571fdedfc27b91db1a9cf5f22eef9d424865",
+    "tip": "a62f67a365bff94b04743b967161be9170198b70",
+    "patches": [
+      "series/sparc32/hypersparc-fixes-r7/0001-sparc32-synchronize-HyperSPARC-instruction-updates.patch",
+      "series/sparc32/hypersparc-fixes-r7/0002-sparc32-discard-HyperSPARC-cache-probe-TLB-entries.patch",
+      "series/sparc32/hypersparc-fixes-r7/0003-sparc32-flush-HyperSPARC-data-ranges-by-index.patch",
+      "series/sparc32/hypersparc-fixes-r7/0004-sparc32-flush-HyperSPARC-data-pages-by-index.patch",
+      "series/sparc32/hypersparc-fixes-r7/0005-sparc32-flush-HyperSPARC-pages-to-RAM-by-index.patch",
+      "series/sparc32/hypersparc-fixes-r7/0006-sparc32-flush-supervisor-lines-in-the-HyperSPARC-who.patch",
+      "series/sparc32/hypersparc-fixes-r7/0007-sparc32-do-not-gate-HyperSPARC-cache-cross-calls-on-.patch",
+      "series/sparc32/hypersparc-fixes-r7/0008-sparc32-flush-all-HyperSPARC-colours-for-mapped-foli.patch",
+      "series/sparc32/hypersparc-fixes-r7/0009-sparc32-reconcile-HyperSPARC-local-and-persistent-km.patch"
+    ],
+    "status": "Latest preserved HyperSPARC correctness series; historical combined hardware validation, not newly integrated with generic v2",
+    "dependencies": [
+      "archive/2026-11-18/sparc32/generic-r7-historical"
+    ]
+  },
+  {
+    "branch": "archive/2026-11-18/sparc32/optimizations-r7-held",
+    "base": "a62f67a365bff94b04743b967161be9170198b70",
+    "tip": "292ed340746d32180776548fb042c6566e41a5df",
+    "patches": [
+      "series/sparc32/optimizations-r7-held/0001-sparc32-isolate-the-HyperSPARC-kmap-whole-cache-swee.patch",
+      "series/sparc32/optimizations-r7-held/0002-sparc32-avoid-no-op-HyperSPARC-DMA-cross-calls.patch",
+      "series/sparc32/optimizations-r7-held/0003-sparc32-demap-HyperSPARC-kmap_local-TLB-entries-by-p.patch",
+      "series/sparc32/optimizations-r7-held/0004-sparc32-track-highmem-pages-exposed-through-vmap.patch",
+      "series/sparc32/optimizations-r7-held/0005-sparc32-avoid-redundant-HyperSPARC-kmap-flushes.patch",
+      "series/sparc32/optimizations-r7-held/0006-sparc32-narrow-safe-HyperSPARC-kmap-unmap-flushes.patch",
+      "series/sparc32/optimizations-r7-held/0007-sparc32-avoid-duplicate-publication-of-HyperSPARC-hi.patch",
+      "series/sparc32/optimizations-r7-held/0008-sparc32-unroll-the-HyperSPARC-combined-cache-sweep-e.patch",
+      "series/sparc32/optimizations-r7-held/0009-sparc32-narrow-guarded-HyperSPARC-copy-source-unmaps.patch",
+      "series/sparc32/optimizations-r7-held/0010-sparc32-reduce-arithmetic-in-the-HyperSPARC-combined.patch"
+    ],
+    "status": "Experimental archive allowed; HELD for Linux submission; review/performance work outstanding",
+    "dependencies": [
+      "archive/2026-11-18/sparc32/hypersparc-fixes-r7"
+    ]
+  },
+  {
+    "branch": "archive/2026-11-18/sparc32/viking-demap-r8",
+    "base": "a9e88d617a25306fa7e532b0b8be08df778872cc",
+    "tip": "334ba739f9fbefdcce34d12871233ab7fda50696",
+    "patches": [
+      "series/sparc32/viking-demap-r8/0001-sparc32-serialize-SuperSPARC-demap-operations.patch"
+    ],
+    "status": "Corrected standalone demap companion retaining mm_cpumask; fresh physical validation pending",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/sparc32/external-prerequisites",
+    "base": "cee9395acd8043be0644b25c34bfa86623f2b935",
+    "tip": "cb2530942df58a27ab85b5e9aaa8fbfd26637006",
+    "patches": [
+      "series/sparc32/external-prerequisites/sparc32-build-prerequisites-20261018/0001-kaloz-keep-pil-raised.patch",
+      "series/sparc32/external-prerequisites/sparc32-build-prerequisites-20261018/0002-moussavi-sun4m-observed-ipis.patch",
+      "series/sparc32/external-prerequisites/sparc32-fullstack-prerequisites-20261028/0003-moussavi-protnone-present.patch"
+    ],
+    "status": "Standard PIL/IPI/PROT_NONE prerequisite fixes; retained attribution; do not double-apply upstream equivalents",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/sparc32/foundation-highload",
+    "base": "cee9395acd8043be0644b25c34bfa86623f2b935",
+    "tip": "3eafcf8fa255b907611f746c8ad94df5db4ac3d2",
+    "patches": [
+      "series/sparc32/integration-r5opt/highload/0001-sparc32-honour-phys_base-in-the-viking-cache-flush-r.patch",
+      "series/sparc32/integration-r5opt/highload/0002-sparc32-derive-phys_base-from-the-PAGE_OFFSET-mappin.patch",
+      "series/sparc32/integration-r5opt/highload/0003-sparc32-advertise-relocatable-kernel-with-HdrS-0x030.patch"
+    ],
+    "status": "Preserved relocatable highload v3 foundation; HdrS 0x0300",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/sparc32/foundation-memblock",
+    "base": "3eafcf8fa255b907611f746c8ad94df5db4ac3d2",
+    "tip": "24eb68b6e022d63c0f935f026b44438e4b3b2246",
+    "patches": [
+      "series/sparc32/integration-r5opt/memblock/0004-sparc32-use-memblock-when-mapping-the-kernel.patch",
+      "series/sparc32/integration-r5opt/memblock/0005-sparc32-use-memblock-to-find-available-system-memory.patch",
+      "series/sparc32/integration-r5opt/memblock/0006-sparc32-populate-memblock-from-the-PROM-memory-map.patch",
+      "series/sparc32/integration-r5opt/memblock/0007-sparc32-drop-unused-valid-address-bitmap.patch",
+      "series/sparc32/integration-r5opt/memblock/0008-sparc32-move-early-memory-setup-to-setup_arch.patch",
+      "series/sparc32/integration-r5opt/memblock/0009-sparc32-drop-sp_banks.patch"
+    ],
+    "status": "Preserved memblock foundation",
+    "dependencies": [
+      "archive/2026-11-18/sparc32/foundation-highload"
+    ]
+  },
+  {
+    "branch": "archive/2026-11-18/sparc32/foundation-platform-legacy",
+    "base": "24eb68b6e022d63c0f935f026b44438e4b3b2246",
+    "tip": "b247b422644077bf01544120cea80a45e6890be0",
+    "patches": [
+      "series/sparc32/integration-r5opt/legacy-cas-divide/0010-sparc32-detect-the-compare-and-swap-instruction-at-b.patch",
+      "series/sparc32/integration-r5opt/legacy-cas-divide/0011-sparc32-add-a-kernel-assisted-compare-and-swap.patch",
+      "series/sparc32/integration-r5opt/legacy-cas-divide/0012-sparc32-implement-futex-atomic-ops-with-the-compare-.patch",
+      "series/sparc32/integration-r5opt/legacy-cas-divide/0013-sparc32-advertise-the-compare-and-swap-trap-in-AT_HW.patch",
+      "series/sparc32/integration-r5opt/legacy-cas-divide/0014-sparc32-document-the-compare-and-swap-trap-ABI.patch",
+      "series/sparc32/integration-r5opt/legacy-cas-divide/0015-sparc32-emulate-UDIV-SDIV-on-illegal_instruction.patch",
+      "series/sparc32/integration-r5opt/platform-diagnostics/0016-sparc32-capture-SuperSPARC-data-store-error-state.patch",
+      "series/sparc32/integration-r5opt/smp-prerequisites/0017-sparc32-keep-PIL-raised-on-the-SMP-ticker-and-LEON-I.patch",
+      "series/sparc32/integration-r5opt/smp-prerequisites/0018-sparc32-sun4m-do-not-clear-IPIs-that-were-not-handle.patch",
+      "series/sparc32/integration-r5opt/smp-prerequisites/0019-sparc32-wait-for-secondary-CPUs-by-time-not-by-loop-.patch",
+      "series/sparc32/integration-r5opt/vmalloc/0020-sparc32-Fix-pgd-lookup-in-vmalloc-fault-handling.patch",
+      "series/sparc32/integration-r5opt/seccomp/0021-sparc32-Split-common-syscall_trace-to-syscall_trace_.patch",
+      "series/sparc32/integration-r5opt/seccomp/0022-sparc64-add-seccomp-filter-support.patch",
+      "series/sparc32/integration-r5opt/seccomp/0023-selftests-seccomp-add-sparc64-support.patch",
+      "series/sparc32/integration-r5opt/seccomp/0024-sparc32-add-seccomp-filter-support.patch",
+      "series/sparc32/integration-r5opt/seccomp/0025-selftests-seccomp-add-sparc32-support.patch"
+    ],
+    "status": "Historical platform/CAS/divide/SMP/vmalloc/seccomp foundation; later Kaloz integration replaces old atomic/divide implementation",
+    "dependencies": [
+      "archive/2026-11-18/sparc32/foundation-memblock"
+    ]
+  },
+  {
+    "branch": "archive/2026-11-18/sparc32/kaloz-casa-integration",
+    "base": "90440437f90b6232628fa56afb59022048bfea7f",
+    "tip": "cddd791ce9c73533b359860ba0f708567fc98ec3",
+    "patches": [
+      "series/sparc32/integration-r5opt/kaloz-casa-integration/0047-Revert-sparc32-emulate-UDIV-SDIV-on-illegal_instruct.patch",
+      "series/sparc32/integration-r5opt/kaloz-casa-integration/0048-sparc32-support-futexes-on-SMP.patch",
+      "series/sparc32/integration-r5opt/kaloz-casa-integration/0049-sparc32-emulate-casa-on-V8-CPUs.patch",
+      "series/sparc32/integration-r5opt/kaloz-casa-integration/0050-sparc32-emulate-integer-divide-taken-as-illegal_inst.patch",
+      "series/sparc32/integration-r5opt/kaloz-casa-integration/0051-sparc32-keep-legacy-CAS-trap-on-the-CASA-and-futex-b.patch"
+    ],
+    "status": "Historical full-stack Kaloz CASA/futex/divide integration, including legacy ABI bridge; base also carries common and HyperSPARC fixes",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/sparc32/aslr-experimental",
+    "base": "cddd791ce9c73533b359860ba0f708567fc98ec3",
+    "tip": "b33c74f9c8bb9a561f8deabf1f25c663b178b503",
+    "patches": [
+      "series/sparc32/integration-r5opt/aslr-experiment/0052-sparc64-Start-bottom-up-mmap-searches-at-mm-mmap_bas.patch",
+      "series/sparc32/integration-r5opt/aslr-experiment/0053-sparc64-Move-the-32-bit-PIE-base-below-the-legacy-mm.patch",
+      "series/sparc32/integration-r5opt/aslr-experiment/0054-sparc64-Randomize-the-load-address-of-PIE-executable.patch",
+      "series/sparc32/integration-r5opt/aslr-experiment/0055-sparc32-experiment-with-colour-preserving-mmap-and-E.patch"
+    ],
+    "status": "Native SPARC32 experimental adaptation plus Stian SPARC64 series; limited entropy and testing qualifications; not Linux-ready",
+    "dependencies": [
+      "archive/2026-11-18/sparc32/kaloz-casa-integration"
+    ]
+  },
+  {
+    "branch": "archive/2026-11-18/sparc32/fullstack-r5opt-historical",
+    "base": "cee9395acd8043be0644b25c34bfa86623f2b935",
+    "tip": "7272eaf8c2327c3ba685d9c6026a51bdf33c416d",
+    "patches": [
+      "series/sparc32/integration-r5opt/highload/0001-sparc32-honour-phys_base-in-the-viking-cache-flush-r.patch",
+      "series/sparc32/integration-r5opt/highload/0002-sparc32-derive-phys_base-from-the-PAGE_OFFSET-mappin.patch",
+      "series/sparc32/integration-r5opt/highload/0003-sparc32-advertise-relocatable-kernel-with-HdrS-0x030.patch",
+      "series/sparc32/integration-r5opt/memblock/0004-sparc32-use-memblock-when-mapping-the-kernel.patch",
+      "series/sparc32/integration-r5opt/memblock/0005-sparc32-use-memblock-to-find-available-system-memory.patch",
+      "series/sparc32/integration-r5opt/memblock/0006-sparc32-populate-memblock-from-the-PROM-memory-map.patch",
+      "series/sparc32/integration-r5opt/memblock/0007-sparc32-drop-unused-valid-address-bitmap.patch",
+      "series/sparc32/integration-r5opt/memblock/0008-sparc32-move-early-memory-setup-to-setup_arch.patch",
+      "series/sparc32/integration-r5opt/memblock/0009-sparc32-drop-sp_banks.patch",
+      "series/sparc32/integration-r5opt/legacy-cas-divide/0010-sparc32-detect-the-compare-and-swap-instruction-at-b.patch",
+      "series/sparc32/integration-r5opt/legacy-cas-divide/0011-sparc32-add-a-kernel-assisted-compare-and-swap.patch",
+      "series/sparc32/integration-r5opt/legacy-cas-divide/0012-sparc32-implement-futex-atomic-ops-with-the-compare-.patch",
+      "series/sparc32/integration-r5opt/legacy-cas-divide/0013-sparc32-advertise-the-compare-and-swap-trap-in-AT_HW.patch",
+      "series/sparc32/integration-r5opt/legacy-cas-divide/0014-sparc32-document-the-compare-and-swap-trap-ABI.patch",
+      "series/sparc32/integration-r5opt/legacy-cas-divide/0015-sparc32-emulate-UDIV-SDIV-on-illegal_instruction.patch",
+      "series/sparc32/integration-r5opt/platform-diagnostics/0016-sparc32-capture-SuperSPARC-data-store-error-state.patch",
+      "series/sparc32/integration-r5opt/smp-prerequisites/0017-sparc32-keep-PIL-raised-on-the-SMP-ticker-and-LEON-I.patch",
+      "series/sparc32/integration-r5opt/smp-prerequisites/0018-sparc32-sun4m-do-not-clear-IPIs-that-were-not-handle.patch",
+      "series/sparc32/integration-r5opt/smp-prerequisites/0019-sparc32-wait-for-secondary-CPUs-by-time-not-by-loop-.patch",
+      "series/sparc32/integration-r5opt/vmalloc/0020-sparc32-Fix-pgd-lookup-in-vmalloc-fault-handling.patch",
+      "series/sparc32/integration-r5opt/seccomp/0021-sparc32-Split-common-syscall_trace-to-syscall_trace_.patch",
+      "series/sparc32/integration-r5opt/seccomp/0022-sparc64-add-seccomp-filter-support.patch",
+      "series/sparc32/integration-r5opt/seccomp/0023-selftests-seccomp-add-sparc64-support.patch",
+      "series/sparc32/integration-r5opt/seccomp/0024-sparc32-add-seccomp-filter-support.patch",
+      "series/sparc32/integration-r5opt/seccomp/0025-selftests-seccomp-add-sparc32-support.patch",
+      "series/sparc32/integration-r5opt/bitlock/0026-sparc32-do-not-write-back-unchanged-values-in-emulat.patch",
+      "series/sparc32/integration-r5opt/generic-pre-v2/0027-sparc32-inspect-every-PROM-CPU-cache-geometry.patch",
+      "series/sparc32/integration-r5opt/generic-pre-v2/0028-sparc32-flush-the-source-user-alias-in-copy_user_hig.patch",
+      "series/sparc32/integration-r5opt/generic-pre-v2/0029-sparc32-do-not-flush-a-NULL-address-in-flush_dcache_.patch",
+      "series/sparc32/integration-r5opt/generic-pre-v2/0030-sparc32-flush-the-cache-when-a-kmap_local-mapping-is.patch",
+      "series/sparc32/integration-r5opt/generic-pre-v2/0031-sparc32-preset-modified-and-referenced-bits-in-kmap-.patch",
+      "series/sparc32/integration-r5opt/generic-pre-v2/0032-sparc32-colour-align-private-file-mappings.patch",
+      "series/sparc32/integration-r5opt/generic-pre-v2/0033-sparc32-implement-flush_anon_page.patch",
+      "series/sparc32/integration-r5opt/generic-pre-v2/0034-sparc32-retain-mm_cpumask-across-TLB-shootdowns.patch",
+      "series/sparc32/integration-r5opt/generic-pre-v2/0035-sparc32-enroll-and-order-CPUs-before-switching-addre.patch",
+      "series/sparc32/integration-r5opt/hypersparc-fixes/0036-sparc32-synchronize-HyperSPARC-instruction-updates.patch",
+      "series/sparc32/integration-r5opt/hypersparc-fixes/0037-sparc32-discard-HyperSPARC-cache-probe-TLB-entries.patch",
+      "series/sparc32/integration-r5opt/hypersparc-fixes/0038-sparc32-flush-HyperSPARC-data-ranges-by-index.patch",
+      "series/sparc32/integration-r5opt/hypersparc-fixes/0039-sparc32-flush-HyperSPARC-data-pages-by-index.patch",
+      "series/sparc32/integration-r5opt/hypersparc-fixes/0040-sparc32-flush-HyperSPARC-pages-to-RAM-by-index.patch",
+      "series/sparc32/integration-r5opt/hypersparc-fixes/0041-sparc32-flush-supervisor-lines-in-the-HyperSPARC-who.patch",
+      "series/sparc32/integration-r5opt/hypersparc-fixes/0042-sparc32-do-not-gate-HyperSPARC-cache-cross-calls-on-.patch",
+      "series/sparc32/integration-r5opt/hypersparc-fixes/0043-sparc32-flush-all-HyperSPARC-colours-for-mapped-foli.patch",
+      "series/sparc32/integration-r5opt/hypersparc-fixes/0044-sparc32-reconcile-HyperSPARC-local-and-persistent-km.patch",
+      "series/sparc32/integration-r5opt/viking-integration/0045-sparc32-serialize-SuperSPARC-demap-operations.patch",
+      "series/sparc32/integration-r5opt/viking-integration/0046-sparc32-integrate-Viking-instruction-synchronization.patch",
+      "series/sparc32/integration-r5opt/kaloz-casa-integration/0047-Revert-sparc32-emulate-UDIV-SDIV-on-illegal_instruct.patch",
+      "series/sparc32/integration-r5opt/kaloz-casa-integration/0048-sparc32-support-futexes-on-SMP.patch",
+      "series/sparc32/integration-r5opt/kaloz-casa-integration/0049-sparc32-emulate-casa-on-V8-CPUs.patch",
+      "series/sparc32/integration-r5opt/kaloz-casa-integration/0050-sparc32-emulate-integer-divide-taken-as-illegal_inst.patch",
+      "series/sparc32/integration-r5opt/kaloz-casa-integration/0051-sparc32-keep-legacy-CAS-trap-on-the-CASA-and-futex-b.patch",
+      "series/sparc32/integration-r5opt/aslr-experiment/0052-sparc64-Start-bottom-up-mmap-searches-at-mm-mmap_bas.patch",
+      "series/sparc32/integration-r5opt/aslr-experiment/0053-sparc64-Move-the-32-bit-PIE-base-below-the-legacy-mm.patch",
+      "series/sparc32/integration-r5opt/aslr-experiment/0054-sparc64-Randomize-the-load-address-of-PIE-executable.patch",
+      "series/sparc32/integration-r5opt/aslr-experiment/0055-sparc32-experiment-with-colour-preserving-mmap-and-E.patch",
+      "series/sparc32/integration-r5opt/integration-cleanup/0056-sparc32-remove-duplicate-exception-table-include-aft.patch",
+      "series/sparc32/integration-r5opt/hypersparc-optimizations/0057-sparc32-isolate-the-HyperSPARC-kmap-whole-cache-swee.patch",
+      "series/sparc32/integration-r5opt/hypersparc-optimizations/0058-sparc32-avoid-no-op-HyperSPARC-DMA-cross-calls.patch",
+      "series/sparc32/integration-r5opt/hypersparc-optimizations/0059-sparc32-demap-HyperSPARC-kmap_local-TLB-entries-by-p.patch",
+      "series/sparc32/integration-r5opt/hypersparc-optimizations/0060-sparc32-track-highmem-pages-exposed-through-vmap.patch",
+      "series/sparc32/integration-r5opt/hypersparc-optimizations/0061-sparc32-avoid-redundant-HyperSPARC-kmap-flushes.patch",
+      "series/sparc32/integration-r5opt/hypersparc-optimizations/0062-sparc32-narrow-safe-HyperSPARC-kmap-unmap-flushes.patch",
+      "series/sparc32/integration-r5opt/hypersparc-optimizations/0063-sparc32-avoid-duplicate-publication-of-HyperSPARC-hi.patch",
+      "series/sparc32/integration-r5opt/hypersparc-optimizations/0064-sparc32-unroll-the-HyperSPARC-combined-cache-sweep-e.patch",
+      "series/sparc32/integration-r5opt/hypersparc-optimizations/0065-sparc32-narrow-guarded-HyperSPARC-copy-source-unmaps.patch",
+      "series/sparc32/integration-r5opt/hypersparc-optimizations/0066-sparc32-reduce-arithmetic-in-the-HyperSPARC-combined.patch"
+    ],
+    "status": "Exact tree of historically GDB-tested combined stack; not rebased to generic v2; integration-only kernel archive",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/sparc32/fullstack-protnone1-historical",
+    "base": "7272eaf8c2327c3ba685d9c6026a51bdf33c416d",
+    "tip": "ebfb04980501bfed1fd55e6212c0761ffb0b215c",
+    "patches": [
+      "series/sparc32/external-prerequisites/sparc32-fullstack-prerequisites-20261028/0003-moussavi-protnone-present.patch"
+    ],
+    "status": "Exact tree of preserved PROT_NONE hardware-tested stack; older generic implementation",
+    "dependencies": [
+      "archive/2026-11-18/sparc32/fullstack-r5opt-historical"
+    ]
   }
 ]

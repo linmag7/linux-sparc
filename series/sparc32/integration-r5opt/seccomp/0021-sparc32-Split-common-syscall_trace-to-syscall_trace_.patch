@@ -1,0 +1,116 @@
+From 83e2b86d4b4c52bc6cfff6c6e767de92af0aef74 Mon Sep 17 00:00:00 2001
+From: Ludwig Rydberg <ludwig.rydberg@gaisler.com>
+Date: Wed, 14 Oct 2026 10:07:28 +0200
+Subject: [PATCH 21/66] sparc32: Split common syscall_trace() to
+ syscall_trace_{enter|leave}()
+
+Drop the common syscall_trace() function and follow the pattern
+that many other archs (including SPARC64) by having two explicit
+functions called syscall_trace_{enter|leave}() instead.
+
+Signed-off-by: Ludwig Rydberg <ludwig.rydberg@gaisler.com>
+Message-ID: <20261014080730.8817-2-ludwig.rydberg@gaisler.com>
+---
+ arch/sparc/kernel/entry.S     | 21 +++++++++------------
+ arch/sparc/kernel/kernel.h    |  3 ++-
+ arch/sparc/kernel/ptrace_32.c | 19 ++++++++++---------
+ 3 files changed, 21 insertions(+), 22 deletions(-)
+
+diff --git a/arch/sparc/kernel/entry.S b/arch/sparc/kernel/entry.S
+index 47134994d280..5d0993ecd734 100644
+--- a/arch/sparc/kernel/entry.S
++++ b/arch/sparc/kernel/entry.S
+@@ -873,8 +873,8 @@ sys_sigreturn:
+ 	be	1f
+ 	 nop
+ 
+-	call	syscall_trace
+-	 mov	1, %o1
++	call	syscall_trace_leave
++	 nop
+ 
+ 1:
+ 	/* We don't want to muck with user registers like a
+@@ -893,9 +893,8 @@ sys_rt_sigreturn:
+ 	be	1f
+ 	 nop
+ 
+-	add	%sp, STACKFRAME_SZ, %o0
+-	call	syscall_trace
+-	 mov	1, %o1
++	call	syscall_trace_leave
++	 add	%sp, STACKFRAME_SZ, %o0
+ 
+ 1:
+ 	/* We are returning to a signal handler. */
+@@ -977,9 +976,8 @@ linux_sparc_ni_syscall:
+ 	 or     %l7, %lo(sys_ni_syscall), %l7
+ 
+ linux_syscall_trace:
+-	add	%sp, STACKFRAME_SZ, %o0
+-	call	syscall_trace
+-	 mov	0, %o1
++	call	syscall_trace_enter
++	 add	%sp, STACKFRAME_SZ, %o0
+ 	cmp	%o0, 0
+ 	bne	3f
+ 	 mov	-ENOSYS, %o0
+@@ -1098,10 +1096,9 @@ ret_sys_call:
+ 	 st	%l2, [%sp + STACKFRAME_SZ + PT_NPC]
+ 
+ linux_syscall_trace2:
+-	add	%sp, STACKFRAME_SZ, %o0
+-	mov	1, %o1
+-	call	syscall_trace
+-	 add	%l1, 0x4, %l2			/* npc = npc+4 */
++	call	syscall_trace_leave
++	 add	%sp, STACKFRAME_SZ, %o0
++	add	%l1, 0x4, %l2			/* npc = npc+4 */
+ 	st	%l1, [%sp + STACKFRAME_SZ + PT_PC]
+ 	b	ret_trap_entry
+ 	 st	%l2, [%sp + STACKFRAME_SZ + PT_NPC]
+diff --git a/arch/sparc/kernel/kernel.h b/arch/sparc/kernel/kernel.h
+index 4ee85051521a..e215157d5120 100644
+--- a/arch/sparc/kernel/kernel.h
++++ b/arch/sparc/kernel/kernel.h
+@@ -172,7 +172,8 @@ asmlinkage int do_sys_sigstack(struct sigstack __user *ssptr,
+                                unsigned long sp);
+ 
+ /* ptrace_32.c */
+-asmlinkage int syscall_trace(struct pt_regs *regs, int syscall_exit_p);
++asmlinkage int syscall_trace_enter(struct pt_regs *regs);
++asmlinkage void syscall_trace_leave(struct pt_regs *regs);
+ 
+ /* unaligned_32.c */
+ asmlinkage void kernel_unaligned_trap(struct pt_regs *regs, unsigned int insn);
+diff --git a/arch/sparc/kernel/ptrace_32.c b/arch/sparc/kernel/ptrace_32.c
+index 5991b1731fee..3cd3a31ce677 100644
+--- a/arch/sparc/kernel/ptrace_32.c
++++ b/arch/sparc/kernel/ptrace_32.c
+@@ -433,16 +433,17 @@ long arch_ptrace(struct task_struct *child, long request,
+ 	return ret;
+ }
+ 
+-asmlinkage int syscall_trace(struct pt_regs *regs, int syscall_exit_p)
++asmlinkage int syscall_trace_enter(struct pt_regs *regs)
+ {
+-	int ret = 0;
++	if (test_thread_flag(TIF_SYSCALL_TRACE) &&
++	    !ptrace_report_syscall_permit_entry(regs))
++		return 1;
+ 
+-	if (test_thread_flag(TIF_SYSCALL_TRACE)) {
+-		if (syscall_exit_p)
+-			ptrace_report_syscall_exit(regs, 0);
+-		else
+-			ret = !ptrace_report_syscall_permit_entry(regs);
+-	}
++	return 0;
++}
+ 
+-	return ret;
++asmlinkage void syscall_trace_leave(struct pt_regs *regs)
++{
++	if (test_thread_flag(TIF_SYSCALL_TRACE))
++		ptrace_report_syscall_exit(regs, 0);
+ }

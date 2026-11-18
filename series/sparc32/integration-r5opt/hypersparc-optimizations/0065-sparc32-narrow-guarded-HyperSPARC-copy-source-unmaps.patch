@@ -1,0 +1,169 @@
+From 57b3d7b86e52cb0e891180d7de1f5828eda4f454 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:48 +0200
+Subject: [PATCH 65/66] sparc32: narrow guarded HyperSPARC copy-source unmaps
+
+Mark only the read-only, distinct highmem source of copy_user_highpage().
+Retain alias, PTE, PKMAP and vmap checks, all-CPU index retirement,
+rechecks and the conservative fallback. Destination and scheduler policy
+stay unchanged. Consume the per-CPU hint before the slot can be reused and
+save/restore it across nested copies.
+
+This retains the guarded production change without its diagnostic counters
+or timing calls.
+
+A historical comparison with diagnostic probes disabled measured elapsed
+means of 191.780 s before and 172.720 s after (-9.94%). It used limited
+repetitions on separate boots; a separate writer stress was slower and
+overlapped collection/monitoring. These older integrated-kernel results do
+not establish that every workload improves or measure the exact clean-base
+stack submitted here.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/highmem.h |  1 +
+ arch/sparc/mm/init_32.c          |  6 +++-
+ arch/sparc/mm/srmmu.c            | 56 +++++++++++++++++++++++++++-----
+ 3 files changed, 53 insertions(+), 10 deletions(-)
+
+diff --git a/arch/sparc/include/asm/highmem.h b/arch/sparc/include/asm/highmem.h
+index dce82a85e4a4..061b629959fe 100644
+--- a/arch/sparc/include/asm/highmem.h
++++ b/arch/sparc/include/asm/highmem.h
+@@ -43,6 +43,7 @@ static inline void *arch_kmap_local_high_get(const struct page *page)
+ 
+ void sparc32_kmap_local_cache_flush(unsigned long vaddr);
+ void sparc32_kmap_local_cache_flush_unmap(unsigned long vaddr);
++void sparc32_kunmap_local_copy_source(const void *vaddr);
+ void sparc32_kmap_local_tlb_flush(unsigned long vaddr);
+ void sparc32_kmap_local_post_map(unsigned long vaddr, pte_t pteval);
+ 
+diff --git a/arch/sparc/mm/init_32.c b/arch/sparc/mm/init_32.c
+index f2e7f55408e2..8f83775f9dc8 100644
+--- a/arch/sparc/mm/init_32.c
++++ b/arch/sparc/mm/init_32.c
+@@ -143,7 +143,11 @@ void copy_user_highpage(struct page *to, struct page *from,
+ 	    !vma || (vma->vm_flags & VM_EXEC))
+ 		__flush_page_to_ram((unsigned long)vto);
+ 	kunmap_local(vto);
+-	kunmap_local(vfrom);
++	/* Only this mapping was read-only; the destination keeps its policy. */
++	if (srmmu_modtype == HyperSparc && PageHighMem(from) && from != to)
++		sparc32_kunmap_local_copy_source(vfrom);
++	else
++		kunmap_local(vfrom);
+ }
+ 
+ void sparc_flush_folio_to_ram(struct folio *folio)
+diff --git a/arch/sparc/mm/srmmu.c b/arch/sparc/mm/srmmu.c
+index d0020778fb8d..5aea7f442111 100644
+--- a/arch/sparc/mm/srmmu.c
++++ b/arch/sparc/mm/srmmu.c
+@@ -132,6 +132,28 @@ struct hypersparc_kmap_slots {
+ static DEFINE_PER_CPU(struct hypersparc_kmap_slots, hypersparc_kmap_slots);
+ static DEFINE_SPINLOCK(hypersparc_kmap_lock);
+ 
++/* One final-unmap hint, consumed before generic code can reuse the slot. */
++static DEFINE_PER_CPU(unsigned long, hypersparc_copy_source_unmap);
++
++/*
++ * copy_user_highpage() alone promises no stores through this mapping, and
++ * has already unmapped a distinct destination. Entry and scheduler hooks
++ * retain their ordinary policy. Pin this short hint/unmap sequence to the
++ * current CPU; save/restore permits a nested interrupt to do its own copy.
++ */
++void sparc32_kunmap_local_copy_source(const void *vaddr)
++{
++	unsigned long saved;
++
++	preempt_disable();
++	saved = this_cpu_read(hypersparc_copy_source_unmap);
++	this_cpu_write(hypersparc_copy_source_unmap,
++		       (unsigned long)vaddr & PAGE_MASK);
++	kunmap_local(vaddr);
++	this_cpu_write(hypersparc_copy_source_unmap, saved);
++	preempt_enable();
++}
++
+ static int hypersparc_kmap_slot(unsigned long vaddr, int cpu)
+ {
+ 	int idx = (FIXADDR_TOP - vaddr) >> PAGE_SHIFT;
+@@ -485,10 +507,11 @@ void sparc32_kmap_local_cache_flush(unsigned long vaddr)
+ }
+ 
+ /* Called with hypersparc_kmap_lock held. */
+-static bool hypersparc_kmap_unmap_is_private(unsigned long vaddr,
++static bool hypersparc_kmap_unmap_can_narrow(unsigned long vaddr,
+ 					     struct page *page,
+ 					     unsigned long pfn,
+-					     int cpu, int slot)
++					     int cpu, int slot,
++					     bool copy_source)
+ {
+ 	struct hypersparc_kmap_slots *slots;
+ 	pte_t *ptep;
+@@ -503,18 +526,25 @@ static bool hypersparc_kmap_unmap_is_private(unsigned long vaddr,
+ 	pte = ptep_get(ptep);
+ 	if (!pte_present(pte) || pte_pfn(pte) != pfn)
+ 		return false;
+-	if (folio_mapped(page_folio(page)) || test_bit(PG_arch_2, &page->flags.f))
++	if ((!copy_source && folio_mapped(page_folio(page))) ||
++	    test_bit(PG_arch_2, &page->flags.f))
+ 		return false;
+ 	if (hypersparc_kmap_other_alias_active(pfn, cpu, slot))
+ 		return false;
+ 
+-	/* A live PKMAP alias must already have made this mapping uncached. */
+-	if ((pte_val(pte) & SRMMU_CACHE) && page_address(page))
++	/* An uncached source may have participated in a conflicting alias. */
++	if (copy_source && !(pte_val(pte) & SRMMU_CACHE))
++		return false;
++
++	/* A copy source with a persistent alias needs the whole-cache path. */
++	if ((copy_source || (pte_val(pte) & SRMMU_CACHE)) &&
++	    page_address(page))
+ 		return false;
+ 	return true;
+ }
+ 
+-static bool hypersparc_try_narrow_kmap_unmap(unsigned long vaddr)
++static bool hypersparc_try_narrow_kmap_unmap(unsigned long vaddr,
++					    bool copy_source)
+ {
+ 	struct hypersparc_kmap_slots *slots;
+ 	unsigned long flags;
+@@ -545,7 +575,8 @@ static bool hypersparc_try_narrow_kmap_unmap(unsigned long vaddr)
+ 
+ 	/* Keep the alias registered until every cpu has discarded this page. */
+ 	spin_lock_irqsave(&hypersparc_kmap_lock, flags);
+-	if (!hypersparc_kmap_unmap_is_private(vaddr, page, pfn, cpu, slot)) {
++	if (!hypersparc_kmap_unmap_can_narrow(vaddr, page, pfn, cpu, slot,
++					      copy_source)) {
+ 		spin_unlock_irqrestore(&hypersparc_kmap_lock, flags);
+ 		return false;
+ 	}
+@@ -565,7 +596,8 @@ static bool hypersparc_try_narrow_kmap_unmap(unsigned long vaddr)
+ #endif
+ 
+ 	spin_lock_irqsave(&hypersparc_kmap_lock, flags);
+-	if (!hypersparc_kmap_unmap_is_private(vaddr, page, pfn, cpu, slot)) {
++	if (!hypersparc_kmap_unmap_can_narrow(vaddr, page, pfn, cpu, slot,
++					      copy_source)) {
+ 		spin_unlock_irqrestore(&hypersparc_kmap_lock, flags);
+ 		return false;
+ 	}
+@@ -578,7 +610,13 @@ static bool hypersparc_try_narrow_kmap_unmap(unsigned long vaddr)
+ void sparc32_kmap_local_cache_flush_unmap(unsigned long vaddr)
+ {
+ 	if (is_hypersparc) {
+-		if (hypersparc_try_narrow_kmap_unmap(vaddr))
++		bool copy_source;
++
++		copy_source = this_cpu_read(hypersparc_copy_source_unmap) == vaddr;
++		if (copy_source)
++			/* Consume before generic code can reuse the slot. */
++			this_cpu_write(hypersparc_copy_source_unmap, 0);
++		if (hypersparc_try_narrow_kmap_unmap(vaddr, copy_source))
+ 			return;
+ 
+ 		/* kmap_local pins us to the slot owner; publish before removal. */

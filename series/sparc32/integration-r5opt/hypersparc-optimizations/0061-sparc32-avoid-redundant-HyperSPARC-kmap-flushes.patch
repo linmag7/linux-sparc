@@ -1,0 +1,66 @@
+From b37f05a4e48acf18a0178b442f196cc00ce3f533 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:48 +0200
+Subject: [PATCH 61/66] sparc32: avoid redundant HyperSPARC kmap flushes
+
+Skip the kmap_local map-side D-cache flush when a managed highmem page has
+no user mapping, tracked kmap_local alias, or recorded vmap exposure. Keep
+the conservative path for everything that cannot be classified, including
+reserved pages, since pfn_valid() and PageHighMem() do not prove a page is
+buddy-managed.
+
+The new fixmap mapping has not been handed to its caller yet, so a PKMAP
+conflict found by hypersparc_track_kmap() can still be reconciled first.
+
+"No current alias" is usable information only because every cpu-visible
+highmem alias is published when it retires: user aliases by the index
+flushes, kmap_local by these hooks, PKMAP by its teardown, and vmap by the
+conservative treatment above.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/srmmu.c | 24 +++++++++++++++++++++++-
+ 1 file changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/arch/sparc/mm/srmmu.c b/arch/sparc/mm/srmmu.c
+index d3f4451cb752..74b376be784b 100644
+--- a/arch/sparc/mm/srmmu.c
++++ b/arch/sparc/mm/srmmu.c
+@@ -414,6 +414,27 @@ void kmap_flush_tlb(unsigned long addr)
+ }
+ EXPORT_SYMBOL(kmap_flush_tlb);
+ 
++static bool hypersparc_kmap_needs_preflush(pte_t pteval)
++{
++	unsigned long pfn = pte_pfn(pteval);
++	unsigned long flags;
++	struct page *page;
++	bool active;
++
++	if (!pfn_valid(pfn))
++		return true;
++	page = pfn_to_page(pfn);
++	if (!PageHighMem(page) || PageReserved(page))
++		return true;
++	if (folio_mapped(page_folio(page)) || test_bit(PG_arch_2, &page->flags.f))
++		return true;
++
++	spin_lock_irqsave(&hypersparc_kmap_lock, flags);
++	active = hypersparc_kmap_alias_active(pfn);
++	spin_unlock_irqrestore(&hypersparc_kmap_lock, flags);
++	return active;
++}
++
+ /*
+  * Runs on both the map and the scheduler restore path, so the tracking stays
+  * correct across a context switch without generic code having to change.
+@@ -424,7 +445,8 @@ void sparc32_kmap_local_post_map(unsigned long vaddr, pte_t pteval)
+ 	 * Nothing has touched the new mapping yet, so flushing other aliases
+ 	 * of this page here is as good as doing it before the pte was set.
+ 	 */
+-	sparc32_kmap_local_cache_flush(vaddr);
++	if (!is_hypersparc || hypersparc_kmap_needs_preflush(pteval))
++		sparc32_kmap_local_cache_flush(vaddr);
+ 	if (is_hypersparc)
+ 		hypersparc_track_kmap(vaddr, pteval);
+ 	sparc32_kmap_local_tlb_flush(vaddr);

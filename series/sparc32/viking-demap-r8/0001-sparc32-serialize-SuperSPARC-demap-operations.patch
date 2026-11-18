@@ -1,0 +1,171 @@
+From 802c61ea46f5a8d72e8e28e5acd05afd9c883774 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Mon, 17 Aug 2026 20:27:51 +0200
+Subject: [PATCH] sparc32: serialize SuperSPARC demap operations
+
+SuperSPARC requires software to guarantee that only one Demap operation
+is in progress across the system. On MBus, each processor which may
+retain a stale translation must perform its own local Demap.
+
+A lock around each local operation is not safe on sun4m. Cross-call
+callbacks run at interrupt level 15, so they can interrupt a CPU even
+while spin_lock_irqsave() protects its local Demap. If the callback then
+takes the same lock, it deadlocks against the interrupted owner.
+
+Serialize each complete shootdown at the initiating CPU instead. Invoke
+remote CPUs one at a time with lock-free callbacks, perform the
+initiator's local Demap last, and release the lock only after the entire
+operation is complete.
+
+sun4m_cross_call() waits for the target CPU to complete its callback.
+Singleton cross-calls therefore serialize the actual Demap operations,
+not merely their dispatch.
+
+sun4d already serializes Viking TLB flushes around its broadcast Demap
+operations, so this wrapper is needed only for sun4m.
+
+This is independent of MBus cache coherence. MBus Level 2 and the MXCC
+coherence protocol describe physical cache-block transactions; they do
+not make an MBus peer discard a virtual TLB entry.
+
+This follows SuperSPARC Family User's Manual sections 8.5.3 and 9.8.2;
+Sun-4M System Architecture section 7.1.4; MBus Interface Specification,
+Level 2 Overview; and MXCC Addendum section B.2, Multiprocessor Cache
+Coherence Support.
+
+Retain the accumulated mm CPU mask. mm_users == 1 does not exclude a
+concurrent kthread_use_mm() user, so narrowing the mask could omit a CPU
+from a later shootdown. This wrapper must not reintroduce that narrowing
+regardless of the merge order with the generic SPARC32 TLB fixes.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/srmmu.c | 84 +++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 84 insertions(+)
+
+diff --git a/arch/sparc/mm/srmmu.c b/arch/sparc/mm/srmmu.c
+index e5c136c8ecd7..01e1b281dcbe 100644
+--- a/arch/sparc/mm/srmmu.c
++++ b/arch/sparc/mm/srmmu.c
+@@ -1623,6 +1623,33 @@ static void smp_flush_tlb_all(void)
+ 	local_ops->tlb_all();
+ }
+ 
++/* Serialize complete sun4m Viking shootdowns; remote callbacks must not lock. */
++static DEFINE_SPINLOCK(viking_tlb_lock);
++
++static void smp_viking_flush_tlb_xcall(void *func, unsigned long arg1,
++				       unsigned long arg2,
++				       unsigned long arg3)
++{
++	int cpu;
++
++	for_each_online_cpu(cpu) {
++		if (cpu == smp_processor_id())
++			continue;
++		sparc32_ipi_ops->cross_call(func, *cpumask_of(cpu),
++					    arg1, arg2, arg3, 0);
++	}
++}
++
++static void smp_viking_flush_tlb_all(void)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&viking_tlb_lock, flags);
++	smp_viking_flush_tlb_xcall(local_ops->tlb_all, 0, 0, 0);
++	local_ops->tlb_all();
++	spin_unlock_irqrestore(&viking_tlb_lock, flags);
++}
++
+ static bool any_other_mm_cpus(struct mm_struct *mm)
+ {
+ 	return cpumask_any_but(mm_cpumask(mm), smp_processor_id()) < nr_cpu_ids;
+@@ -1646,6 +1673,21 @@ static void smp_flush_tlb_mm(struct mm_struct *mm)
+ 	}
+ }
+ 
++static void smp_viking_flush_tlb_mm(struct mm_struct *mm)
++{
++	unsigned long flags;
++
++	if (mm->context != NO_CONTEXT) {
++		spin_lock_irqsave(&viking_tlb_lock, flags);
++		if (any_other_mm_cpus(mm)) {
++			smp_viking_flush_tlb_xcall(local_ops->tlb_mm,
++						   (unsigned long)mm, 0, 0);
++		}
++		local_ops->tlb_mm(mm);
++		spin_unlock_irqrestore(&viking_tlb_lock, flags);
++	}
++}
++
+ static void smp_flush_cache_range(struct vm_area_struct *vma,
+ 				  unsigned long start,
+ 				  unsigned long end)
+@@ -1674,6 +1716,24 @@ static void smp_flush_tlb_range(struct vm_area_struct *vma,
+ 	}
+ }
+ 
++static void smp_viking_flush_tlb_range(struct vm_area_struct *vma,
++				       unsigned long start,
++				       unsigned long end)
++{
++	struct mm_struct *mm = vma->vm_mm;
++	unsigned long flags;
++
++	if (mm->context != NO_CONTEXT) {
++		spin_lock_irqsave(&viking_tlb_lock, flags);
++		if (any_other_mm_cpus(mm))
++			smp_viking_flush_tlb_xcall(local_ops->tlb_range,
++						   (unsigned long)vma,
++						   start, end);
++		local_ops->tlb_range(vma, start, end);
++		spin_unlock_irqrestore(&viking_tlb_lock, flags);
++	}
++}
++
+ static void smp_flush_cache_page(struct vm_area_struct *vma, unsigned long page)
+ {
+ 	struct mm_struct *mm = vma->vm_mm;
+@@ -1696,6 +1756,23 @@ static void smp_flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
+ 	}
+ }
+ 
++static void smp_viking_flush_tlb_page(struct vm_area_struct *vma,
++				      unsigned long page)
++{
++	struct mm_struct *mm = vma->vm_mm;
++	unsigned long flags;
++
++	if (mm->context != NO_CONTEXT) {
++		spin_lock_irqsave(&viking_tlb_lock, flags);
++		if (any_other_mm_cpus(mm))
++			smp_viking_flush_tlb_xcall(local_ops->tlb_page,
++						   (unsigned long)vma,
++						   page, 0);
++		local_ops->tlb_page(vma, page);
++		spin_unlock_irqrestore(&viking_tlb_lock, flags);
++	}
++}
++
+ static void smp_flush_page_to_ram(unsigned long page)
+ {
+ 	/* Current theory is that those who call this are the one's
+@@ -1750,6 +1827,13 @@ void __init load_mmu(void)
+ 	}
+ 
+ 	if (poke_srmmu == poke_viking) {
++		if (sparc_cpu_model == sun4m) {
++			smp_cachetlb_ops.tlb_all = smp_viking_flush_tlb_all;
++			smp_cachetlb_ops.tlb_mm = smp_viking_flush_tlb_mm;
++			smp_cachetlb_ops.tlb_range = smp_viking_flush_tlb_range;
++			smp_cachetlb_ops.tlb_page = smp_viking_flush_tlb_page;
++		}
++
+ 		/* Avoid unnecessary cross calls. */
+ 		smp_cachetlb_ops.cache_all = local_ops->cache_all;
+ 		smp_cachetlb_ops.cache_mm = local_ops->cache_mm;
+-- 
+2.43.0
+

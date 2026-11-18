@@ -1,0 +1,41 @@
+From e12c0aa7b4a7fece80b84c21ab4d11121eee8e17 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:59 +0200
+Subject: [PATCH 0/9] sparc32: repair cache hooks, mappings and TLB tracking
+
+I am submitting nine SPARC32 fixes for cache geometry, user-page copying,
+folio and anonymous-page maintenance, kmap PTEs and CPU-mask tracking.
+This series applies independently of the bit-lock fix.
+
+I completed a native GDB 18.1 build on a dual-CPU HyperSPARC RT626
+SPARCstation 20 with 512 MB RAM and a native SPARC32 SMP kernel containing
+the combined fixes and optimizations, plus separate platform prerequisites.
+I observed no core dumps, livelock or new kernel messages during the run.
+This validates the combined integration, not each patch in isolation.
+Individual patches retain their targeted test details.
+
+Magnus Lindholm (9):
+  sparc32: inspect every PROM CPU cache geometry
+  sparc32: flush the source user alias in copy_user_highpage()
+  sparc32: do not flush a NULL address in flush_dcache_folio
+  sparc32: flush the cache when a kmap_local mapping is installed
+  sparc32: preset modified and referenced bits in kmap PTEs
+  sparc32: colour-align private file mappings
+  sparc32: implement flush_anon_page
+  sparc32: retain mm_cpumask across TLB shootdowns
+  sparc32: enroll and order CPUs before switching address spaces
+
+ arch/sparc/include/asm/cacheflush_32.h |  6 +++
+ arch/sparc/include/asm/highmem.h       | 21 +++++++---
+ arch/sparc/include/asm/page_32.h       |  6 +++
+ arch/sparc/include/asm/switch_to_32.h  |  1 -
+ arch/sparc/kernel/sys_sparc_32.c       | 17 +++++++-
+ arch/sparc/mm/init_32.c                | 44 ++++++++++++++++++++
+ arch/sparc/mm/srmmu.c                  | 56 ++++++++++++++++++++------
+ 7 files changed, 130 insertions(+), 21 deletions(-)
+
+
+base-commit: cee9395acd8043be0644b25c34bfa86623f2b935
+-- 
+2.43.0
+

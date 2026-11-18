@@ -1,0 +1,270 @@
+From 2bec2ffa2809c07819f4f2a0451ddd3735170a19 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Thu, 27 Aug 2026 19:58:26 +0200
+Subject: [PATCH 10/66] sparc32: detect the compare-and-swap instruction at
+ boot
+
+Some 32-bit sparc implementations provide the v9 compare-and-swap as an
+extension - LEON3 does, plain v8 does not - and whether it is present
+decides how a user word can be made atomic.
+
+That decision has to match the one userspace already made, because both
+follow from the same hardware.  A binary compiled for such a cpu uses
+casa inline; gcc emits it for -mcpu=leon3 and calls a helper for
+-mcpu=v8 and the sun4m cpus.  So a kernel that serialises on a lock of
+its own excludes nothing against a binary using casa, while a kernel
+using casa excludes correctly against both - the second binary reaches
+the same word through the kernel.  Deciding on the hardware keeps the
+two in step whichever way the userland was built.
+
+Detect it by executing one compare-and-swap that must succeed and
+checking that it did.  A cpu without the instruction raises
+illegal_instruction, so do_illegal_instruction() now looks for a fixup
+before dying, the way the data fault path already does; the same
+exception table entry also covers a faulting address later.
+
+The instruction cannot be written in inline asm.  The kernel assembles
+sparc32 with -Wa,-Av8, which rejects casa outright, and sparc gas has no
+.arch pseudo-op to override it locally.  It therefore lives in its own
+object, assembled -Wa,-Aleon: that adds the one instruction without
+letting the rest of v9 in, so nothing else in the object can turn into
+something a sun4m cpu cannot execute.  It affects only the assembler and
+not what the compiler emits.  That also means every compare-and-swap is
+a call rather than an inline instruction.
+
+The helper is laid out for the LEON atomic errata rather than detecting
+them.  GRLIB-TN-0011 wants the atomic 16-byte aligned, or an instruction
+TLB miss can release the bus lock before the store completes;
+GRLIB-TN-0010 forbids reaching one directly from a load or a control
+transfer, and a call with a load in its delay slot does both.  A nop at
+the entry and nop padding to the boundary cover them for a few cycles,
+which is cheaper than deciding at runtime.  The padding is spelled
+.balignl because a plain .align lets the assembler skip the gap with a
+branch, and that branch lands on the atomic - exactly the sequence
+TN-0010 asks us to avoid.
+
+The probe runs once, on the boot cpu, so an SMP machine whose cpus
+disagree about the instruction is not supported.  None is known.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/cas_32.h   | 10 ++++++
+ arch/sparc/include/asm/cpu_type.h | 15 +++++++++
+ arch/sparc/kernel/cpu.c           | 26 +++++++++++++++
+ arch/sparc/kernel/traps_32.c      | 16 ++++++++-
+ arch/sparc/lib/Makefile           |  5 +++
+ arch/sparc/lib/casa_32.S          | 55 +++++++++++++++++++++++++++++++
+ 6 files changed, 126 insertions(+), 1 deletion(-)
+ create mode 100644 arch/sparc/include/asm/cas_32.h
+ create mode 100644 arch/sparc/lib/casa_32.S
+
+diff --git a/arch/sparc/include/asm/cas_32.h b/arch/sparc/include/asm/cas_32.h
+new file mode 100644
+index 000000000000..3658ff71fa70
+--- /dev/null
++++ b/arch/sparc/include/asm/cas_32.h
+@@ -0,0 +1,10 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _SPARC_CAS_32_H
++#define _SPARC_CAS_32_H
++
++#include <linux/types.h>
++
++/* Returns 0 and stores the value found in *prev, or -EFAULT. */
++int __sparc32_casa(u32 *addr, u32 oldval, u32 newval, u32 *prev);
++
++#endif /* _SPARC_CAS_32_H */
+diff --git a/arch/sparc/include/asm/cpu_type.h b/arch/sparc/include/asm/cpu_type.h
+index 2b59799859d1..3acdd327de6c 100644
+--- a/arch/sparc/include/asm/cpu_type.h
++++ b/arch/sparc/include/asm/cpu_type.h
+@@ -2,6 +2,8 @@
+ #ifndef __ASM_CPU_TYPE_H
+ #define __ASM_CPU_TYPE_H
+ 
++#include <linux/types.h>
++
+ /*
+  * Sparc (general) CPU types
+  */
+@@ -18,6 +20,19 @@ enum sparc_cpu {
+ #ifdef CONFIG_SPARC32
+ extern enum sparc_cpu sparc_cpu_model;
+ 
++/*
++ * Some 32-bit sparc implementations provide the v9 compare-and-swap
++ * instruction as an extension; LEON3 does, plain v8 does not.  Whether it is
++ * present decides how a user word can be made atomic, and the kernel has to
++ * make the same choice userspace made: a binary built for such a cpu uses
++ * casa inline, one built for v8 cannot and asks the kernel instead.  Both
++ * follow from the hardware, so deciding on the hardware keeps them in step.
++ *
++ * Probed once on the boot cpu: an SMP machine whose cpus disagree about this
++ * is not something the port supports.
++ */
++extern bool sparc32_has_casa;
++
+ #define SUN4M_NCPUS            4              /* Architectural limit of sun4m. */
+ 
+ #else
+diff --git a/arch/sparc/kernel/cpu.c b/arch/sparc/kernel/cpu.c
+index 79cd6ccfeac0..df13c5b930b1 100644
+--- a/arch/sparc/kernel/cpu.c
++++ b/arch/sparc/kernel/cpu.c
+@@ -21,6 +21,9 @@
+ #include <asm/psr.h>
+ #include <asm/mbus.h>
+ #include <asm/cpudata.h>
++#ifdef CONFIG_SPARC32
++#include <asm/cas_32.h>
++#endif
+ 
+ #include "kernel.h"
+ #include "entry.h"
+@@ -437,11 +440,34 @@ const struct seq_operations cpuinfo_op = {
+ };
+ 
+ #ifdef CONFIG_SPARC32
++bool sparc32_has_casa __ro_after_init;
++
++/*
++ * Ask __sparc32_casa() to perform one compare-and-swap that must succeed, and
++ * check that it did.  A cpu without the instruction traps, which the exception
++ * table entry there reports as -EFAULT; one that has it swaps the word.
++ */
++static void __init casa_probe(void)
++{
++	static const u32 oldval = 0x600df00d;
++	static const u32 newval = 0x0badcafe;
++	u32 word = oldval;
++	u32 prev = 0;
++
++	if (!__sparc32_casa(&word, oldval, newval, &prev))
++		sparc32_has_casa = prev == oldval && word == newval;
++
++	pr_info("sparc32: compare-and-swap instruction %s\n",
++		sparc32_has_casa ? "present" : "not implemented");
++}
++
+ static int __init cpu_type_probe(void)
+ {
+ 	int psr_impl, psr_vers, fpu_vers;
+ 	int psr;
+ 
++	casa_probe();
++
+ 	psr_impl = ((get_psr() >> PSR_IMPL_SHIFT) & PSR_IMPL_SHIFTED_MASK);
+ 	psr_vers = ((get_psr() >> PSR_VERS_SHIFT) & PSR_VERS_SHIFTED_MASK);
+ 
+diff --git a/arch/sparc/kernel/traps_32.c b/arch/sparc/kernel/traps_32.c
+index bb149f6cc34b..85ae2fc143ec 100644
+--- a/arch/sparc/kernel/traps_32.c
++++ b/arch/sparc/kernel/traps_32.c
+@@ -20,6 +20,7 @@
+ #include <linux/kdebug.h>
+ #include <linux/export.h>
+ #include <linux/pgtable.h>
++#include <linux/extable.h>
+ 
+ #include <asm/delay.h>
+ #include <asm/ptrace.h>
+@@ -108,8 +109,21 @@ void do_hw_interrupt(struct pt_regs *regs, unsigned long type)
+ void do_illegal_instruction(struct pt_regs *regs, unsigned long pc, unsigned long npc,
+ 			    unsigned long psr)
+ {
+-	if(psr & PSR_PS)
++	if (psr & PSR_PS) {
++		const struct exception_table_entry *entry;
++
++		/*
++		 * An instruction this cpu does not implement can be probed
++		 * for deliberately, so honour a fixup before dying.
++		 */
++		entry = search_exception_tables(pc);
++		if (entry) {
++			regs->pc = entry->fixup;
++			regs->npc = regs->pc + 4;
++			return;
++		}
+ 		die_if_kernel("Kernel illegal instruction", regs);
++	}
+ #ifdef TRAP_DEBUG
+ 	printk("Ill instr. at pc=%08lx instruction is %08lx\n",
+ 	       regs->pc, *(unsigned long *)regs->pc);
+diff --git a/arch/sparc/lib/Makefile b/arch/sparc/lib/Makefile
+index dd10cdd6f062..007d8e510ee8 100644
+--- a/arch/sparc/lib/Makefile
++++ b/arch/sparc/lib/Makefile
+@@ -12,6 +12,11 @@ lib-$(CONFIG_SPARC32) += blockops.o
+ lib-y                 += memscan_$(BITS).o memcmp.o strncmp_$(BITS).o
+ lib-$(CONFIG_SPARC32) += divdi3.o udivdi3.o
+ lib-$(CONFIG_SPARC32) += copy_user.o locks.o
++lib-$(CONFIG_SPARC32) += casa_32.o
++
++# casa is not in v8, which the rest of sparc32 is assembled as.  -Aleon rather
++# than -Av9: it adds the one instruction without letting anything else v9 in.
++AFLAGS_casa_32.o += -Wa,-Aleon
+ lib-$(CONFIG_SPARC64) += atomic_64.o
+ lib-$(CONFIG_SPARC32) += lshrdi3.o ashldi3.o
+ lib-$(CONFIG_SPARC32) += muldi3.o bitext.o
+diff --git a/arch/sparc/lib/casa_32.S b/arch/sparc/lib/casa_32.S
+new file mode 100644
+index 000000000000..b17260e2a186
+--- /dev/null
++++ b/arch/sparc/lib/casa_32.S
+@@ -0,0 +1,55 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Compare-and-swap for the 32-bit sparc implementations that have it.
++ *
++ * The instruction cannot appear in inline asm: the kernel builds sparc32 with
++ * -Wa,-Av8 and the assembler rejects casa outright, so it lives here in an
++ * object assembled -Wa,-Aleon instead.  A cpu without the instruction raises
++ * illegal_instruction, which the exception table entry below turns into
++ * -EFAULT, so the same entry serves both the probe and a faulting address.
++ *
++ * The helper is laid out for the LEON atomic errata: GRLIB-TN-0011 wants the
++ * atomic 16-byte aligned, or an instruction TLB miss can release the bus lock
++ * before the store, and GRLIB-TN-0010 forbids reaching one directly from a
++ * load or a control transfer - which a call with a load in its delay slot
++ * does.  A nop at the entry and nop padding up to the boundary cover both, for
++ * less than runtime detection would cost.
++ *
++ * The padding has to be spelled .balignl so the fill is nops whatever the
++ * assembler is aimed at.  A plain .align is nops under -Aleon but a branch over
++ * the gap under -Av9, and that branch lands on the atomic - the very sequence
++ * TN-0010 asks us to avoid.
++ */
++
++#include <linux/linkage.h>
++#include <asm/errno.h>
++
++	.text
++	.align	4
++
++/*
++ * int __sparc32_casa(u32 *addr, u32 oldval, u32 newval, u32 *prev)
++ *
++ * Stores the value found at addr in *prev and returns 0, or returns -EFAULT
++ * if the access faulted or the cpu does not implement the instruction.
++ * ASI 0x0b is supervisor data.
++ */
++ENTRY(__sparc32_casa)
++	nop
++	.balignl 16, 0x01000000
++1:	casa	[%o0] 0x0b, %o1, %o2
++	st	%o2, [%o3]
++	retl
++	 clr	%o0
++ENDPROC(__sparc32_casa)
++
++	.section .fixup,#alloc,#execinstr
++	.align	4
++2:	retl
++	 mov	-EFAULT, %o0
++	.previous
++
++	.section __ex_table,#alloc
++	.align	4
++	.word	1b, 2b
++	.previous

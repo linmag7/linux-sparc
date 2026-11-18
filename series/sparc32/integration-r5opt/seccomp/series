@@ -1,0 +1,5 @@
+0021-sparc32-Split-common-syscall_trace-to-syscall_trace_.patch
+0022-sparc64-add-seccomp-filter-support.patch
+0023-selftests-seccomp-add-sparc64-support.patch
+0024-sparc32-add-seccomp-filter-support.patch
+0025-selftests-seccomp-add-sparc32-support.patch

@@ -1,0 +1,60 @@
+From 0b05fef772c85cc924c7d2f6beebb2d7fd8e873b Mon Sep 17 00:00:00 2001
+From: Ludwig Rydberg <ludwig.rydberg@gaisler.com>
+Date: Wed, 14 Oct 2026 15:34:31 +0200
+Subject: [PATCH 20/66] sparc32: Fix pgd lookup in vmalloc fault handling
+
+Check and synchronize the level-1 entry with the PUD accessors instead
+of the PGD ones. SPARC32 folds the P4D and PUD levels into the PGD and
+pgd_present() always returns 1. The PGD accessors therefore skipped the
+synchronization and the handler dereferenced a PMD pointer derived from
+the missing entry (seen in this kernel panic running v5.10.194):
+
+  Unable to handle kernel paging request at virtual address ff780000
+  PC: <do_sparc_fault+0x20c/0x3c8>
+  Caller[f0007ed4]: srmmu_fault+0x60/0x70
+
+  do_sparc_fault+0x20c/0x3c8:
+    pmd_present at arch/sparc/include/asm/pgtable_32.h:193
+    (inlined by) do_sparc_fault at arch/sparc/mm/fault_32.c:358
+
+Fixes: 7235db268a27 ("sparc32: use pgtable-nopud instead of 4level-fixup")
+Signed-off-by: Ludwig Rydberg <ludwig.rydberg@gaisler.com>
+Message-ID: <20261014133431.8003-1-ludwig.rydberg@gaisler.com>
+---
+ arch/sparc/mm/fault_32.c | 16 ++++++++--------
+ 1 file changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/arch/sparc/mm/fault_32.c b/arch/sparc/mm/fault_32.c
+index 86a831ebd8c8..f9befdbb3e72 100644
+--- a/arch/sparc/mm/fault_32.c
++++ b/arch/sparc/mm/fault_32.c
+@@ -276,21 +276,21 @@ asmlinkage void do_sparc_fault(struct pt_regs *regs, int text_fault, int write,
+ 		pmd_t *pmd, *pmd_k;
+ 
+ 		pgd = tsk->active_mm->pgd + offset;
++		p4d = p4d_offset(pgd, address);
++		pud = pud_offset(p4d, address);
++
+ 		pgd_k = init_mm.pgd + offset;
++		p4d_k = p4d_offset(pgd_k, address);
++		pud_k = pud_offset(p4d_k, address);
+ 
+-		if (!pgd_present(*pgd)) {
+-			if (!pgd_present(*pgd_k))
++		if (!pud_present(*pud)) {
++			if (!pud_present(*pud_k))
+ 				goto bad_area_nosemaphore;
+-			pgd_val(*pgd) = pgd_val(*pgd_k);
++			pud_val(*pud) = pud_val(*pud_k);
+ 			return;
+ 		}
+ 
+-		p4d = p4d_offset(pgd, address);
+-		pud = pud_offset(p4d, address);
+ 		pmd = pmd_offset(pud, address);
+-
+-		p4d_k = p4d_offset(pgd_k, address);
+-		pud_k = pud_offset(p4d_k, address);
+ 		pmd_k = pmd_offset(pud_k, address);
+ 
+ 		if (pmd_present(*pmd) || !pmd_present(*pmd_k))

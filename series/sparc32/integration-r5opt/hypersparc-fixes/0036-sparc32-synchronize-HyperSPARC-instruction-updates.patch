@@ -1,0 +1,72 @@
+From 8d13697fe163ac570c35e99d6ace2f890c41c834 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH 36/66] sparc32: synchronize HyperSPARC instruction updates
+
+HyperSPARC FLUSH invalidates the instruction packet on the executing CPU
+only. Issue it for every modified instruction word locally and on every
+other online CPU. Callers must still serialize concurrent text changes.
+
+Keep the upstream no-op behaviour on other processors.
+
+ROSS SPARC RISC User's Guide (1993), section 3.6.4.3 and table 3-4,
+describes the local instruction-cache scope of FLUSH. A diagnostic module
+on dual RT625/RT626 hardware reproduced stale execution before this fix.
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/cacheflush_32.h |  2 +-
+ arch/sparc/mm/srmmu.c                  | 26 ++++++++++++++++++++++++++
+ 2 files changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/arch/sparc/include/asm/cacheflush_32.h b/arch/sparc/include/asm/cacheflush_32.h
+index a65ee310e860..243050fa7073 100644
+--- a/arch/sparc/include/asm/cacheflush_32.h
++++ b/arch/sparc/include/asm/cacheflush_32.h
+@@ -15,7 +15,7 @@
+ 	sparc32_cachetlb_ops->cache_range(vma, start, end)
+ #define flush_cache_page(vma,addr,pfn) \
+ 	sparc32_cachetlb_ops->cache_page(vma, addr)
+-#define flush_icache_range(start, end)		do { } while (0)
++void flush_icache_range(unsigned long start, unsigned long end);
+ 
+ #define copy_to_user_page(vma, page, vaddr, dst, src, len) \
+ 	do {							\
+diff --git a/arch/sparc/mm/srmmu.c b/arch/sparc/mm/srmmu.c
+index 2b1cec80bde0..98ade85dbc21 100644
+--- a/arch/sparc/mm/srmmu.c
++++ b/arch/sparc/mm/srmmu.c
+@@ -1733,6 +1733,32 @@ static struct sparc32_cachetlb_ops smp_cachetlb_ops __ro_after_init = {
+ };
+ #endif
+ 
++static void local_hypersparc_flush_icache_range(unsigned long start,
++					      unsigned long end)
++{
++	start &= ~3UL;
++	for (;;) {
++		__asm__ __volatile__("flush %0" : : "r" (start) : "memory");
++		if (end - start <= 4)
++			break;
++		start += 4;
++	}
++}
++
++void flush_icache_range(unsigned long start, unsigned long end)
++{
++	if (start >= end || !is_hypersparc)
++		return;
++
++	preempt_disable();
++	local_hypersparc_flush_icache_range(start, end);
++#ifdef CONFIG_SMP
++	xc2(local_hypersparc_flush_icache_range, start, end);
++#endif
++	preempt_enable();
++}
++EXPORT_SYMBOL(flush_icache_range);
++
+ /* Load up routines and constants for sun4m and sun4d mmu */
+ void __init load_mmu(void)
+ {

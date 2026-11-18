@@ -1,0 +1,142 @@
+From 52e07827a4e2317d175866ea3985fef5b755825c Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sun, 18 Oct 2026 19:28:10 +0200
+Subject: [PATCH 55/66] sparc32: experiment with colour-preserving mmap and ELF
+ randomization
+
+Adapt Stian Halseth's SPARC64 ASLR approach to native SPARC32 while
+retaining the complete SS-20 foundation and E/F cache handling.
+
+Give native SPARC32 its own bottom-up mmap layout hook, start unhinted
+mappings at mm->mmap_base, move PIE to 1 GiB, and supply the generic ELF
+loader's PIE and brk randomization hooks. Keep mmap hints and existing
+file-offset colour alignment unchanged. Bound brk randomization below
+the user-address limit.
+
+This is an experimental hardware-test patch, not a release-ready ASLR
+claim. Keep the PIE bias SHMLBA-aligned to avoid introducing new file
+page colours through fixed ELF mappings. On this HyperSPARC's 512 KiB
+VAC, the 8 MiB PIE window has only 16 possible offsets (four bits),
+before any larger ELF p_align reduces it further. This does not fix
+pre-existing aliases within ELF segments or arbitrary MAP_FIXED users.
+Anonymous mmap offsets remain page-granular; file mappings still use
+the existing colour mask. ASLR disabled is deterministic, but the PIE
+base intentionally moves from 0x50000000 to 0x40000000 even when disabled.
+CONFIG_COMPAT_BRK is preserved: the default ASLR mode remains 1, so mode
+2 must be tested explicitly for independent brk randomization.
+
+Based on Stian Halseth's v2 series, Message-ID:
+20261018122734.2594904-1-stian@itx.no
+---
+ arch/sparc/Kconfig                    |  1 +
+ arch/sparc/include/asm/elf_32.h       |  2 +-
+ arch/sparc/include/asm/processor_32.h |  2 ++
+ arch/sparc/kernel/sys_sparc_32.c      | 43 ++++++++++++++++++++++++++-
+ 4 files changed, 46 insertions(+), 2 deletions(-)
+
+diff --git a/arch/sparc/Kconfig b/arch/sparc/Kconfig
+index 08e4477d2382..4d60a0760462 100644
+--- a/arch/sparc/Kconfig
++++ b/arch/sparc/Kconfig
+@@ -53,6 +53,7 @@ config SPARC
+ 
+ config SPARC32
+ 	def_bool !64BIT
++	select ARCH_HAS_ELF_RANDOMIZE
+ 	select ARCH_32BIT_OFF_T
+ 	select ARCH_HAS_CPU_FINALIZE_INIT if !SMP
+ 	select ARCH_HAS_SYNC_DMA_FOR_CPU
+diff --git a/arch/sparc/include/asm/elf_32.h b/arch/sparc/include/asm/elf_32.h
+index 7b0dca3f5160..2b5c6a002023 100644
+--- a/arch/sparc/include/asm/elf_32.h
++++ b/arch/sparc/include/asm/elf_32.h
+@@ -120,7 +120,7 @@ typedef struct {
+    the loader.  We need to make sure that it is out of the way of the program
+    that it will "exec", and that there is sufficient room for the brk.  */
+ 
+-#define ELF_ET_DYN_BASE         (TASK_UNMAPPED_BASE)
++#define ELF_ET_DYN_BASE         0x40000000UL
+ 
+ /* This yields a mask that user programs can use to figure out what
+    instruction set this cpu supports.  This can NOT be done in userspace
+diff --git a/arch/sparc/include/asm/processor_32.h b/arch/sparc/include/asm/processor_32.h
+index a074d313f4f8..a026272a3168 100644
+--- a/arch/sparc/include/asm/processor_32.h
++++ b/arch/sparc/include/asm/processor_32.h
+@@ -17,6 +17,8 @@
+  * That one page is used to protect kernel from intruders, so that
+  * we can make our access_ok test faster
+  */
++#define HAVE_ARCH_PICK_MMAP_LAYOUT
++
+ #define TASK_SIZE	PAGE_OFFSET
+ #ifdef __KERNEL__
+ #define STACK_TOP	(PAGE_OFFSET - PAGE_SIZE)
+diff --git a/arch/sparc/kernel/sys_sparc_32.c b/arch/sparc/kernel/sys_sparc_32.c
+index e1530cee15b2..f8ececf4f8c1 100644
+--- a/arch/sparc/kernel/sys_sparc_32.c
++++ b/arch/sparc/kernel/sys_sparc_32.c
+@@ -24,6 +24,9 @@
+ #include <linux/smp.h>
+ #include <linux/ipc.h>
+ #include <linux/hugetlb.h>
++#include <linux/random.h>
++#include <linux/elf-randomize.h>
++#include <linux/sizes.h>
+ 
+ #include <linux/uaccess.h>
+ #include <asm/unistd.h>
+@@ -75,7 +78,7 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsi
+ 	if (len > TASK_SIZE - PAGE_SIZE)
+ 		return -ENOMEM;
+ 	if (!addr)
+-		addr = TASK_UNMAPPED_BASE;
++		addr = current->mm->mmap_base;
+ 
+ 	info.length = len;
+ 	info.low_limit = addr;
+@@ -90,6 +93,44 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsi
+ 	return vm_unmapped_area(&info);
+ }
+ 
++/* Keep the existing bottom-up layout, with an 8 MiB randomized floor. */
++static unsigned long sparc32_mmap_rnd(void)
++{
++	if (!(current->flags & PF_RANDOMIZE))
++		return 0;
++
++	return (get_random_long() & (SZ_8M / PAGE_SIZE - 1)) << PAGE_SHIFT;
++}
++
++unsigned long arch_mmap_rnd(void)
++{
++	/*
++	 * The ELF loader places PIE segments with fixed private mappings,
++	 * bypassing the colour selection in arch_get_unmapped_area(). Keep
++	 * each file page at its existing colour across executions. This
++	 * deliberately reduces PIE entropy on large virtually indexed
++	 * caches: an 8 MiB range has 16 positions with a 512 KiB SHMLBA.
++	 */
++	return sparc32_mmap_rnd() & ~(SHMLBA - 1);
++}
++
++unsigned long arch_randomize_brk(struct mm_struct *mm)
++{
++	unsigned long limit = TASK_SIZE - PAGE_SIZE;
++
++	if (mm->brk >= limit)
++		return mm->brk;
++
++	return randomize_page(mm->brk, min(SZ_32M, limit - mm->brk));
++}
++
++void arch_pick_mmap_layout(struct mm_struct *mm, const struct rlimit *rlim_stack)
++{
++	/* File mappings still receive their pgoff-based colour alignment. */
++	mm->mmap_base = TASK_UNMAPPED_BASE + sparc32_mmap_rnd();
++	mm_flags_clear(MMF_TOPDOWN, mm);
++}
++
+ /*
+  * sys_pipe() is the normal C calling standard for creating
+  * a pipe. It's not the way unix traditionally does this, though.

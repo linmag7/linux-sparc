@@ -1,0 +1,40 @@
+{
+  "passed": true,
+  "scope": "One native GDB 18.1 emerge with combined fixes, all ten optimizations and separate full-stack prerequisites; not isolated patch testing, GDB testsuite, performance comparison or SuperSPARC hardware validation.",
+  "result": {
+    "user_seconds": 200338.591251,
+    "system_seconds": 29582.716748,
+    "returncode": 0,
+    "start": 1792850657.6348505,
+    "end": 1792968698.335339,
+    "boot_id": "a11e5d2c-ec3b-4e93-b835-b2ea3d7cc961",
+    "release": "7.3.0-rc1-ef-full-r5opt+",
+    "tainted": "0"
+  },
+  "elapsed_seconds": 118040.70048856735,
+  "completed_utc": "2026-10-25T22:51:38.335339+00:00",
+  "remote_local_sha256_match": {
+    "cores.after.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+    "cores.before.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+    "dmesg.after": "22efcfa54a0a3824b54d43a84c4673e03547849d77e229ee0ef98cdc2929398d",
+    "dmesg.before": "22efcfa54a0a3824b54d43a84c4673e03547849d77e229ee0ef98cdc2929398d",
+    "emerge.log": "87e55e3123cc7aa87148d5bff9c1b1de481bc09d19b7526b57ecc801c3c40429",
+    "launch-attempt.json": "3cb68e8bd9fbd79a454b9a0aaf9c888cc41162a35f9164b5c1cbf091992aeb9f",
+    "launch.json": "4cad396c2a5ad1bcf7cd3879d74f6362f8079b02d12c60e7f7573d08de203ea0",
+    "result.json": "d7406687e384badf01b8bbc03e9e1bb91d8dcb2b0748f5ffc785ab690d265145",
+    "runner.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "live_dmesg_sha256": "22efcfa54a0a3824b54d43a84c4673e03547849d77e229ee0ef98cdc2929398d",
+  "whole_kernel_log_reviewed": true,
+  "kernel_log_before_after_live_identical": true,
+  "owned_process_group_1652_empty": true,
+  "live_cores_empty": true,
+  "same_boot_release_taint_zero": true,
+  "emerge_completion": "Completed (1 of 1) dev-debug/gdb-18.1::gentoo",
+  "nonfatal_emerge_notes": [
+    "Portage unshare EINVAL for sandbox features",
+    "No configured kernel sources available for PROC_MEM_NO_FORCE check",
+    "Unread Gentoo news"
+  ],
+  "optimization_submission": "HOLD"
+}

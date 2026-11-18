@@ -1,0 +1,78 @@
+From 6a97e112d1538529765e298c7c0b590a68d9268a Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Thu, 27 Aug 2026 19:58:27 +0200
+Subject: [PATCH 13/66] sparc32: advertise the compare-and-swap trap in
+ AT_HWCAP
+
+A process that wants the kernel to perform a compare-and-swap has no way
+to find out whether this kernel will do it.  Issuing the trap to find out
+is not an option: on a kernel without it the trap is a bad trap and the
+process dies.
+
+This matters because the caller cannot decide from its own build either.
+A binary built for pre-v9 has no compare-and-swap instruction and must ask
+the kernel, but it may well be running on a kernel that predates the trap,
+or on sparc64 in compat mode where the trap does not exist at all and a
+32-bit process reads its hwcap word from elf_64.h.  In both cases it has
+to do something else - whatever it can manage by itself, or report the
+operation unsupported.  Note that a private lock is not a general answer:
+it cannot make a word atomic against another process, which is the reason
+for the trap in the first place.
+
+Guessing is worse than dying, too.  On sparc64 ta 0x11 is not an illegal
+instruction but the old 64-bit system call trap, so a process that issued
+it there would make a wild syscall rather than take a signal.
+
+Advertise it in AT_HWCAP so the question can be asked before it is too
+late.  Bit 0x10000000 is unused on sparc32 and on sparc64, so it reads as
+clear in exactly the cases where the trap is absent.  Reserve the same bit
+in elf_64.h with a comment, so it is not handed to something else later
+and mistaken for this by a 32-bit process running there.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/elf_32.h | 10 +++++++++-
+ arch/sparc/include/asm/elf_64.h |  2 ++
+ 2 files changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/arch/sparc/include/asm/elf_32.h b/arch/sparc/include/asm/elf_32.h
+index 37a6016c9ccd..7b0dca3f5160 100644
+--- a/arch/sparc/include/asm/elf_32.h
++++ b/arch/sparc/include/asm/elf_32.h
+@@ -64,6 +64,13 @@
+ #define HWCAP_SPARC_MULDIV      8
+ #define HWCAP_SPARC_V9		16
+ #define HWCAP_SPARC_ULTRA3	32
++/* The kernel performs a compare-and-swap on request; see
++   Documentation/arch/sparc/cas-trap.rst.  A caller that finds the bit clear
++   must not issue the trap - on sparc64, where a 32-bit process gets this word
++   from elf_64.h, that instruction is the old 64-bit system call - and has to
++   fall back to whatever it can do itself, or report the operation
++   unsupported.  */
++#define HWCAP_SPARC_CASTRAP	0x10000000
+ 
+ #define CORE_DUMP_USE_REGSET
+ 
+@@ -121,7 +128,8 @@ typedef struct {
+ 
+ /* Most sun4m's have them all.  */
+ #define ELF_HWCAP	(HWCAP_SPARC_FLUSH | HWCAP_SPARC_STBAR | \
+-			 HWCAP_SPARC_SWAP | HWCAP_SPARC_MULDIV)
++			 HWCAP_SPARC_SWAP | HWCAP_SPARC_MULDIV | \
++			 HWCAP_SPARC_CASTRAP)
+ 
+ /* This yields a string that ld.so will use to load implementation
+    specific libraries for optimization.  This is more specific in
+diff --git a/arch/sparc/include/asm/elf_64.h b/arch/sparc/include/asm/elf_64.h
+index 694ed081cf8d..950521c92194 100644
+--- a/arch/sparc/include/asm/elf_64.h
++++ b/arch/sparc/include/asm/elf_64.h
+@@ -98,6 +98,8 @@
+  */
+ #define HWCAP_SPARC_CRYPTO	0x04000000 /* CRYPTO insns available */
+ #define HWCAP_SPARC_ADI		0x08000000 /* ADI available */
++/* 0x10000000 is HWCAP_SPARC_CASTRAP on sparc32 and must stay clear here: a
++   32-bit process reads this word too, and there is no such trap on sparc64.  */
+ 
+ #define CORE_DUMP_USE_REGSET
+ 

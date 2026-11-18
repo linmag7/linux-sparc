@@ -1,0 +1,20 @@
+Generic v2 local validation -- 9 November 2026
+
+PASS: exported nine mail patches replay from recorded base to source tree.
+PASS: old series hashes unchanged; patches 1 and 3-9 have unchanged edits.
+PASS: reviewed pre/post source flush order, mapped destination, LIFO unmap.
+PASS: SMP and UP zImage/modules builds, no compiler warnings/errors.
+PASS: external mandatory PIL/IPI gate before build; prerequisites excluded
+from outgoing series. These are not SS-20 full-stack installable kernels.
+PASS: host broad/focused tests and injected-mismatch controls.
+PASS: QEMU SS-20 SMP2/UP1 focused and compact broad tests; full logs retained.
+PASS: additional focused SMP2/UP1 runs at 128 MiB with 0K highmem.
+No guest kernel warnings/oops/stalls in the successful test logs.
+The initial oversized-harness QEMU early-boot failures are preserved, not
+counted as successful validation; see tests/README.txt.
+
+No fresh physical HyperSPARC or SuperSPARC testing. No claim of a hardware
+negative control, physical lowmem/branch coverage, or performance gain.
+No SS-20 contact, installation, reboot, build restart or test. Optimizations
+remain held. Source uses exact old local for-next a9e88d617a25 (7.3.0-rc1),
+not a claimed v7.4-rc1 base. The donor's unfinished merge was untouched.

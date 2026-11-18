@@ -1,0 +1,150 @@
+From b154fbe424d34fbc33e580eafac6d50b7d4db1d1 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Tue, 1 Sep 2026 23:45:50 +0200
+Subject: [PATCH 09/66] sparc32: drop sp_banks
+
+All memory-map consumers now use memblock. Stop duplicating the PROM map
+in sp_banks and remove the array, its type, and its fixed bank limit.
+
+Suggested-by: Sam Ravnborg <sam@ravnborg.org>
+Reviewed-by: Sam Ravnborg <sam@ravnborg.org>
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/page_32.h | 16 -----------
+ arch/sparc/mm/init_32.c          |  2 --
+ arch/sparc/prom/memory.c         | 48 ++++----------------------------
+ 3 files changed, 6 insertions(+), 60 deletions(-)
+
+diff --git a/arch/sparc/include/asm/page_32.h b/arch/sparc/include/asm/page_32.h
+index 9f0b54f70908..7429291fb118 100644
+--- a/arch/sparc/include/asm/page_32.h
++++ b/arch/sparc/include/asm/page_32.h
+@@ -28,22 +28,6 @@
+ 		(void)(vaddr);			\
+ 	} while (0)
+ 
+-/* The following structure is used to hold the physical
+- * memory configuration of the machine.  This is filled in
+- * prom_meminit() and is later used by mem_init() to set up
+- * mem_map[].  We statically allocate SPARC_PHYS_BANKS+1 of
+- * these structs, this is arbitrary.  The entry after the
+- * last valid one has num_bytes==0.
+- */
+-struct sparc_phys_banks {
+-  unsigned long base_addr;
+-  unsigned long num_bytes;
+-};
+-
+-#define SPARC_PHYS_BANKS 32
+-
+-extern struct sparc_phys_banks sp_banks[SPARC_PHYS_BANKS+1];
+-
+ /* passing structs on the Sparc slow us down tremendously... */
+ 
+ /* #define STRICT_MM_TYPECHECKS */
+diff --git a/arch/sparc/mm/init_32.c b/arch/sparc/mm/init_32.c
+index ac4462f1cf76..2f693b70dbd8 100644
+--- a/arch/sparc/mm/init_32.c
++++ b/arch/sparc/mm/init_32.c
+@@ -35,8 +35,6 @@
+ 
+ #include "mm_32.h"
+ 
+-struct sparc_phys_banks sp_banks[SPARC_PHYS_BANKS+1];
+-
+ /* Initial ramdisk setup */
+ extern unsigned int sparc_ramdisk_image;
+ extern unsigned int sparc_ramdisk_size;
+diff --git a/arch/sparc/prom/memory.c b/arch/sparc/prom/memory.c
+index 59962bc0bc82..3f65bde2bb89 100644
+--- a/arch/sparc/prom/memory.c
++++ b/arch/sparc/prom/memory.c
+@@ -8,30 +8,21 @@
+ 
+ #include <linux/kernel.h>
+ #include <linux/memblock.h>
+-#include <linux/sort.h>
+ #include <linux/init.h>
+ 
+ #include <asm/openprom.h>
+ #include <asm/oplib.h>
+ #include <asm/page.h>
+ 
+-static int __init prom_meminit_v0(void)
++static void __init prom_meminit_v0(void)
+ {
+ 	struct linux_mlist_v0 *p;
+-	int index;
+ 
+-	index = 0;
+-	for (p = *(romvec->pv_v0mem.v0_available); p; p = p->theres_more) {
+-		sp_banks[index].base_addr = (unsigned long) p->start_adr;
+-		sp_banks[index].num_bytes = p->num_bytes;
++	for (p = *(romvec->pv_v0mem.v0_available); p; p = p->theres_more)
+ 		memblock_add(p->start_adr, p->num_bytes & PAGE_MASK);
+-		index++;
+-	}
+-
+-	return index;
+ }
+ 
+-static int __init prom_meminit_v2(void)
++static void __init prom_meminit_v2(void)
+ {
+ 	struct linux_prom_registers reg[64];
+ 	phandle node;
+@@ -41,51 +32,24 @@ static int __init prom_meminit_v2(void)
+ 	size = prom_getproperty(node, "available", (char *) reg, sizeof(reg));
+ 	num_ents = size / sizeof(struct linux_prom_registers);
+ 
+-	for (i = 0; i < num_ents; i++) {
+-		sp_banks[i].base_addr = reg[i].phys_addr;
+-		sp_banks[i].num_bytes = reg[i].reg_size;
++	for (i = 0; i < num_ents; i++)
+ 		memblock_add(reg[i].phys_addr, reg[i].reg_size & PAGE_MASK);
+-	}
+-
+-	return num_ents;
+-}
+-
+-static int sp_banks_cmp(const void *a, const void *b)
+-{
+-	const struct sparc_phys_banks *x = a, *y = b;
+-
+-	if (x->base_addr > y->base_addr)
+-		return 1;
+-	if (x->base_addr < y->base_addr)
+-		return -1;
+-	return 0;
+ }
+ 
+ /* Initialize the memory lists based upon the prom version. */
+ void __init prom_meminit(void)
+ {
+-	int i, num_ents = 0;
+-
+ 	switch (prom_vers) {
+ 	case PROM_V0:
+-		num_ents = prom_meminit_v0();
++		prom_meminit_v0();
+ 		break;
+ 
+ 	case PROM_V2:
+ 	case PROM_V3:
+-		num_ents = prom_meminit_v2();
++		prom_meminit_v2();
+ 		break;
+ 
+ 	default:
+ 		break;
+ 	}
+-	sort(sp_banks, num_ents, sizeof(struct sparc_phys_banks),
+-	     sp_banks_cmp, NULL);
+-
+-	/* Sentinel.  */
+-	sp_banks[num_ents].base_addr = 0xdeadbeef;
+-	sp_banks[num_ents].num_bytes = 0;
+-
+-	for (i = 0; i < num_ents; i++)
+-		sp_banks[i].num_bytes &= PAGE_MASK;
+ }

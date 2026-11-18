@@ -1,0 +1,82 @@
+From 51e195b30aca5af8b291616e2a5ce635d140f573 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Tue, 1 Sep 2026 23:45:45 +0200
+Subject: [PATCH 04/66] sparc32: use memblock when mapping the kernel
+
+memblock already contains the available memory ranges when map_kernel()
+runs. Iterate those ranges directly and remove the sp_banks-specific
+mapping helper. memblock range ends are exclusive, so use end - start as
+the range size.
+
+Suggested-by: Sam Ravnborg <sam@ravnborg.org>
+Reviewed-by: Sam Ravnborg <sam@ravnborg.org>
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/srmmu.c | 47 +++++++++++++++++++------------------------
+ 1 file changed, 21 insertions(+), 26 deletions(-)
+
+diff --git a/arch/sparc/mm/srmmu.c b/arch/sparc/mm/srmmu.c
+index 9a74902ad181..110e2f248c60 100644
+--- a/arch/sparc/mm/srmmu.c
++++ b/arch/sparc/mm/srmmu.c
+@@ -817,39 +817,34 @@ static void __init do_large_mapping(unsigned long vaddr, unsigned long phys_base
+ 	*__nocache_fix(pgdp) = __pgd(big_pte);
+ }
+ 
+-/* Map sp_bank entry SP_ENTRY, starting at virtual address VBASE. */
+-static unsigned long __init map_spbank(unsigned long vbase, int sp_entry)
+-{
+-	unsigned long pstart = (sp_banks[sp_entry].base_addr & PGDIR_MASK);
+-	unsigned long vstart = (vbase & PGDIR_MASK);
+-	unsigned long vend = PGDIR_ALIGN(vbase + sp_banks[sp_entry].num_bytes);
+-	/* Map "low" memory only */
+-	const unsigned long min_vaddr = PAGE_OFFSET;
+-	const unsigned long max_vaddr = PAGE_OFFSET + SRMMU_MAXMEM;
+-
+-	if (vstart < min_vaddr || vstart >= max_vaddr)
+-		return vstart;
+-
+-	if (vend > max_vaddr || vend < min_vaddr)
+-		vend = max_vaddr;
+-
+-	while (vstart < vend) {
+-		do_large_mapping(vstart, pstart);
+-		vstart += PGDIR_SIZE; pstart += PGDIR_SIZE;
+-	}
+-	return vstart;
+-}
+-
+ static void __init map_kernel(void)
+ {
+-	int i;
++	phys_addr_t start, end;
++	u64 i;
+ 
+ 	if (phys_base > 0) {
+ 		do_large_mapping(PAGE_OFFSET, phys_base);
+ 	}
+ 
+-	for (i = 0; sp_banks[i].num_bytes != 0; i++) {
+-		map_spbank((unsigned long)__va(sp_banks[i].base_addr), i);
++	for_each_mem_range(i, &start, &end) {
++		unsigned long vbase = (unsigned long)__va(start);
++		unsigned long pstart = start & PGDIR_MASK;
++		unsigned long vstart = vbase & PGDIR_MASK;
++		unsigned long vend = PGDIR_ALIGN(vbase + end - start);
++		const unsigned long min_vaddr = PAGE_OFFSET;
++		const unsigned long max_vaddr = PAGE_OFFSET + SRMMU_MAXMEM;
++
++		/* Map low memory only. */
++		if (vstart < min_vaddr || vstart >= max_vaddr)
++			continue;
++		if (vend > max_vaddr || vend < min_vaddr)
++			vend = max_vaddr;
++
++		while (vstart < vend) {
++			do_large_mapping(vstart, pstart);
++			vstart += PGDIR_SIZE;
++			pstart += PGDIR_SIZE;
++		}
+ 	}
+ }
+ 

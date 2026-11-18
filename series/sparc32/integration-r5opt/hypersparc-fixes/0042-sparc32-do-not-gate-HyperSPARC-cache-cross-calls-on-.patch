@@ -1,0 +1,94 @@
+From a4e5b3fedfaf6cf83120646beddd8078ab61e387 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH 42/66] sparc32: do not gate HyperSPARC cache cross-calls on
+ mm_cpumask
+
+smp_flush_cache_mm(), smp_flush_cache_range() and smp_flush_cache_page()
+cross-call the remote cache flush only when mm_cpumask names another CPU.
+That mask tracks address-space use for TLB maintenance, not ownership of
+cache lines. The task-switch path sets bits; it does not clear them on
+switch-out. Older shootdown code narrowed the mask separately.
+
+The HyperSPARC second-level cache is virtually indexed, physically tagged
+and runs in copy-back mode. SPARC RISC User's Guide, ROSS Technology,
+Third Edition, September 1993, section 4.4.2.4 defines Exclusive Modified
+as "Only this cache module has a valid copy", that module being "the OWNER
+of the cache line, and has the responsibility to update the next level of
+memory"; Shared Modified likewise makes one module the owner. Section
+4.4.3: "Flushing under copy-back cache mode for a modified cache line
+means flushing the cache line into main memory and invalidating the cache
+tag entry", and separately, "Unlike a TLB flush operation, all cache
+flushing operations flush only one cache line at a time".
+
+A dirty line therefore reaches memory only by eviction or by a flush on
+the module that owns it, and none of that is tied to the TLB. A cpu that
+stops running an mm keeps the lines it owns for that mm's pages; they
+outlive the TLB entries and the mm_cpumask bit, and are written back when
+evicted, by which time the page may have been freed and reused.
+
+Flush on every cpu instead; smp_flush_cache_all() already cross-calls
+unconditionally. Restrict this policy change to HyperSPARC; other cache
+implementations retain their existing behavior.
+
+Measured on a SPARCstation 20, two ROSS hyperSPARC modules at 150 MHz with
+512 KB of cache each, mem=220M, on a fork-heavy shell workload. Fourteen
+pairs of 45-second windows alternated the two behaviours within one boot:
+
+  gated on mm_cpumask     70 faults in 6258 forks, 13 of 14 windows hit
+  flushed on every cpu     0 faults in 5798 forks,  0 of 14 windows hit
+
+Counting windows rather than faults, since faults arrive in bursts, that
+is p = 3.7e-7. Fork throughput cost 7.1%, against 46% for flushing the
+whole cache on every copy-on-write fault.
+
+This needs the preceding index backends and supervisor-line coverage.
+Request a dependent stable backport after those changes have merged.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/srmmu.c | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/arch/sparc/mm/srmmu.c b/arch/sparc/mm/srmmu.c
+index c670a83be9ba..aefc4bd5ebe3 100644
+--- a/arch/sparc/mm/srmmu.c
++++ b/arch/sparc/mm/srmmu.c
+@@ -1663,10 +1663,18 @@ static bool any_other_mm_cpus(struct mm_struct *mm)
+ 	return cpumask_any_but(mm_cpumask(mm), smp_processor_id()) < nr_cpu_ids;
+ }
+ 
++/* Dirty lines in a virtually indexed write-back cache outlive the mm_cpumask
++ * bit, so the mask cannot gate a cache flush the way it gates a shootdown.
++ */
++static bool cache_xcall_needed(struct mm_struct *mm)
++{
++	return is_hypersparc || any_other_mm_cpus(mm);
++}
++
+ static void smp_flush_cache_mm(struct mm_struct *mm)
+ {
+ 	if (mm->context != NO_CONTEXT) {
+-		if (any_other_mm_cpus(mm))
++		if (cache_xcall_needed(mm))
+ 			xc1(local_ops->cache_mm, (unsigned long)mm);
+ 		local_ops->cache_mm(mm);
+ 	}
+@@ -1688,7 +1696,7 @@ static void smp_flush_cache_range(struct vm_area_struct *vma,
+ 	struct mm_struct *mm = vma->vm_mm;
+ 
+ 	if (mm->context != NO_CONTEXT) {
+-		if (any_other_mm_cpus(mm))
++		if (cache_xcall_needed(mm))
+ 			xc3(local_ops->cache_range, (unsigned long)vma, start,
+ 			    end);
+ 		local_ops->cache_range(vma, start, end);
+@@ -1714,7 +1722,7 @@ static void smp_flush_cache_page(struct vm_area_struct *vma, unsigned long page)
+ 	struct mm_struct *mm = vma->vm_mm;
+ 
+ 	if (mm->context != NO_CONTEXT) {
+-		if (any_other_mm_cpus(mm))
++		if (cache_xcall_needed(mm))
+ 			xc2(local_ops->cache_page, (unsigned long)vma, page);
+ 		local_ops->cache_page(vma, page);
+ 	}

@@ -1,0 +1,48 @@
+From 321db07c0ee177f1707480c5c64577db78c7214b Mon Sep 17 00:00:00 2001
+From: Stian Halseth <stian@itx.no>
+Date: Sun, 18 Oct 2026 14:27:32 +0200
+Subject: [PATCH 52/66] sparc64: Start bottom-up mmap searches at mm->mmap_base
+
+arch_pick_mmap_layout() randomizes mm->mmap_base for the bottom-up
+layout, which every 64-bit task uses, but arch_get_unmapped_area()
+starts its search at TASK_UNMAPPED_BASE and never looks at it. Shared
+libraries and anonymous mappings of 64-bit tasks therefore land at the
+same address on every run; only the stack is randomized.
+
+Before the conversion to vm_unmapped_area() the search started at
+mm->free_area_cache, which binfmt_elf set to mm->mmap_base. Use
+mm->mmap_base as the low limit again, as generic_get_unmapped_area()
+does.
+
+Fixes: bb64f55019c7 ("mm: use vm_unmapped_area() on sparc64 architecture")
+Link: https://github.com/sparclinux/issues/issues/119
+Cc: stable@vger.kernel.org
+Tested-by: Jan Engelhardt <jengelh@inai.de>
+Signed-off-by: Stian Halseth <stian@itx.no>
+Message-ID: <20261018122734.2594904-2-stian@itx.no>
+---
+ arch/sparc/kernel/sys_sparc_64.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/arch/sparc/kernel/sys_sparc_64.c b/arch/sparc/kernel/sys_sparc_64.c
+index ecefcffcf7b1..087595fa4308 100644
+--- a/arch/sparc/kernel/sys_sparc_64.c
++++ b/arch/sparc/kernel/sys_sparc_64.c
+@@ -142,7 +142,7 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsi
+ 	}
+ 
+ 	info.length = len;
+-	info.low_limit = TASK_UNMAPPED_BASE;
++	info.low_limit = mm->mmap_base;
+ 	info.high_limit = min(task_size, VA_EXCLUDE_START);
+ 	info.align_mask = get_align_mask(filp, flags);
+ 	if (!file_hugepage)
+@@ -151,7 +151,7 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsi
+ 
+ 	if ((addr & ~PAGE_MASK) && task_size > VA_EXCLUDE_END) {
+ 		VM_BUG_ON(addr != -ENOMEM);
+-		info.low_limit = VA_EXCLUDE_END;
++		info.low_limit = max(mm->mmap_base, VA_EXCLUDE_END);
+ 		info.high_limit = task_size;
+ 		addr = vm_unmapped_area(&info);
+ 	}

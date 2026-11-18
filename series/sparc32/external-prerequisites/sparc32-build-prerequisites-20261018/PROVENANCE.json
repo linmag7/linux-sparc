@@ -1,0 +1,8 @@
+{
+  "received_date": "2026-10-18",
+  "source": "User-pasted mailing-list patch in this conversation",
+  "message_id": null,
+  "original_mail_date": null,
+  "note": "Mail wrapper reconstructed; author, message, trailers and diff preserved. No Tested-by added. Reported QEMU counts are author results, not local results.",
+  "sha256": "d0b355b7b254650e9c88e0dbfa67b8609a7cf9dabc914523cacd335422cd9cbf"
+}

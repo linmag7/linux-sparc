@@ -1,0 +1,70 @@
+PAGE_NONE review -- 26 October 2026
+
+Input: 0001-sparc32-treat-PAGE_NONE-ptes-as-present.patch, authored and
+signed by Ramin Moussavi, forwarded by Imre. Preserved unchanged, with
+no added Tested-by. Applied alone on the complete r5opt hardware stack.
+
+Assessment
+----------
+The change is small and addresses a concrete software PTE classification
+bug. SRMMU_PAGE_NONE is CACHE|PRIV|REF, deliberately without VALID.
+The old pte_present() therefore returns false even when the PTE still
+contains a populated page's PFN. Core MM's fork, mprotect and unmap paths
+use software presence to distinguish resident pages from swap entries;
+this explains the reported bogus swap/rmap accounting and SIGBUS.
+
+SRMMU_PRIV_RDONLY is 0x18. PAGE_NONE starts with PRIV=0x1c, and fork's
+pte_wrprotect clears WRITE=0x04, leaving the distinguishing 0x18 bits.
+Testing all of PRIV would regress after write protection. Swap type starts
+at bit 7, offset at bit 12, and the exclusive marker uses bit 6, so none
+of those legitimate swap encodings can satisfy the new presence test.
+Zero PTE remains absent; ordinary hardware-valid PTEs retain old behavior.
+pte_modify preserves PFN/REF/DIRTY and replaces protection bits, allowing
+NONE-to-readable restoration without losing the page identity.
+
+This changes software presence, not hardware access permission. VALID
+remains clear on PAGE_NONE. Both do_sparc_fault and force_user_fault check
+VMA read/exec/write permissions before handle_mm_fault. A real inaccessible
+VMA therefore still rejects access. The generic pte_protnone() stub is not
+itself a blocker: its contract explicitly permits returning false for an
+inaccessible VMA. This patch does not implement NUMA hinting or new ABI.
+
+E/F interaction
+--------------
+No overlap with bit-lock, cache geometry, alias handling, enrollment or
+publication code. The HyperSPARC pte_present callers in srmmu.c inspect
+kernel vmap/kmap aliases, rather than grant user access. Including a
+software-present but invalid mapping in maintenance does not grant access.
+Keep this generic SPARC32 fix external to the public E/F series with its
+own attribution. It is not evidence that earlier dentry lifelocks or
+register-window cores had this cause; that would require showing a
+PROT_NONE transition and the matching swap/accounting symptoms.
+
+Reproducer scope
+----------------
+The supplied source is preserved and compiled unchanged. It covers populated
+anonymous NONE/read transitions and fork while NONE, parent/child contents.
+A separate 200-round test checks denied read and write accesses (SIGSEGV),
+COW isolation after a child restores write access, unmap while NONE, and
+initially unpopulated NONE restored to RW. No real-hardware test yet.
+The supplied outer fork()/waitpid() results are not checked and atoi accepts
+nonpositive rounds, so a resource failure or malformed argument could
+mislead outside this controlled 200-round run. This is test-harness feedback,
+not an objection to the kernel fix.
+
+Retained setup failures
+-----------------------
+The initial 4-CPU and 2-CPU baseline QEMU boots aborted before the test with
+an illegal-instruction trap during early boot. That initramfs contained
+unstripped binaries (~10 MiB total). A separate stripped initramfs (~0.56 MiB
+compressed) boots and reaches the test. Treat the initial failures as a
+boot/setup limitation, not PROT_NONE evidence; the exact underlying boot
+failure has not been diagnosed. All initial binaries, images and logs remain.
+
+Limits
+------
+QEMU is not validation of physical HyperSPARC cache behavior. No real-machine
+negative test should be mixed with useful work: the broken kernel can hang
+or corrupt MM accounting. Hardware installation, reboot and testing remain
+pending. No claim that this fixes all previous instability or qualifies
+for a hardware Tested-by yet.

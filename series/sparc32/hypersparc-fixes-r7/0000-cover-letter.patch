@@ -1,0 +1,49 @@
+From dacd90489092650b61645edcf0fb99ac6f9b5a0e Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:59 +0200
+Subject: [PATCH 0/9] sparc32: repair HyperSPARC cache and kmap coherency
+
+I am submitting nine HyperSPARC coherency fixes after the generic SPARC32
+series. They cover instruction publication, cache-probe TLB cleanup,
+index-based data maintenance, supervisor lines and kmap alias lifetimes.
+
+I completed a native GDB 18.1 build on a dual-CPU HyperSPARC RT626
+SPARCstation 20 with 512 MB RAM and a native SPARC32 SMP kernel containing
+the combined fixes and optimizations, plus separate platform prerequisites.
+I observed no core dumps, livelock or new kernel messages during the run.
+This validates the combined integration, not each patch in isolation.
+Individual patches retain their targeted test details.
+
+Magnus Lindholm (9):
+  sparc32: synchronize HyperSPARC instruction updates
+  sparc32: discard HyperSPARC cache-probe TLB entries
+  sparc32: flush HyperSPARC data ranges by index
+  sparc32: flush HyperSPARC data pages by index
+  sparc32: flush HyperSPARC pages to RAM by index
+  sparc32: flush supervisor lines in the HyperSPARC whole-mm sweep
+  sparc32: do not gate HyperSPARC cache cross-calls on mm_cpumask
+  sparc32: flush all HyperSPARC colours for mapped folios
+  sparc32: reconcile HyperSPARC local and persistent kmap aliases
+
+ arch/sparc/include/asm/cacheflush_32.h |   2 +-
+ arch/sparc/include/asm/highmem.h       |  18 +-
+ arch/sparc/include/asm/ross.h          |   3 +
+ arch/sparc/mm/hypersparc.S             |  95 +++---
+ arch/sparc/mm/init_32.c                |  12 +
+ arch/sparc/mm/srmmu.c                  | 416 ++++++++++++++++++++++++-
+ 6 files changed, 484 insertions(+), 62 deletions(-)
+
+
+base-commit: cee9395acd8043be0644b25c34bfa86623f2b935
+prerequisite-patch-id: 226d370d6165ca56e762fc3837ea50390143b7df
+prerequisite-patch-id: a8f4c613c7832c004b0307562df53957e7849639
+prerequisite-patch-id: 6089177cff5a7489daab72557949c28960c1e506
+prerequisite-patch-id: eaa67856e6f843b9401ff7fc774e67be59854b34
+prerequisite-patch-id: a00962dc178012e52e48bcab3e66f833f45eae02
+prerequisite-patch-id: 0f50451dba4d8fd86bd9986f18d972c4015b7b31
+prerequisite-patch-id: afad983fa48834da93fde037992b059399f4af1c
+prerequisite-patch-id: f4142189700ce7c766378c481a47244a7dd13140
+prerequisite-patch-id: d2a8aa69c22fd06cbd2dae10f81e1c6db1b95a6d
+-- 
+2.43.0
+

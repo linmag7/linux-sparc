@@ -1,0 +1,47 @@
+From 3649c49e8ff69295fd5f94c46dc4a067f5ceb17f Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH 8/9] sparc32: retain mm_cpumask across TLB shootdowns
+
+smp_flush_tlb_mm() narrows mm_cpumask to the current CPU when mm_users is
+one and current->active_mm matches. That snapshot does not exclude another
+task obtaining a reference with mmget_not_zero() and using the address
+space through kthread_use_mm(). Clearing its CPU bit can make subsequent
+shootdowns miss translations on that CPU. Testing current->mm instead does
+not serialize against that race.
+
+Remove the narrowing. This follows the SPARC64 fix in commit bafb056ce279
+("sparc64: remove mm_cpumask clearing to fix kthread_use_mm race"). Retain
+the accumulated CPU mask until normal address-space teardown.
+
+A single-threaded mm that has migrated can consequently need remote
+shootdowns for the remainder of its lifetime; sun4m broadcasts them to
+online peers. This trades extra cross-calls for correct coverage.
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/srmmu.c | 6 +-----
+ 1 file changed, 1 insertion(+), 5 deletions(-)
+
+diff --git a/arch/sparc/mm/srmmu.c b/arch/sparc/mm/srmmu.c
+index bfc5bde63fe4..17920d7c81c8 100644
+--- a/arch/sparc/mm/srmmu.c
++++ b/arch/sparc/mm/srmmu.c
+@@ -1648,12 +1648,8 @@ static void smp_flush_cache_mm(struct mm_struct *mm)
+ static void smp_flush_tlb_mm(struct mm_struct *mm)
+ {
+ 	if (mm->context != NO_CONTEXT) {
+-		if (any_other_mm_cpus(mm)) {
++		if (any_other_mm_cpus(mm))
+ 			xc1(local_ops->tlb_mm, (unsigned long)mm);
+-			if (atomic_read(&mm->mm_users) == 1 && current->active_mm == mm)
+-				cpumask_copy(mm_cpumask(mm),
+-					     cpumask_of(smp_processor_id()));
+-		}
+ 		local_ops->tlb_mm(mm);
+ 	}
+ }
+-- 
+2.43.0
+

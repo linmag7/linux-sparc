@@ -1,0 +1,47 @@
+From aaa6cc437f2476d10e2c7fa51e4945590d020a50 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:48 +0200
+Subject: [PATCH 63/66] sparc32: avoid duplicate publication of HyperSPARC
+ highmem copies
+
+copy_user_highpage() publishes the destination with __flush_page_to_ram()
+and then immediately unmaps it. On HyperSPARC the highmem mapping always
+uses a local fixmap slot, and both the narrow unmap path and its
+conservative fallback synchronously publish data before kunmap_local()
+returns.
+
+Omit the first publication only for HyperSPARC highmem destinations when
+the caller supplies a non-executable VMA. Keep the explicit operation for
+lowmem, which can use the direct mapping and a no-op kunmap_local(), and
+for other processors, executable VMAs and a NULL VMA.
+
+Do not predict which unmap path will be selected: a recheck can fall back,
+and both paths provide the needed publication. This depends on the
+preceding highmem fixmap and publication-before-return changes.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/init_32.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/arch/sparc/mm/init_32.c b/arch/sparc/mm/init_32.c
+index b4058fe4afa3..f2e7f55408e2 100644
+--- a/arch/sparc/mm/init_32.c
++++ b/arch/sparc/mm/init_32.c
+@@ -133,7 +133,15 @@ void copy_user_highpage(struct page *to, struct page *from,
+ 	vfrom = kmap_local_page(from);
+ 	vto = kmap_local_page(to);
+ 	copy_page(vto, vfrom);
+-	__flush_page_to_ram((unsigned long)vto);
++	/*
++	 * HyperSPARC highmem mappings always use a local fixmap slot. Both
++	 * unmap paths publish its data before returning, so do not publish
++	 * twice. Keep the explicit operation for executable/unknown users
++	 * and for lowmem, where kunmap_local() can be a no-op.
++	 */
++	if (srmmu_modtype != HyperSparc || !PageHighMem(to) ||
++	    !vma || (vma->vm_flags & VM_EXEC))
++		__flush_page_to_ram((unsigned long)vto);
+ 	kunmap_local(vto);
+ 	kunmap_local(vfrom);
+ }

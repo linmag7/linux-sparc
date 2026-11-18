@@ -1,0 +1,6 @@
+0010-sparc32-detect-the-compare-and-swap-instruction-at-b.patch
+0011-sparc32-add-a-kernel-assisted-compare-and-swap.patch
+0012-sparc32-implement-futex-atomic-ops-with-the-compare-.patch
+0013-sparc32-advertise-the-compare-and-swap-trap-in-AT_HW.patch
+0014-sparc32-document-the-compare-and-swap-trap-ABI.patch
+0015-sparc32-emulate-UDIV-SDIV-on-illegal_instruction.patch

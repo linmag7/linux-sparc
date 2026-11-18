@@ -1,0 +1,68 @@
+From 26f310265419989965bdde3acdcde7dfd7995a2b Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH 1/9] sparc32: inspect every PROM CPU cache geometry
+
+Cache discovery runs from setup_arch(), before secondary CPUs are online.
+Using cpu_online() to terminate the PROM walk therefore stops after the
+first CPU node on SMP systems. It cannot determine the largest cache and
+smallest line size across all modules when their geometry differs. Sparse
+logical CPU numbering is not required to trigger this.
+
+Walk every PROM CPU node on SMP and retain the single-node UP behavior.
+Start at the first child instead of skipping directly to its sibling, and
+track whether a CPU was found independently of the end sentinel. No mixed-
+module hardware failure is claimed by this change.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/srmmu.c | 13 +++++--------
+ 1 file changed, 5 insertions(+), 8 deletions(-)
+
+diff --git a/arch/sparc/mm/srmmu.c b/arch/sparc/mm/srmmu.c
+index 9a74902ad181..c21c592a442b 100644
+--- a/arch/sparc/mm/srmmu.c
++++ b/arch/sparc/mm/srmmu.c
+@@ -988,17 +988,18 @@ static void __init init_vac_layout(void)
+ {
+ 	phandle nd;
+ 	int cache_lines;
++	bool found_cpu = false;
+ 	char node_str[128];
+ #ifdef CONFIG_SMP
+-	int cpu = 0;
+ 	unsigned long max_size = 0;
+ 	unsigned long min_line_size = 0x10000000;
+ #endif
+ 
+-	nd = prom_getchild(prom_root_node);
+-	while ((nd = prom_getsibling(nd)) != 0) {
++	for (nd = prom_getchild(prom_root_node); nd != 0;
++	     nd = prom_getsibling(nd)) {
+ 		prom_getstring(nd, "device_type", node_str, sizeof(node_str));
+ 		if (!strcmp(node_str, "cpu")) {
++			found_cpu = true;
+ 			vac_line_size = prom_getint(nd, "cache-line-size");
+ 			if (vac_line_size == -1) {
+ 				prom_printf("can't determine cache-line-size, halting.\n");
+@@ -1016,16 +1017,12 @@ static void __init init_vac_layout(void)
+ 				max_size = vac_cache_size;
+ 			if (vac_line_size < min_line_size)
+ 				min_line_size = vac_line_size;
+-			//FIXME: cpus not contiguous!!
+-			cpu++;
+-			if (cpu >= nr_cpu_ids || !cpu_online(cpu))
+-				break;
+ #else
+ 			break;
+ #endif
+ 		}
+ 	}
+-	if (nd == 0) {
++	if (!found_cpu) {
+ 		prom_printf("No CPU nodes found, halting.\n");
+ 		prom_halt();
+ 	}
+-- 
+2.43.0
+

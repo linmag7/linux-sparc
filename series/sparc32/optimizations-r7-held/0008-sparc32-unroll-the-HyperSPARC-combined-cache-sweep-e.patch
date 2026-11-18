@@ -1,0 +1,55 @@
+From 0e78be9cd9063b65ec271784736654b86c13806f Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:48 +0200
+Subject: [PATCH 08/10] sparc32: unroll the HyperSPARC combined cache sweep
+ eight ways
+
+Issue eight existing ASI_M_FLUSH_CTX stores per loop iteration. Preserve
+every cache index, CPU coverage, the register-window flush and the final
+whole instruction-cache invalidation.
+
+A historical dual-HyperSPARC comparison of the earlier unroll measured
+diagnostic probes disabled elapsed means of 195.842 s before and 191.780 s
+after (-2.07%). The sampled remote sweep mean changed from 778.54 to 724.80
+us (-6.90%). There were two repetitions per mode on separate boots, without
+a return to baseline. The sampled intervals overlap and cannot be added to
+predict elapsed-time savings.
+
+That experiment predates the restored IWHOLE integration and this
+clean-base series. It motivates retaining the optimization, but is not a
+performance measurement of this exact patch stack. The final assembled
+sweep is checked separately for its index/store sequence.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/hypersparc.S | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/arch/sparc/mm/hypersparc.S b/arch/sparc/mm/hypersparc.S
+index ba1c1c059742..c20658673e6d 100644
+--- a/arch/sparc/mm/hypersparc.S
++++ b/arch/sparc/mm/hypersparc.S
+@@ -45,6 +45,20 @@ hypersparc_flush_combined_all:
+ 	sethi	%hi(vac_line_size), %g1
+ 	ld	[%g1 + %lo(vac_line_size)], %g2
+ 1:
++	sub	%g5, %g2, %g5
++	sta	%g0, [%g5] ASI_M_FLUSH_CTX
++	sub	%g5, %g2, %g5
++	sta	%g0, [%g5] ASI_M_FLUSH_CTX
++	sub	%g5, %g2, %g5
++	sta	%g0, [%g5] ASI_M_FLUSH_CTX
++	sub	%g5, %g2, %g5
++	sta	%g0, [%g5] ASI_M_FLUSH_CTX
++	sub	%g5, %g2, %g5
++	sta	%g0, [%g5] ASI_M_FLUSH_CTX
++	sub	%g5, %g2, %g5
++	sta	%g0, [%g5] ASI_M_FLUSH_CTX
++	sub	%g5, %g2, %g5
++	sta	%g0, [%g5] ASI_M_FLUSH_CTX
+ 	subcc	%g5, %g2, %g5
+ 	bne	1b
+ 	 sta	%g0, [%g5] ASI_M_FLUSH_CTX
+-- 
+2.43.0
+

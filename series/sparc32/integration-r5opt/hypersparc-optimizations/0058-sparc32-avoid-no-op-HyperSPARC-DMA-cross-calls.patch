@@ -1,0 +1,32 @@
+From 10a448caccf59539dd18f07e449310e370f07ec9 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH 58/66] sparc32: avoid no-op HyperSPARC DMA cross-calls
+
+flush_page_for_dma() cross-calls every other online cpu before running the
+local cache operation. The HyperSPARC operation is empty because its cache
+is I/O coherent, so every one of those calls is a no-op.
+
+Select the local operation directly, as is already done for Viking.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/srmmu.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/arch/sparc/mm/srmmu.c b/arch/sparc/mm/srmmu.c
+index 21fec7d20f09..bf5fe023b1ff 100644
+--- a/arch/sparc/mm/srmmu.c
++++ b/arch/sparc/mm/srmmu.c
+@@ -2245,6 +2245,11 @@ void __init load_mmu(void)
+ 		smp_cachetlb_ops.page_for_dma = local_ops->page_for_dma;
+ 	}
+ 
++	if (poke_srmmu == poke_hypersparc) {
++		/* The HyperSPARC DMA callback is an I/O-coherent no-op. */
++		smp_cachetlb_ops.page_for_dma = local_ops->page_for_dma;
++	}
++
+ 	/* It really is const after this point. */
+ 	sparc32_cachetlb_ops = (const struct sparc32_cachetlb_ops *)
+ 		&smp_cachetlb_ops;

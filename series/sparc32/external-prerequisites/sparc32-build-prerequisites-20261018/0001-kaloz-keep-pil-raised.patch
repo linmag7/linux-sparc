@@ -1,0 +1,73 @@
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH] sparc32: keep PIL raised on the SMP ticker and LEON IPI
+ exit paths
+From: Imre Kaloz <kaloz@kernel.org>
+Date: Sun, 27 Sep 2026 02:56:58 +0200
+Message-Id: <20260927005658.8242-1-kaloz@kernel.org>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+smp4m_ticker returns from smp4m_percpu_timer_interrupt() by writing the
+interrupted %psr back with traps enabled, which drops PIL before
+RESTORE_ALL. A level 14 tick pending again at that point is taken on
+top of the current trap frame, so back-to-back ticks nest one frame per
+tick until the 8K kernel stack runs into thread_info. Keep PIL at 15
+until rett restores the interrupted %psr, as real_irq_continue does.
+
+smp4d_ticker and smpleon_ipi exit the same way and get the same change.
+
+Broken since 2.1.36 (sun4m), 2.1.97 (sun4d) and 2.6.33 (LEON).
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Imre Kaloz <kaloz@kernel.org>
+---
+Notes:
+    No Fixes: tag: this has been broken since 2.1.36 on sun4m (as
+    smp_ticker) and since 2.1.97 on sun4d, before the git history. The
+    LEON exit came with smpleon_ticker in 8401707ff645 ("sparc,leon:
+    Sparc-Leon SMP support") in 2.6.33 and moved to smpleon_ipi in 3.0; a
+    Fixes: tag naming one commit would date all three sites to it.
+
+ arch/sparc/kernel/entry.S | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/arch/sparc/kernel/entry.S b/arch/sparc/kernel/entry.S
+index ea51ef52c952..7288da5f6727 100644
+--- a/arch/sparc/kernel/entry.S
++++ b/arch/sparc/kernel/entry.S
+@@ -252,7 +252,8 @@ smp4m_ticker:
+ 	WRITE_PAUSE
+ 	call	smp4m_percpu_timer_interrupt
+ 	 add	%sp, STACKFRAME_SZ, %o0
+-	wr	%l0, PSR_ET, %psr
++	or	%l0, PSR_PIL, %g2	! keep PIL raised until rett, or a
++	wr	%g2, PSR_ET, %psr	! re-asserted tick nests on this frame
+ 	WRITE_PAUSE
+ 	RESTORE_ALL
+ 
+@@ -353,7 +354,8 @@ smp4d_ticker:
+ 	WRITE_PAUSE
+ 	call	smp4d_percpu_timer_interrupt
+ 	 add	%sp, STACKFRAME_SZ, %o0
+-	wr	%l0, PSR_ET, %psr
++	or	%l0, PSR_PIL, %g2	! keep PIL raised until rett, or a
++	wr	%g2, PSR_ET, %psr	! re-asserted tick nests on this frame
+ 	WRITE_PAUSE
+ 	RESTORE_ALL
+ 
+@@ -407,7 +409,8 @@ smpleon_ipi:
+ 	WRITE_PAUSE
+ 	call	leonsmp_ipi_interrupt
+ 	 add	%sp, STACKFRAME_SZ, %o1 ! pt_regs
+-	wr	%l0, PSR_ET, %psr
++	or	%l0, PSR_PIL, %g2	! keep PIL raised until rett, or a
++	wr	%g2, PSR_ET, %psr	! re-asserted IPI nests on this frame
+ 	WRITE_PAUSE
+ 	RESTORE_ALL
+ 
+
+base-commit: 62f4c998b297cf233997a2b4cd6fc2d2df0319c9
+-- 
+2.47.3
+

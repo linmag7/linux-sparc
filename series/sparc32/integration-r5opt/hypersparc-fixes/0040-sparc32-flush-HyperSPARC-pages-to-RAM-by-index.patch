@@ -1,0 +1,111 @@
+From 2ede9b22729d9c5b1950eeb7705b814fcb5bd43e Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 24 Oct 2026 12:49:47 +0200
+Subject: [PATCH 40/66] sparc32: flush HyperSPARC pages to RAM by index
+
+flush_page_to_ram() is the third caller of the translating backend and has
+both of its problems: it probes the address and returns when no
+translation is found, and otherwise uses ASI_M_FLUSH_PAGE, which ROSS
+SPARC RISC User's Guide, Third Edition, section 4.4.3 describes as taking
+no action when the tag does not match.
+
+While the kernel flushes the whole cache for every kmap operation the
+defect is masked. Once the cost-reduction series narrows those flushes to
+a single flush_page_to_ram(), the stale line is reachable again: with the
+preceding two patches and the whole-cache flushes still in place a fork-
+heavy workload is clean over 30344 forks, and with the cost-reduction
+series applied the same workload produces 78 core dumps after 7229 forks.
+
+Reuse the range backend and delete the assembly implementation. The probe,
+its fault-status read and its demap cleanup go with it.
+
+The index backend also permits later local kmap TLB optimizations; that
+performance benefit is not enabled by this correctness series.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/hypersparc.S | 37 -------------------------------------
+ arch/sparc/mm/srmmu.c      |  8 +++++++-
+ 2 files changed, 7 insertions(+), 38 deletions(-)
+
+diff --git a/arch/sparc/mm/hypersparc.S b/arch/sparc/mm/hypersparc.S
+index a68f75e5781e..f0b36907f9d8 100644
+--- a/arch/sparc/mm/hypersparc.S
++++ b/arch/sparc/mm/hypersparc.S
+@@ -20,7 +20,6 @@
+ 	.globl	hypersparc_flush_cache_all, hypersparc_flush_cache_mm
+ 	.globl	hypersparc_flush_cache_range, hypersparc_flush_cache_page
+ 	.globl	hypersparc_flush_cache_range_index
+-	.globl	hypersparc_flush_page_to_ram
+ 	.globl	hypersparc_flush_page_for_dma, hypersparc_flush_sig_insns
+ 	.globl	hypersparc_flush_tlb_all, hypersparc_flush_tlb_mm
+ 	.globl	hypersparc_flush_tlb_range, hypersparc_flush_tlb_page
+@@ -259,42 +258,6 @@ hypersparc_flush_sig_insns:
+ 	retl
+ 	 flush	%o1 + 4
+ 
+-	/* HyperSparc is copy-back. */
+-hypersparc_flush_page_to_ram:
+-	sethi	%hi(vac_line_size), %g1
+-	ld	[%g1 + %lo(vac_line_size)], %o4
+-	andn	%o0, (PAGE_SIZE - 1), %o0
+-	add	%o4, %o4, %o5
+-	or	%o0, 0x400, %g7
+-	lda	[%g7] ASI_M_FLUSH_PROBE, %g5
+-	add	%o4, %o5, %g1
+-	orcc	%g5, 0, %g0
+-	be	2f
+-	 add	%o4, %g1, %g2
+-	add	%o4, %g2, %g3
+-	sub	%o0, -PAGE_SIZE, %o0
+-	add	%o4, %g3, %g4
+-	add	%o4, %g4, %g5
+-	add	%o4, %g5, %g7
+-
+-	/* BLAMMO! */
+-1:
+-	sub	%o0, %g7, %o0
+-	sta	%g0, [%o0 + %g0] ASI_M_FLUSH_PAGE
+-	sta	%g0, [%o0 + %o4] ASI_M_FLUSH_PAGE
+-	sta	%g0, [%o0 + %o5] ASI_M_FLUSH_PAGE
+-	sta	%g0, [%o0 + %g1] ASI_M_FLUSH_PAGE
+-	sta	%g0, [%o0 + %g2] ASI_M_FLUSH_PAGE
+-	sta	%g0, [%o0 + %g3] ASI_M_FLUSH_PAGE
+-	andcc	%o0, 0xffc, %g0
+-	sta	%g0, [%o0 + %g4] ASI_M_FLUSH_PAGE
+-	bne	1b
+-	 sta	%g0, [%o0 + %g5] ASI_M_FLUSH_PAGE
+-2:
+-	mov	SRMMU_FAULT_STATUS, %g1
+-	retl
+-	 lda	[%g1] ASI_M_MMUREGS, %g0
+-
+ 	/* HyperSparc is IO cache coherent. */
+ hypersparc_flush_page_for_dma:
+ 	retl
+diff --git a/arch/sparc/mm/srmmu.c b/arch/sparc/mm/srmmu.c
+index c64426425eb7..c670a83be9ba 100644
+--- a/arch/sparc/mm/srmmu.c
++++ b/arch/sparc/mm/srmmu.c
+@@ -641,7 +641,6 @@ extern void hypersparc_flush_cache_all(void);
+ extern void hypersparc_flush_cache_mm(struct mm_struct *mm);
+ extern void hypersparc_flush_cache_range(struct vm_area_struct *vma, unsigned long start, unsigned long end);
+ extern void hypersparc_flush_cache_page(struct vm_area_struct *vma, unsigned long page);
+-extern void hypersparc_flush_page_to_ram(unsigned long page);
+ extern void hypersparc_flush_page_for_dma(unsigned long page);
+ extern void hypersparc_flush_sig_insns(struct mm_struct *mm, unsigned long insn_addr);
+ extern void hypersparc_flush_tlb_all(void);
+@@ -1071,6 +1070,13 @@ static void poke_hypersparc(void)
+ 	clear = srmmu_get_fstatus();
+ }
+ 
++static void hypersparc_flush_page_to_ram(unsigned long page)
++{
++	unsigned long addr = page & PAGE_MASK;
++
++	hypersparc_flush_cache_range_index(addr, addr + PAGE_SIZE);
++}
++
+ static void hypersparc_flush_cache_page_data(struct vm_area_struct *vma,
+ 					     unsigned long addr)
+ {
