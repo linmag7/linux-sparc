@@ -1,0 +1,15 @@
+This remains a separately identified workaround, not a demonstrated
+post-reset negotiation root-cause fix. Retry only the initial inquiry
+within the existing bound; comparison reads remain fail-fast. Further
+SCSI review should decide whether the controller reset path is the proper
+place to recover the target agreement. It applies to vanilla v7.3-rc1.
+
+The exact cleaned integration booted PRIMEPOWER UP/SMP from disk to
+Gentoo with an ext4 root. No new post-reset DV cycle was run in this
+final qualification, and the root-cause limitation above remains.
+Tests used the integrated stack, not this workaround alone.
+
+Magnus Lindholm:
+  scsi: spi: retry a transient failure of the initial DV inquiry
+
+base-commit: cee9395acd8043be0644b25c34bfa86623f2b935

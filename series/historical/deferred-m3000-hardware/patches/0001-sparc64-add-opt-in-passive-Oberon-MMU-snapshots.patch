@@ -1,0 +1,128 @@
+From 029bdee9d0872f18e08b48ef00d098abb333ddb9 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Wed, 14 Oct 2026 22:49:16 +0200
+Subject: [RFC PATCH 01/17] sparc64: add opt-in passive Oberon MMU snapshots
+
+Capture one bounded snapshot per Oberon PBM at late init when
+oberon_diag=1 is supplied. Report inherited masks, route validity and
+raw fault state without clearing status or enabling interrupts.
+
+Read only the selected leaf status registers and leave acknowledgment
+registers untouched. Firmware ownership and snapshot coherence remain
+unresolved for active error handling.
+
+Skip fault-log reads when the initial MMU status is zero. Complete all
+reads before printk can enter the firmware-backed console.
+
+Reference: FreeBSD 9aed7107bbfb,
+sys/sparc64/pci/fire.c:fire_dmc_pec and firereg.h.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/pci_fire.c | 93 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 93 insertions(+)
+
+diff --git a/arch/sparc/kernel/pci_fire.c b/arch/sparc/kernel/pci_fire.c
+index f2776144d1d4..eaa9a5827d73 100644
+--- a/arch/sparc/kernel/pci_fire.c
++++ b/arch/sparc/kernel/pci_fire.c
+@@ -541,6 +541,99 @@ static struct platform_driver fire_driver = {
+ 	.probe		= fire_probe,
+ };
+ 
++/* This diagnostic is opt-in and never acknowledges or enables errors. */
++static bool oberon_diag_enabled;
++
++static int __init oberon_diag_setup(char *str)
++{
++	return kstrtobool(str, &oberon_diag_enabled);
++}
++early_param("oberon_diag", oberon_diag_setup);
++
++#define OBERON_DIAG_DMC_ENABLE	0x31800UL
++#define OBERON_DIAG_DMC_STATUS	0x31808UL
++#define OBERON_DIAG_MULTI_STATUS	0x31810UL
++#define OBERON_DIAG_MMU_LOG	0x41000UL
++#define OBERON_DIAG_MMU_ENABLE	0x41008UL
++#define OBERON_DIAG_MMU_STATUS	0x41010UL
++#define OBERON_DIAG_TFAR		0x41028UL
++#define OBERON_DIAG_TFSR		0x41030UL
++
++static void __init oberon_diag_snapshot(struct pci_pbm_info *pbm)
++{
++	struct device_node *dp = pbm->op->dev.of_node;
++	const struct linux_prom64_registers *regs;
++	const __be32 *intr;
++	unsigned long base = pbm->pbm_regs, imap_offset;
++	unsigned int ino;
++	u64 multi, dmc, status, tfar = 0, tfsr = 0;
++	u64 multi_after, dmc_after, status_after;
++	u64 dmc_enable, mmu_enable, log_enable, imap;
++	bool logs_read;
++	int len;
++
++	regs = of_get_property(dp, "reg", &len);
++	if (!regs || len < sizeof(*regs) || regs[0].phys_addr != base ||
++	    regs[0].reg_size < OBERON_DIAG_TFSR + sizeof(u64) ||
++	    base > ~0UL - OBERON_DIAG_TFSR - sizeof(u64)) {
++		pr_warn("Oberon diag %pOF: invalid CSR range; skipped\n", dp);
++		return;
++	}
++	intr = of_get_property(dp, "interrupts", &len);
++	if (!intr || len < 2 * sizeof(*intr)) {
++		pr_warn("Oberon diag %pOF: missing error IRQ property; skipped\n", dp);
++		return;
++	}
++	ino = be32_to_cpup(intr + 1);
++	if (ino > 0x3f) {
++		pr_warn("Oberon diag %pOF: invalid error INO; skipped\n", dp);
++		return;
++	}
++	imap_offset = 0x1000UL + 8 * ino;
++	dmc_enable = upa_readq(base + OBERON_DIAG_DMC_ENABLE);
++	log_enable = upa_readq(base + OBERON_DIAG_MMU_LOG);
++	mmu_enable = upa_readq(base + OBERON_DIAG_MMU_ENABLE);
++	imap = upa_readq(base + imap_offset);
++	multi = upa_readq(base + OBERON_DIAG_MULTI_STATUS);
++	dmc = upa_readq(base + OBERON_DIAG_DMC_STATUS);
++	status = upa_readq(base + OBERON_DIAG_MMU_STATUS);
++	/* Fault logs are candidates only; status equality cannot prove coherence. */
++	logs_read = status != 0;
++	if (logs_read) {
++		tfar = upa_readq(base + OBERON_DIAG_TFAR);
++		tfsr = upa_readq(base + OBERON_DIAG_TFSR);
++	}
++	status_after = upa_readq(base + OBERON_DIAG_MMU_STATUS);
++	dmc_after = upa_readq(base + OBERON_DIAG_DMC_STATUS);
++	multi_after = upa_readq(base + OBERON_DIAG_MULTI_STATUS);
++
++	/* Finish all register reads before printk can enter the firmware console. */
++	pr_info("Oberon diag %pOF: portid=%u ino=%x imap=%016llx route_valid=%u\n",
++		dp, pbm->portid, ino, imap, !!(imap & BIT_ULL(31)));
++	pr_info("Oberon diag %pOF: dmc_enable=%016llx mmu_log=%016llx mmu_enable=%016llx\n",
++		dp, dmc_enable, log_enable, mmu_enable);
++	pr_info("Oberon diag %pOF: multi=%016llx dmc=%016llx mmu=%016llx\n",
++		dp, multi, dmc, status);
++	pr_info("Oberon diag %pOF: logs_read=%u tfar_raw=%016llx tfsr_raw=%016llx\n",
++		dp, logs_read, tfar, tfsr);
++	pr_info("Oberon diag %pOF: multi_after=%016llx dmc_after=%016llx mmu_after=%016llx changed=%u\n",
++		dp, multi_after, dmc_after, status_after,
++		multi != multi_after || dmc != dmc_after || status != status_after);
++}
++
++static int __init oberon_diag_init(void)
++{
++	struct pci_pbm_info *pbm;
++
++	if (!oberon_diag_enabled)
++		return 0;
++	for (pbm = pci_pbm_root; pbm; pbm = pbm->next)
++		if (pbm->is_oberon)
++			oberon_diag_snapshot(pbm);
++	return 0;
++}
++late_initcall(oberon_diag_init);
++
+ static int __init fire_init(void)
+ {
+ 	return platform_driver_register(&fire_driver);

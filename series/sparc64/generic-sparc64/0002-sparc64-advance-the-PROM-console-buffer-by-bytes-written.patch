@@ -1,0 +1,28 @@
+From ad772e74f75d305fa729836bd9a980552458d9ee Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 6 Nov 2026 08:22:57 +0100
+Subject: [RFC PATCH 2/9] sparc64: advance the PROM console buffer by bytes
+ written
+
+The firmware write service returns the number of bytes accepted. Advance
+the buffer by that count after a short write, rather than by the remaining
+length, so subsequent calls send the next bytes of the original buffer.
+
+Fixes: 595a251c0740 ("sparc: Write to prom console using indirect buffer.")
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/prom/console_64.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/sparc/prom/console_64.c b/arch/sparc/prom/console_64.c
+index 86dace787ae6..d58b42f0658f 100644
+--- a/arch/sparc/prom/console_64.c
++++ b/arch/sparc/prom/console_64.c
+@@ -41,6 +41,6 @@ void prom_console_write_buf(const char *buf, int len)
+ 		if (n < 0)
+ 			continue;
+ 		len -= n;
+-		buf += len;
++		buf += n;
+ 	}
+ }

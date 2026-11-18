@@ -1,0 +1,95 @@
+From bc13327d8216f603f4d1891a9a1b3c7557b738cc Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 16 Oct 2026 00:39:58 +0200
+Subject: [PATCH 4/8] sparc64: synchronize MSI queue dispatch before releasing
+ IRQs
+
+After hardware teardown succeeds, remove the dispatch entry and wait for
+queue handlers that may already have read the old IRQ. Release the IRQ
+and make its message number available only after those handlers finish.
+Preserve the association if hardware teardown fails.
+
+This closes the software dispatch race. It does not prove completion of
+pending hardware writes or make message-number reuse safe for Oberon.
+
+Fixes: 759f89e03c9e ("[SPARC64]: Consolidate MSI support code.")
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/pci_impl.h |  1 +
+ arch/sparc/kernel/pci_msi.c  | 16 ++++++++++------
+ 2 files changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/arch/sparc/kernel/pci_impl.h b/arch/sparc/kernel/pci_impl.h
+index 1f749989df1b..065b321a7952 100644
+--- a/arch/sparc/kernel/pci_impl.h
++++ b/arch/sparc/kernel/pci_impl.h
+@@ -53,6 +53,7 @@ void sparc64_pbm_msi_init(struct pci_pbm_info *pbm,
+ struct sparc64_msiq_cookie {
+ 	struct pci_pbm_info *pbm;
+ 	unsigned long msiqid;
++	unsigned int irq;
+ };
+ #endif
+ 
+diff --git a/arch/sparc/kernel/pci_msi.c b/arch/sparc/kernel/pci_msi.c
+index 81594d300dc0..98ccc126bd2e 100644
+--- a/arch/sparc/kernel/pci_msi.c
++++ b/arch/sparc/kernel/pci_msi.c
+@@ -191,10 +191,10 @@ static void sparc64_teardown_msi_irq(unsigned int irq,
+ 	const struct sparc64_msiq_ops *ops = pbm->msi_ops;
+ 	struct msi_desc *entry = irq_get_msi_desc(irq);
+ 	unsigned int msi_num;
+-	int i, err;
++	int i, q, err;
+ 
+ 	for (i = 0; i < pbm->msi_num; i++) {
+-		if (pbm->msi_irq_table[i] == irq)
++		if (READ_ONCE(pbm->msi_irq_table[i]) == irq)
+ 			break;
+ 	}
+ 	if (i >= pbm->msi_num) {
+@@ -204,7 +204,6 @@ static void sparc64_teardown_msi_irq(unsigned int irq,
+ 	}
+ 
+ 	msi_num = pbm->msi_first + i;
+-	WRITE_ONCE(pbm->msi_irq_table[i], 0);
+ 
+ 	err = ops->msi_teardown(pbm, msi_num);
+ 	if (err) {
+@@ -214,12 +213,16 @@ static void sparc64_teardown_msi_irq(unsigned int irq,
+ 		return;
+ 	}
+ 
+-	free_msi(pbm, msi_num);
++	WRITE_ONCE(pbm->msi_irq_table[i], 0);
++	/* A queue handler may already have fetched the old Linux IRQ. */
++	for (q = 0; q < pbm->msiq_num; q++)
++		synchronize_irq(pbm->msiq_irq_cookies[q].irq);
+ 
+ 	irq_set_msi_desc(irq, NULL);
+ 	entry->irq = 0;
+ 	irq_set_chip(irq, NULL);
+ 	irq_free(irq);
++	free_msi(pbm, msi_num);
+ }
+ 
+ static int msi_bitmap_alloc(struct pci_pbm_info *pbm)
+@@ -289,8 +292,8 @@ static int bringup_one_msi_queue(struct pci_pbm_info *pbm,
+ 	int irq = ops->msiq_build_irq(pbm, msiqid, devino);
+ 	int err, nid;
+ 
+-	if (irq < 0)
+-		return irq;
++	if (irq <= 0)
++		return irq ?: -ENOMEM;
+ 
+ 	nid = pbm->numa_node;
+ 	if (nid != -1) {
+@@ -302,6 +305,7 @@ static int bringup_one_msi_queue(struct pci_pbm_info *pbm,
+ 	if (err)
+ 		return err;
+ 
++	pbm->msiq_irq_cookies[msiqid - pbm->msiq_first].irq = irq;
+ 	return 0;
+ }
+ 

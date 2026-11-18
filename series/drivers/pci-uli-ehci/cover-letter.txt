@@ -1,0 +1,33 @@
+This independent PCI quirk applies to vanilla v7.3-rc1. It has no SPARC
+or M3000 patch dependency and is intended for PCI review, with USB and
+SPARC reviewers copied. It matches ULi 10b9:5239 revision 01, subsystem
+10b9:5238, and makes the USB HCD use INTx instead of MSI.
+
+On an Ultra45, programming the EHCI MSI data field by word or dword writes
+replicated the low byte into the high byte. The adjacent OHCI function
+preserved the same word-write values. The commit describes this observed
+behavior without claiming that all architectures or revisions are affected.
+The subsystem match limits scope to tested hardware, not a proven causal
+relationship with that subsystem ID. Detailed readbacks are below the
+patch separator for PCI review.
+
+The integrated test kernel selected INTx automatically. The onboard hub
+and a SanDisk USB storage device enumerated at 480Mbps. Three controller
+rebinds, repeated control requests and 640MiB of direct reads passed,
+with matching repeated SHA256 results and no new kernel log messages.
+No USB filesystem was mounted or written. OHCI and NICs retained MSI;
+network transfers also passed checksum checks. Kernel taint stayed zero.
+
+Runtime coverage is one Ultra45 with the generic sparc64 fixes and M3000
+patches also applied. A prior pre-follow-up baseline passed a temporary
+INTx test. A quirk-only vanilla image has not booted. Other architectures,
+USB writes and prolonged USB stress remain untested. No hardware erratum
+has been identified, and a cross-architecture silicon cause is unproven.
+
+The standalone patch passed full sparc64 UP and SMP W=1 vmlinux builds
+on the vanilla base and independent git-am verification. This does not
+constitute an x86 build or cross-architecture runtime test.
+
+Codex assisted with implementation, source review and test preparation.
+
+base-commit: cee9395acd8043be0644b25c34bfa86623f2b935

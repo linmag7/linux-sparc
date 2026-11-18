@@ -1,0 +1,14 @@
+Restore the firmware-provided PRIMEPOWER SPI initiator identity in the
+shared initialization path before PortEnable, including reset and resume.
+This driver patch applies independently to v7.3-rc1; it is separate from
+the generic firmware-endian correction and platform CPU/IRQ support.
+
+The exact cleaned integration booted PRIMEPOWER UP/SMP from disk to
+Gentoo with an ext4 root. Reset/resume and cold-boot identity evidence
+remain from earlier images; those cases were not repeated in this final
+qualification. Tests used the integrated stack, not this patch alone.
+
+Magnus Lindholm:
+  scsi: mptfusion: honor PRIMEPOWER 250 firmware initiator identity
+
+base-commit: cee9395acd8043be0644b25c34bfa86623f2b935

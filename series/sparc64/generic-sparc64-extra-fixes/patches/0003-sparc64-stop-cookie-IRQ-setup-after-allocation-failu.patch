@@ -1,0 +1,35 @@
+From 455698a7fa77be86ba7db6b642006783306f25fd Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Wed, 14 Oct 2026 09:09:13 +0200
+Subject: [PATCH 3/4] sparc64: stop cookie IRQ setup after allocation failure
+
+sun4v_build_common() returns zero when the IRQ descriptor or handler
+data cannot be allocated. Passing that result to cookie_assign()
+dereferences missing handler data for IRQ zero.
+
+Return before assigning the cookie when allocation fails. Keep the
+existing irq_free() cleanup for hypervisor cookie-assignment failure.
+
+Fixes: ee6a9333fa58 ("sparc64: sparse irq")
+Assisted-by: LLM
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/irq_64.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/arch/sparc/kernel/irq_64.c b/arch/sparc/kernel/irq_64.c
+index 3f55c69d5f3b..4f480a8cb66a 100644
+--- a/arch/sparc/kernel/irq_64.c
++++ b/arch/sparc/kernel/irq_64.c
+@@ -704,6 +704,8 @@ static unsigned int cookie_build_irq(u32 devhandle, unsigned int devino,
+ 	unsigned int irq;
+ 
+ 	irq = sun4v_build_common(devhandle, devino, cookie_handler_data, chip);
++	if (!irq)
++		return 0;
+ 
+ 	hv_error = cookie_assign(irq, devhandle, devino);
+ 	if (hv_error) {
+-- 
+2.43.0
+

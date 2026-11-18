@@ -1,0 +1,328 @@
+From a6054c1e45fc6e843e0ef2cca9e12767c1cf170c Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sun, 8 Nov 2026 18:23:56 +0100
+Subject: [RFC PATCH] PCI/MSI: notify drivers of permanent interrupt delivery
+ loss
+
+Notify a driver when a controller has permanently blocked MSI delivery.
+Serialize recovery against driver removal and system sleep, and report
+whether the callback recovered service or left it unresolved.
+
+Provide a separate software-only failure notification when recovery is
+unavailable. Document binding changes, callback locking and return values;
+neither notification establishes DMA completion or frees queue resources.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ Documentation/PCI/index.rst             |   1 +
+ Documentation/PCI/msi-delivery-loss.rst | 113 ++++++++++++++++++++++++
+ drivers/pci/msi/api.c                   |  91 +++++++++++++++++++
+ include/linux/pci.h                     |  32 +++++++
+ 4 files changed, 237 insertions(+)
+ create mode 100644 Documentation/PCI/msi-delivery-loss.rst
+
+diff --git a/Documentation/PCI/index.rst b/Documentation/PCI/index.rst
+index 5d720d2a415e..f6e48e413389 100644
+--- a/Documentation/PCI/index.rst
++++ b/Documentation/PCI/index.rst
+@@ -12,6 +12,7 @@ PCI Bus Subsystem
+    pciebus-howto
+    pci-iov-howto
+    msi-howto
++   msi-delivery-loss
+    sysfs-pci
+    acpi-info
+    pci-error-recovery
+diff --git a/Documentation/PCI/msi-delivery-loss.rst b/Documentation/PCI/msi-delivery-loss.rst
+new file mode 100644
+index 000000000000..35298c5b0174
+--- /dev/null
++++ b/Documentation/PCI/msi-delivery-loss.rst
+@@ -0,0 +1,113 @@
++.. SPDX-License-Identifier: GPL-2.0
++
++Permanent MSI delivery loss
++===========================
++
++This proposed interface handles permanent loss of a host controller's
++MSI/MSI-X delivery service. It does not repair the controller or implement
++PCI error recovery. A usable PCI function may still transfer data after
++its interrupt delivery service fails.
++
++Controller responsibilities
++---------------------------
++
++Before notification, contain the failed interrupt path and reject further
++MSI/MSI-X allocations for every affected function, including new driver
++bindings. Hold a device reference for each notification. Retain any queue
++storage, message identifiers or mappings that may still receive writes;
++notification results are not permission to reuse or free those resources.
++
++Call from sleepable process context without device, driver, controller or
++RTNL locks. Do not call from a PM callback, IRQ handler or error-recovery
++callback. Neither helper supplies a timeout or cancels a stalled driver.
++Release controller locks before notification: driver recovery may free
++vectors and re-enter the controller's teardown path.
++
++Call pci_msi_notify_lost() once per affected device. On failure, a caller
++may use pci_msi_report_failure() to request a software availability change.
++An error from either helper leaves recovery unresolved; do not describe
++this as device quiescence. A controller must define its admission and
++failure policy for drivers lacking either callback.
++
++Recovery callback
++-----------------
++
++The core serializes against system sleep, obtains a runtime-PM reference,
++and holds the PCI device lock while calling the current driver's
++``msi_lost`` method. The device lock serializes driver unbind. The driver
++must take its own operational locks to serialize ordinary I/O control.
++Do not unbind the device or recursively acquire the PCI device lock.
++
++Return zero after recovering service without MSI/MSI-X, one if no MSI
++recovery was needed, or a negative errno. In particular, preserve an
++administratively inactive device. A driver may stop and reopen its normal
++I/O path using legacy interrupts if the device remains accessible. A
++failed restart must leave a defined software state and report the error.
++
++The core checks registration, disconnection, PCI channel state and D0
++before dispatch, and rejects nonnegative results if MSI/MSI-X remains
++enabled. These checks do not freeze asynchronous hardware state. Callers
++must also verify their own vector ownership before accepting recovery.
++The returned outcome describes this invocation, not a persistent health
++state or proof of endpoint DMA completion.
++
++Failure callback
++----------------
++
++The ``msi_lost_failed`` method runs under system-sleep serialization and
++the PCI device lock, but without a runtime-PM resume. It must not initiate
++hardware accesses or assume D0, PCI channel availability or successful
++completion of an earlier recovery callback.
++
++Inspect the current driver's state and return zero after marking an
++affected MSI user unavailable, one if there is no affected MSI user, or a
++negative errno. Repeated notification must be harmless. Retain resources
++needed by outstanding work or DMA; a software availability change alone
++does not stop either. Waiting for existing work does not retroactively
++prevent hardware accesses already in progress.
++
++The two helpers acquire and release the device lock independently. A
++remove/rebind can occur between them, so the failure callback cannot
++assume that this binding received the recovery callback. It must not mark
++an unrelated, already-legacy binding unavailable merely because an older
++binding failed recovery.
++
++Relationship to PCI error recovery
++----------------------------------
++
++PCI error recovery coordinates channel errors and reset/resume callbacks
++across affected devices. Permanent loss of an MSI delivery service does
++not itself establish a channel error or require a PCI reset. These helpers
++do not manufacture an AER event, change PCI channel state or override an
++existing error-recovery owner. Whether this interface should be integrated
++with existing PCI recovery facilities remains a subsystem review question.
++
++Why notification is proposed
++----------------------------
++
++Blocking new MSI allocations does not convert an already-running device
++to legacy interrupts. The driver owns its interrupt handlers, queues and
++DMA resources, so it must participate in changing interrupt mode. Calling
++pci_free_irq_vectors() directly from a controller failure worker would
++bypass that ownership and the driver's teardown ordering.
++
++Existing PCI error callbacks are not a drop-in conversion mechanism. For
++example, tg3's slot-reset path restores PCI state and its resume path
++restarts the existing device setup; they do not perform the normal close
++and open that releases vectors and selects legacy interrupts. Pretending
++that MSI delivery loss is a channel error would not supply that behavior.
++An extension to PCI error recovery could provide equivalent semantics,
++but would need to distinguish permanent interrupt-service loss from an
++ordinary recoverable PCI channel fault.
++
++A global notifier would still need binding lifetime, PM and driver locking
++rules, while making driver participation harder to inspect. Forced unbind
++would stop service and bypass the opportunity to recover an active device
++through its own lifecycle. Neither is used by this proposal.
++
++The recovery and failure methods have different access contracts. Recovery
++may resume the device and perform normal hardware teardown/restart. Failure
++notification can be required precisely because resume or recovery failed,
++and must not initiate hardware accesses. Keeping those operations separate
++makes driver opt-in explicit; an action-enumerated callback could express
++the same contract if preferred during PCI subsystem review.
+diff --git a/drivers/pci/msi/api.c b/drivers/pci/msi/api.c
+index c18559b6272c..8de8387066ab 100644
+--- a/drivers/pci/msi/api.c
++++ b/drivers/pci/msi/api.c
+@@ -10,6 +10,8 @@
+ 
+ #include <linux/export.h>
+ #include <linux/irq.h>
++#include <linux/pm_runtime.h>
++#include <linux/suspend.h>
+ 
+ #include "msi.h"
+ 
+@@ -409,3 +411,92 @@ bool pci_msi_enabled(void)
+ 	return pci_msi_enable;
+ }
+ EXPORT_SYMBOL(pci_msi_enabled);
++
++/**
++ * pci_msi_notify_lost() - Notify drivers of permanent MSI delivery loss
++ * @dev: referenced PCI device affected by contained MSI delivery failure
++ * @outcome: non-NULL destination for the observed notification outcome
++ *
++ * The caller must block further MSI allocations and hold no device, driver
++ * or MSI-controller locks. This sleepable API must not run from PM callbacks.
++ * The callback runs with the device lock and a runtime-PM reference held.
++ * See Documentation/PCI/msi-delivery-loss.rst for the callback contract.
++ * An error does not establish device quiescence or completion of DMA.
++ *
++ * Return: 0 for completed recovery, 1 if no MSI recovery was needed, or errno.
++ */
++int pci_msi_notify_lost(struct pci_dev *dev,
++			enum pci_msi_loss_outcome *outcome)
++{
++	unsigned int sleep_flags;
++	int ret;
++
++	*outcome = PCI_MSI_LOSS_UNRESOLVED;
++	sleep_flags = lock_system_sleep();
++	ret = pm_runtime_resume_and_get(&dev->dev);
++	if (ret < 0) {
++		*outcome = PCI_MSI_LOSS_PM_FAILED;
++		goto unlock_sleep;
++	}
++	device_lock(&dev->dev);
++	if (!device_is_registered(&dev->dev) || pci_dev_is_disconnected(dev)) {
++		*outcome = PCI_MSI_LOSS_UNAVAILABLE;
++		ret = -ENODEV;
++	} else if (dev->error_state != pci_channel_io_normal ||
++		   dev->current_state != PCI_D0) {
++		*outcome = PCI_MSI_LOSS_BUSY;
++		ret = -EBUSY;
++	} else if (!dev->msi_enabled && !dev->msix_enabled) {
++		*outcome = PCI_MSI_LOSS_NO_MSI;
++		ret = 1;
++	} else if (!dev->driver || !dev->driver->msi_lost) {
++		*outcome = PCI_MSI_LOSS_UNSUPPORTED;
++		ret = -EOPNOTSUPP;
++	} else {
++		ret = dev->driver->msi_lost(dev);
++		if (ret < 0) {
++			*outcome = PCI_MSI_LOSS_DRIVER_FAILED;
++		} else if (dev->msi_enabled || dev->msix_enabled) {
++			*outcome = PCI_MSI_LOSS_STILL_ENABLED;
++			ret = -EBUSY;
++		} else {
++			*outcome = ret ? PCI_MSI_LOSS_NO_MSI : PCI_MSI_LOSS_RECOVERED;
++		}
++	}
++	device_unlock(&dev->dev);
++	pm_runtime_put(&dev->dev);
++unlock_sleep:
++	unlock_system_sleep(sleep_flags);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(pci_msi_notify_lost);
++
++/**
++ * pci_msi_report_failure() - Report unresolved MSI delivery loss
++ * @dev: referenced PCI device whose MSI delivery remains contained
++ *
++ * Call without owner or driver locks, outside PM callbacks. This does not
++ * resume the device or establish hardware/DMA quiescence. The current
++ * binding may differ from an earlier pci_msi_notify_lost() call; the
++ * callback must inspect its own state before marking the device unavailable.
++ *
++ * Return: 0 if marked unavailable, 1 if no MSI user remains, or errno.
++ */
++int pci_msi_report_failure(struct pci_dev *dev)
++{
++	unsigned int sleep_flags;
++	int ret;
++
++	sleep_flags = lock_system_sleep();
++	device_lock(&dev->dev);
++	if (!device_is_registered(&dev->dev) || !dev->driver)
++		ret = -ENODEV;
++	else if (!dev->driver->msi_lost_failed)
++		ret = -EOPNOTSUPP;
++	else
++		ret = dev->driver->msi_lost_failed(dev);
++	device_unlock(&dev->dev);
++	unlock_system_sleep(sleep_flags);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(pci_msi_report_failure);
+diff --git a/include/linux/pci.h b/include/linux/pci.h
+index d31a8d107b1e..cb49c74cf6e0 100644
+--- a/include/linux/pci.h
++++ b/include/linux/pci.h
+@@ -1012,6 +1012,10 @@ struct module;
+  *              registers.
+  * @sriov_get_vf_total_msix: PF driver callback to get the total number of
+  *              MSI-X vectors available for distribution to the VFs.
++ * @msi_lost: Recover permanent MSI loss; see
++ *              Documentation/PCI/msi-delivery-loss.rst.
++ * @msi_lost_failed: Mark an affected MSI user unavailable without initiating
++ *              hardware access; see Documentation/PCI/msi-delivery-loss.rst.
+  * @err_handler: See Documentation/PCI/pci-error-recovery.rst
+  * @groups:	Sysfs attribute groups.
+  * @dev_groups: Attributes attached to the device that will be
+@@ -1037,6 +1041,8 @@ struct pci_driver {
+ 	int  (*sriov_configure)(struct pci_dev *dev, int num_vfs); /* On PF */
+ 	int  (*sriov_set_msix_vec_count)(struct pci_dev *vf, int msix_vec_count); /* On PF */
+ 	u32  (*sriov_get_vf_total_msix)(struct pci_dev *pf);
++	int (*msi_lost)(struct pci_dev *dev);
++	int (*msi_lost_failed)(struct pci_dev *dev);
+ 	const struct pci_error_handlers *err_handler;
+ 	const struct attribute_group **groups;
+ 	const struct attribute_group **dev_groups;
+@@ -1758,7 +1764,22 @@ struct msix_entry {
+ 	u16	entry;	/* Driver uses to specify entry, OS writes */
+ };
+ 
++enum pci_msi_loss_outcome {
++	PCI_MSI_LOSS_UNRESOLVED,
++	PCI_MSI_LOSS_PM_FAILED,
++	PCI_MSI_LOSS_UNAVAILABLE,
++	PCI_MSI_LOSS_BUSY,
++	PCI_MSI_LOSS_UNSUPPORTED,
++	PCI_MSI_LOSS_NO_MSI,
++	PCI_MSI_LOSS_DRIVER_FAILED,
++	PCI_MSI_LOSS_STILL_ENABLED,
++	PCI_MSI_LOSS_RECOVERED,
++};
++
+ #ifdef CONFIG_PCI_MSI
++int pci_msi_report_failure(struct pci_dev *dev);
++int pci_msi_notify_lost(struct pci_dev *dev,
++			enum pci_msi_loss_outcome *outcome);
+ int pci_msi_vec_count(struct pci_dev *dev);
+ void pci_disable_msi(struct pci_dev *dev);
+ int pci_msix_vec_count(struct pci_dev *dev);
+@@ -1812,6 +1833,17 @@ static inline unsigned int pci_irq_type(struct pci_dev *pdev)
+ }
+ 
+ #else
++static inline int pci_msi_report_failure(struct pci_dev *dev)
++{
++	return -EOPNOTSUPP;
++}
++
++static inline int pci_msi_notify_lost(struct pci_dev *dev,
++				      enum pci_msi_loss_outcome *outcome)
++{
++	*outcome = PCI_MSI_LOSS_UNSUPPORTED;
++	return -EOPNOTSUPP;
++}
+ static inline int pci_msi_vec_count(struct pci_dev *dev) { return -ENOSYS; }
+ static inline void pci_disable_msi(struct pci_dev *dev) { }
+ static inline int pci_msix_vec_count(struct pci_dev *dev) { return -ENOSYS; }
+-- 
+2.43.0
+

@@ -1,0 +1,62 @@
+From 63a2e2a9710ec9d4bd4c1cda606471669ba6aaeb Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 6 Nov 2026 10:56:30 +0100
+Subject: [RFC PATCH 4/9] sparc64: use the kernel log for runtime-capable
+ fatal diagnostics
+
+IRQ allocation, CPU lookup and kernel mapping helpers can be called after
+the boot console has retired. Report their fatal errors through the
+kernel log so the registered native console handles them and the message
+is retained in the log buffer. Keep their existing halt behavior.
+
+Early calls still use the registered boot console. This does not change
+firmware entry, terminal handoff or error recovery.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/irq_64.c  | 2 +-
+ arch/sparc/kernel/prom_64.c | 2 +-
+ arch/sparc/mm/init_64.c     | 4 ++--
+ 3 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/arch/sparc/kernel/irq_64.c b/arch/sparc/kernel/irq_64.c
+index 3f55c69d5f3b..e1dd9bbd16a6 100644
+--- a/arch/sparc/kernel/irq_64.c
++++ b/arch/sparc/kernel/irq_64.c
+@@ -630,7 +630,7 @@ unsigned int build_irq(int inofixup, unsigned long iclr, unsigned long imap)
+ 
+ 	handler_data = kzalloc_obj(struct irq_handler_data, GFP_ATOMIC);
+ 	if (unlikely(!handler_data)) {
+-		prom_printf("IRQ: kzalloc(irq_handler_data) failed.\n");
++		pr_emerg("IRQ: kzalloc(irq_handler_data) failed.\n");
+ 		prom_halt();
+ 	}
+ 	irq_set_handler_data(irq, handler_data);
+diff --git a/arch/sparc/kernel/prom_64.c b/arch/sparc/kernel/prom_64.c
+index aa4799cbb9c1..9210ee6d6b4e 100644
+--- a/arch/sparc/kernel/prom_64.c
++++ b/arch/sparc/kernel/prom_64.c
+@@ -449,7 +449,7 @@ static void *of_iterate_over_cpus(void *(*func)(struct device_node *, int, int),
+ 			cpuid = of_getintprop_default(dp, this_mid_prop, -1);
+ 		}
+ 		if (cpuid < 0) {
+-			prom_printf("OF: Serious problem, cpu lacks "
++			pr_emerg("OF: Serious problem, cpu lacks "
+ 				    "%s property", this_mid_prop);
+ 			prom_halt();
+ 		}
+diff --git a/arch/sparc/mm/init_64.c b/arch/sparc/mm/init_64.c
+index 103db4683b16..e7de3a9c558a 100644
+--- a/arch/sparc/mm/init_64.c
++++ b/arch/sparc/mm/init_64.c
+@@ -1759,8 +1759,8 @@ static unsigned long __ref kernel_map_range(unsigned long pstart,
+ 	unsigned long alloc_bytes = 0UL;
+ 
+ 	if ((vstart & ~PAGE_MASK) || (vend & ~PAGE_MASK)) {
+-		prom_printf("kernel_map: Unaligned physmem[%lx:%lx]\n",
+-			    vstart, vend);
++		pr_emerg("kernel_map: Unaligned physmem[%lx:%lx]\n",
++			 vstart, vend);
+ 		prom_halt();
+ 	}
+ 

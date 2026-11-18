@@ -1,0 +1,31 @@
+Preserve receive error status consumed by transmit polling, avoid waiting
+for the console port lock during panic, and provide explicit UART handoff
+for firmware entry. The caller pins the console and serial configuration,
+then transfers register ownership without holding a port lock in firmware.
+
+The handoff saves and verifies register state and excludes native console
+MMIO while firmware owns the UART. Exceptional contexts refuse handoff.
+A caller must contain restoration failure rather than resume with unknown
+state. PC16550D SNLS378C sections 8.6.2-8.6.6 describe these registers.
+
+This group applies independently to vanilla v7.3-rc1. Earlier PRIMEPOWER
+hardware tests exercised serial, BREAK/go and native console traffic. A
+RAM-only held-port panic fixture observed twelve skipped writes and zero
+UART MMIO. The simulated firmware-owned panic case produced the same
+result. External recovery and exact cleaned UP/SMP boot, native serial and
+BREAK tests passed. Neither fixture claims cancellation of an actual
+in-flight firmware call.
+
+On Ultra45, the exact cleaned integration passed SUNSU/ST16650 serial
+receive/transmit, transmit-status polling, BREAK/go and warm reboot.
+Paced input passed alongside console output. Input bursts during printk
+overran the non-FIFO receive path on both the old kernel and candidate;
+this series does not make that workload lossless. No framing/parity
+error injection or non-PRIMEPOWER UART ownership handoff is claimed.
+
+Magnus Lindholm:
+  serial: sunsu: preserve receive errors across transmit polling
+  serial: sunsu: avoid waiting for a port lock during panic
+  serial: sunsu: hand the console to firmware explicitly
+
+base-commit: cee9395acd8043be0644b25c34bfa86623f2b935

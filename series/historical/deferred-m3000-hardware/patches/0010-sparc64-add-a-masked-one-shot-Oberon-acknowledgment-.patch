@@ -1,0 +1,207 @@
+From 0c517a98ef565d3490fd64b766bc4c5dbf9e06fc Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Thu, 15 Oct 2026 13:07:35 +0200
+Subject: [RFC PATCH 10/17] sparc64: add a masked one-shot Oberon
+ acknowledgment experiment
+
+Require a successful source clear and resample leaf errors before and
+after writing the prepared descriptor's ICLR state to idle. Preserve
+other ICLR bits and retain the controller and source readbacks.
+
+Serialize with diagnostics and the IRQ descriptor. Refuse repeated
+requests and keep the route disabled; no rearm operation is added.
+Register field: INTERRUPT_CLEAR_ENTRIES_INT_STATE, bits 1:0.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/irq_64.h |  6 +++
+ arch/sparc/kernel/irq_64.c      | 37 +++++++++++++++
+ arch/sparc/kernel/pci_fire.c    | 81 ++++++++++++++++++++++++++++++++-
+ 3 files changed, 122 insertions(+), 2 deletions(-)
+
+diff --git a/arch/sparc/include/asm/irq_64.h b/arch/sparc/include/asm/irq_64.h
+index e4ca603460cd..9f122f9df8b3 100644
+--- a/arch/sparc/include/asm/irq_64.h
++++ b/arch/sparc/include/asm/irq_64.h
+@@ -65,6 +65,12 @@ void sun4u_destroy_msi(unsigned int irq);
+ unsigned int irq_alloc(unsigned int dev_handle, unsigned int dev_ino);
+ void irq_free(unsigned int irq);
+ 
++struct oberon_ack_result {
++	unsigned long before, after;
++	bool written;
++};
++int oberon_ack_capture(unsigned int irq, int (*check)(void *), void *arg,
++		       struct oberon_ack_result *result);
+ bool oberon_capture_quarantined(unsigned int irq);
+ int oberon_arm_capture(unsigned int irq);
+ int oberon_disarm_capture(unsigned int irq);
+diff --git a/arch/sparc/kernel/irq_64.c b/arch/sparc/kernel/irq_64.c
+index 4fdf0b201ac6..98f534e41932 100644
+--- a/arch/sparc/kernel/irq_64.c
++++ b/arch/sparc/kernel/irq_64.c
+@@ -213,6 +213,7 @@ struct irq_handler_data {
+ 	bool captured;
+ 	bool capture_live;
+ 	bool capture_armed;
++	bool capture_ack_attempted;
+ 	unsigned long capture_baseline;
+ };
+ 
+@@ -793,6 +794,42 @@ bool oberon_capture_quarantined(unsigned int irq)
+ 	return ready;
+ }
+ 
++int oberon_ack_capture(unsigned int irq, int (*check)(void *), void *arg,
++		       struct oberon_ack_result *result)
++{
++	struct irq_desc *desc = irq_to_desc(irq);
++	struct irq_handler_data *data;
++	unsigned long flags;
++	int ret = -EBUSY;
++
++	if (!desc || !check || !result)
++		return -EINVAL;
++	raw_spin_lock_irqsave(&desc->lock, flags);
++	data = irq_desc_get_handler_data(desc);
++	if (!data || desc->irq_data.chip != &oberon_capture_chip ||
++	    !data->capture_live || !data->captured || data->capture_armed ||
++	    data->capture_ack_attempted ||
++	    upa_readq(data->imap) != data->capture_baseline)
++		goto out;
++	result->before = upa_readq(data->iclr);
++	ret = check(arg);
++	if (ret)
++		goto out;
++	data->capture_ack_attempted = true;
++	result->written = true;
++	/* Change only the two-bit controller state; the route remains invalid. */
++	upa_writeq(result->before & ~3UL, data->iclr);
++	result->after = upa_readq(data->iclr);
++	ret = check(arg);
++	if (result->after != (result->before & ~3UL))
++		ret = -EIO;
++	if (upa_readq(data->imap) != data->capture_baseline)
++		ret = -EBUSY;
++out:
++	raw_spin_unlock_irqrestore(&desc->lock, flags);
++	return ret;
++}
++
+ int oberon_arm_capture(unsigned int irq)
+ {
+ 	struct irq_desc *desc = irq_to_desc(irq);
+diff --git a/arch/sparc/kernel/pci_fire.c b/arch/sparc/kernel/pci_fire.c
+index d0d1fefe2b3f..bf70c78c164e 100644
+--- a/arch/sparc/kernel/pci_fire.c
++++ b/arch/sparc/kernel/pci_fire.c
+@@ -746,6 +746,10 @@ struct oberon_irq_capture {
+ 	bool clear_attempted;
+ 	int clear_result;
+ 	u64 clear_after[2][8];
++	struct oberon_ack_result ack;
++	u64 ack_status[2][2][8];
++	int ack_result, ack_checks;
++	bool ack_requested;
+ };
+ 
+ static int oberon_capture_arm_port = -1;
+@@ -909,8 +913,8 @@ static ssize_t oberon_capture_clear_result_show(struct device *dev,
+ 	if (!cap || dev != &cap->pbm->op->dev)
+ 		return -ENODEV;
+ 	guard(mutex)(&oberon_diag_lock);
+-	len = sysfs_emit(buf, "attempted=%u result=%d ack=0 rearm=0\n",
+-			 cap->clear_attempted, cap->clear_result);
++	len = sysfs_emit(buf, "attempted=%u result=%d ack=%u rearm=0\n",
++			 cap->clear_attempted, cap->clear_result, cap->ack.written);
+ 	for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++)
+ 		len += sysfs_emit_at(buf, len, "reg=%lx first=%016llx second=%016llx\n",
+ 				     oberon_capture_status_regs[i],
+@@ -920,6 +924,69 @@ static ssize_t oberon_capture_clear_result_show(struct device *dev,
+ static DEVICE_ATTR(oberon_capture_clear_result, 0400,
+ 		   oberon_capture_clear_result_show, NULL);
+ 
++static int oberon_ack_sources(void *arg)
++{
++	struct oberon_irq_capture *cap = arg;
++	int stage = cap->ack_checks++, pass, i, ret = 0;
++
++	if (stage >= ARRAY_SIZE(cap->ack_status))
++		return -EINVAL;
++	for (pass = 0; pass < 2; pass++) {
++		for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++) {
++			u64 val = upa_readq(cap->pbm->pbm_regs +
++					    oberon_capture_status_regs[i]);
++
++			cap->ack_status[stage][pass][i] = val;
++			if (val)
++				ret = -EAGAIN;
++		}
++	}
++	return ret;
++}
++
++static ssize_t oberon_capture_ack_store(struct device *dev,
++				      struct device_attribute *attr,
++				      const char *buf, size_t count)
++{
++	struct oberon_irq_capture *cap = oberon_live_capture;
++
++	if (!cap || dev != &cap->pbm->op->dev || !sysfs_streq(buf, "1"))
++		return -EINVAL;
++	guard(mutex)(&oberon_diag_lock);
++	if (!cap->clear_attempted || cap->clear_result || cap->ack_requested)
++		return -EBUSY;
++	cap->ack_requested = true;
++	cap->ack_result = oberon_ack_capture(cap->irq, oberon_ack_sources,
++					     cap, &cap->ack);
++	return cap->ack_result ? cap->ack_result : count;
++}
++static DEVICE_ATTR_WO(oberon_capture_ack);
++
++static ssize_t oberon_capture_ack_result_show(struct device *dev,
++					     struct device_attribute *attr,
++					     char *buf)
++{
++	struct oberon_irq_capture *cap = oberon_live_capture;
++	int len, stage, i;
++
++	if (!cap || dev != &cap->pbm->op->dev)
++		return -ENODEV;
++	guard(mutex)(&oberon_diag_lock);
++	len = sysfs_emit(buf,
++		"requested=%u written=%u result=%d before=%lx after=%lx checks=%d rearm=0\n",
++			 cap->ack_requested, cap->ack.written, cap->ack_result,
++			 cap->ack.before, cap->ack.after, cap->ack_checks);
++	for (stage = 0; stage < cap->ack_checks && stage < 2; stage++)
++		for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++)
++			len += sysfs_emit_at(buf, len,
++				"stage=%d reg=%lx first=%016llx second=%016llx\n",
++				stage, oberon_capture_status_regs[i],
++				cap->ack_status[stage][0][i], cap->ack_status[stage][1][i]);
++	return len;
++}
++static DEVICE_ATTR(oberon_capture_ack_result, 0400,
++		   oberon_capture_ack_result_show, NULL);
++
+ static void oberon_capture_report(struct work_struct *work)
+ {
+ 	struct oberon_irq_capture *cap = container_of(work,
+@@ -1035,7 +1102,17 @@ static int __init oberon_capture_init(void)
+ 		if (!ret)
+ 			ret = device_create_file(&selected->pbm->op->dev,
+ 						 &dev_attr_oberon_capture_clear_result);
++		if (!ret)
++			ret = device_create_file(&selected->pbm->op->dev,
++						 &dev_attr_oberon_capture_ack);
++		if (!ret)
++			ret = device_create_file(&selected->pbm->op->dev,
++						 &dev_attr_oberon_capture_ack_result);
+ 		if (ret) {
++			device_remove_file(&selected->pbm->op->dev,
++					   &dev_attr_oberon_capture_ack);
++			device_remove_file(&selected->pbm->op->dev,
++					   &dev_attr_oberon_capture_clear_result);
+ 			device_remove_file(&selected->pbm->op->dev,
+ 					   &dev_attr_oberon_capture_clear);
+ 			device_remove_file(&selected->pbm->op->dev,

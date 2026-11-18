@@ -1,0 +1,53 @@
+From 3976dfd790ae35858dab73edec6706a13591e29d Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 6 Nov 2026 12:25:05 +0100
+Subject: [RFC PATCH 7/9] sparc64: cache the firmware input node during
+ console discovery
+
+Resolve the chosen input instance while firmware owns the boot devices.
+This lets later console handoff verify both endpoints without a new
+firmware query. Leave the cached pointer unset if stdin cannot be resolved.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/prom.h | 3 +++
+ arch/sparc/kernel/prom_64.c   | 5 +++++
+ 2 files changed, 8 insertions(+)
+
+diff --git a/arch/sparc/include/asm/prom.h b/arch/sparc/include/asm/prom.h
+index 8184575b1336..38cf13e4dabc 100644
+--- a/arch/sparc/include/asm/prom.h
++++ b/arch/sparc/include/asm/prom.h
+@@ -49,6 +49,9 @@ void __iomem *of_ioremap(struct resource *res, unsigned long offset, unsigned lo
+ void of_iounmap(struct resource *res, void __iomem *base, unsigned long size);
+ 
+ extern struct device_node *of_console_device;
++#ifdef CONFIG_SPARC64
++extern struct device_node *of_console_input_device;
++#endif
+ extern char *of_console_path;
+ extern char *of_console_options;
+ 
+diff --git a/arch/sparc/kernel/prom_64.c b/arch/sparc/kernel/prom_64.c
+index 9210ee6d6b4e..a078486d9bec 100644
+--- a/arch/sparc/kernel/prom_64.c
++++ b/arch/sparc/kernel/prom_64.c
+@@ -598,6 +598,8 @@ void __init of_fill_in_cpu_data(void)
+ 	smp_fill_in_sib_core_maps();
+ }
+ 
++struct device_node *of_console_input_device;
++
+ void __init of_console_init(void)
+ {
+ 	char *msg = "OF stdout device is: %s\n";
+@@ -632,6 +634,9 @@ void __init of_console_init(void)
+ 	}
+ 
+ 	of_console_device = dp;
++	node = prom_getint(prom_chosen_node, "stdin");
++	if (node != -1 && node)
++		of_console_input_device = of_find_node_by_phandle(prom_inst2pkg(node));
+ 
+ 	printk(msg, of_console_path);
+ }

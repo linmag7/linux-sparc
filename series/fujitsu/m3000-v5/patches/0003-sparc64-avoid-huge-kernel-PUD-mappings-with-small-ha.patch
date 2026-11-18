@@ -1,0 +1,44 @@
+From b8404e498b320d635c1eb108b4379ef266e50c09 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Wed, 14 Oct 2026 09:09:10 +0200
+Subject: [PATCH v5 03/10] sparc64: avoid huge kernel PUD mappings with small
+ hardware pages
+
+The kernel PUD refill path merges virtual address bits 32:28 into a
+TTE, requiring hardware pages of at least 256MB. Sun4u instead selects
+4MB pages, losing bits 27:22 when refilling a huge PUD. Sun4v also falls
+back to 4MB pages when neither 256MB nor 2GB pages are selected.
+
+Keep PMD mappings when the selected PUD encoding matches the small-page
+entry. The PMD refill path preserves the bits needed by the 4MB TTE;
+sun4v selections of 256MB or larger remain eligible for huge PUDs.
+
+Fixes: 0dd5b7b09e13 ("sparc64: Fix physical memory management regressions with large max_phys_bits.")
+Cc: stable@vger.kernel.org
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/mm/init_64.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/arch/sparc/mm/init_64.c b/arch/sparc/mm/init_64.c
+index 103db4683b16..f3f7eba08469 100644
+--- a/arch/sparc/mm/init_64.c
++++ b/arch/sparc/mm/init_64.c
+@@ -1696,6 +1696,14 @@ static unsigned long __ref kernel_map_hugepud(unsigned long vstart,
+ static bool kernel_can_map_hugepud(unsigned long vstart, unsigned long vend,
+ 				   bool guard)
+ {
++	/*
++	 * The PUD miss path propagates VA bits 32:28, assuming at least
++	 * 256MB hardware pages. Retain PMD mappings when the selected PUD
++	 * encoding falls back to the small-page entry.
++	 */
++	if (kern_linear_pte_xor[2] == kern_linear_pte_xor[0])
++		return false;
++
+ 	if (guard && !(vstart & ~PUD_MASK) && (vend - vstart) >= PUD_SIZE)
+ 		return true;
+ 
+-- 
+2.43.0
+

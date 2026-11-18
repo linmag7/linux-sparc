@@ -1,0 +1,20 @@
+From: Magnus Lindholm <linmag7@gmail.com>
+Subject: [RFC PATCH 0/1] Decode cached mptfusion firmware on big-endian
+ hosts
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Decode little-endian cached firmware fields before host calculations and
+PIO reload. This generic driver correction applies independently to
+v7.3-rc1; PRIMEPOWER reset/reload tests motivated it.
+
+The exact cleaned integration booted PRIMEPOWER UP/SMP from disk to
+Gentoo with an ext4 root. Reset and firmware-reload evidence remains
+from earlier images; those operations were not repeated in this final
+qualification. Tests used the integrated stack, not this patch alone.
+
+Magnus Lindholm:
+  scsi: mptfusion: decode cached firmware before PIO reload
+
+base-commit: cee9395acd8043be0644b25c34bfa86623f2b935

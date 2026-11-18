@@ -1,0 +1,76 @@
+From b8334ba6a9a26b303451a0ed93ce2a325c76a703 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Wed, 14 Oct 2026 09:09:11 +0200
+Subject: [PATCH v5 05/10] sparc64: validate Fire register properties before
+ initialization
+
+The Fire interrupt translator reads one reg entry, and PCI PBM setup
+reads two, without checking that the firmware supplied enough data.
+
+Check the property before allocating the translator or changing PBM
+state. Halt early translation on invalid firmware data rather than leave
+raw interrupt numbers untranslated. Return an error from PBM setup so
+probe can release its allocations.
+
+Fixes: 861fe90656b8 ("[SPARC64]: SUN4U PCI-E controller support.")
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/pci_fire.c      | 9 +++++++--
+ arch/sparc/kernel/prom_irqtrans.c | 8 +++++++-
+ 2 files changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/arch/sparc/kernel/pci_fire.c b/arch/sparc/kernel/pci_fire.c
+index c35a8e3c1eae..db160eeb0ffe 100644
+--- a/arch/sparc/kernel/pci_fire.c
++++ b/arch/sparc/kernel/pci_fire.c
+@@ -416,7 +416,13 @@ static int pci_fire_pbm_init(struct pci_pbm_info *pbm,
+ {
+ 	const struct linux_prom64_registers *regs;
+ 	struct device_node *dp = op->dev.of_node;
+-	int err;
++	int err, len;
++
++	regs = of_get_property(dp, "reg", &len);
++	if (!regs || len < 2 * sizeof(*regs)) {
++		dev_err(&op->dev, "missing or short reg property\n");
++		return -EINVAL;
++	}
+ 
+ 	pbm->numa_node = NUMA_NO_NODE;
+ 
+@@ -429,7 +435,6 @@ static int pci_fire_pbm_init(struct pci_pbm_info *pbm,
+ 	pbm->op = op;
+ 	pbm->name = dp->full_name;
+ 
+-	regs = of_get_property(dp, "reg", NULL);
+ 	pbm->pbm_regs = regs[0].phys_addr;
+ 	pbm->controller_regs = regs[1].phys_addr - 0x410000UL;
+ 
+diff --git a/arch/sparc/kernel/prom_irqtrans.c b/arch/sparc/kernel/prom_irqtrans.c
+index 5752bfd73ac0..558ed5114664 100644
+--- a/arch/sparc/kernel/prom_irqtrans.c
++++ b/arch/sparc/kernel/prom_irqtrans.c
+@@ -544,13 +544,19 @@ static void __init fire_irq_trans_init(struct device_node *dp)
+ {
+ 	const struct linux_prom64_registers *regs;
+ 	struct fire_irq_data *irq_data;
++	int len;
++
++	regs = of_get_property(dp, "reg", &len);
++	if (!regs || len < sizeof(*regs)) {
++		prom_printf("%s: missing or short reg property.\n", dp->full_name);
++		prom_halt();
++	}
+ 
+ 	dp->irq_trans = prom_early_alloc(sizeof(struct of_irq_controller));
+ 	dp->irq_trans->irq_build = fire_irq_build;
+ 
+ 	irq_data = prom_early_alloc(sizeof(struct fire_irq_data));
+ 
+-	regs = of_get_property(dp, "reg", NULL);
+ 	dp->irq_trans->data = irq_data;
+ 
+ 	irq_data->pbm_regs = regs[0].phys_addr;
+-- 
+2.43.0
+

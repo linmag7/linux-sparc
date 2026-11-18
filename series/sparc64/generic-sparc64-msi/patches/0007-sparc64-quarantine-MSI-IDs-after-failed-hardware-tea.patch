@@ -1,0 +1,49 @@
+From b43c2bdb16e860f3195af57b2ccb07c4444ac3a8 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 16 Oct 2026 00:45:02 +0200
+Subject: [PATCH 7/8] sparc64: quarantine MSI IDs after failed hardware
+ teardown
+
+The legacy MSI core attempts descriptor cleanup after the architecture
+teardown callback returns. Returning early on failed invalidation leaves
+the software IRQ dispatchable and causes descriptor cleanup to warn and
+leak the still-associated descriptor.
+
+Detach the dispatch entry and synchronize queue handlers on failure too.
+Release the software IRQ and descriptor association, but keep the failed
+message ID allocated so subsequent records cannot target a new device.
+The ID remains reserved until reboot; this does not establish hardware
+completion for successfully invalidated IDs.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/pci_msi.c | 9 ++++-----
+ 1 file changed, 4 insertions(+), 5 deletions(-)
+
+diff --git a/arch/sparc/kernel/pci_msi.c b/arch/sparc/kernel/pci_msi.c
+index 7ae8c57be2b3..675ac060f624 100644
+--- a/arch/sparc/kernel/pci_msi.c
++++ b/arch/sparc/kernel/pci_msi.c
+@@ -215,10 +215,8 @@ static void sparc64_teardown_msi_irq(unsigned int irq,
+ 
+ 	err = ops->msi_teardown(pbm, msi_num);
+ 	if (err) {
+-		pci_err(pdev, "%s: teardown: ops->teardown() on MSI %u, "
+-			"irq %u, gives error %d\n", pbm->name, msi_num, irq,
+-			err);
+-		return;
++		pci_err(pdev, "%s: MSI %u IRQ %u teardown failed (%d); reserving ID\n",
++			pbm->name, msi_num, irq, err);
+ 	}
+ 
+ 	WRITE_ONCE(pbm->msi_irq_table[i], 0);
+@@ -230,7 +228,8 @@ static void sparc64_teardown_msi_irq(unsigned int irq,
+ 	entry->irq = 0;
+ 	irq_set_chip(irq, NULL);
+ 	irq_free(irq);
+-	free_msi(pbm, msi_num);
++	if (!err)
++		free_msi(pbm, msi_num);
+ }
+ 
+ static int msi_bitmap_alloc(struct pci_pbm_info *pbm)

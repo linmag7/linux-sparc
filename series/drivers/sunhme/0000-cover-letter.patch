@@ -1,0 +1,19 @@
+From: Magnus Lindholm <linmag7@gmail.com>
+Subject: [RFC PATCH 0/1] Handle DP83843 PHY differences in sunhme
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Handle the DP83843 reset and vendor-register differences encountered on
+PRIMEPOWER LAN#0. This driver change applies independently to v7.3-rc1.
+Earlier integrated PRIMEPOWER kernels used LAN#0 for SSH and transfers.
+
+The exact cleaned integration booted PRIMEPOWER UP/SMP and kept LAN#0
+available for SSH throughout serial and PCI#01 transfer/IRQ tests.
+Tests used the integrated stack; no new PHY variant or standalone
+kernel qualification is claimed.
+
+Magnus Lindholm:
+  net: sunhme: handle DP83843 reset and vendor register differences
+
+base-commit: cee9395acd8043be0644b25c34bfa86623f2b935

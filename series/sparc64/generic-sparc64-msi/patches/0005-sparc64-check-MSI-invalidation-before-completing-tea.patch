@@ -1,0 +1,48 @@
+From b9c0a569b3dc95c17e49c695e59bcdf402936e80 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 16 Oct 2026 00:39:58 +0200
+Subject: [PATCH 5/8] sparc64: check MSI invalidation before completing
+ teardown
+
+Propagate a sun4v MSI invalidation failure instead of reporting success.
+The pci_msi_setvalid() interface documented in
+arch/sparc/include/asm/hypervisor.h returns an error for invalid arguments.
+Check that status and Fire's valid-bit readback too.
+
+A successful readback establishes the map state, not a queue DMA drain.
+On failure the common teardown retains the IRQ and descriptor.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/pci_fire.c  | 2 ++
+ arch/sparc/kernel/pci_sun4v.c | 4 +++-
+ 2 files changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/arch/sparc/kernel/pci_fire.c b/arch/sparc/kernel/pci_fire.c
+index 759d2cc78269..95840ee256c6 100644
+--- a/arch/sparc/kernel/pci_fire.c
++++ b/arch/sparc/kernel/pci_fire.c
+@@ -225,6 +225,8 @@ static int pci_fire_msi_teardown(struct pci_pbm_info *pbm, unsigned long msi)
+ 	val &= ~MSI_MAP_VALID;
+ 
+ 	upa_writeq(val, pbm->pbm_regs + MSI_MAP(msi));
++	if (upa_readq(pbm->pbm_regs + MSI_MAP(msi)) & MSI_MAP_VALID)
++		return -EIO;
+ 
+ 	return 0;
+ }
+diff --git a/arch/sparc/kernel/pci_sun4v.c b/arch/sparc/kernel/pci_sun4v.c
+index 290557b1f6a0..84815e4140b9 100644
+--- a/arch/sparc/kernel/pci_sun4v.c
++++ b/arch/sparc/kernel/pci_sun4v.c
+@@ -1056,7 +1056,9 @@ static int pci_sun4v_msi_teardown(struct pci_pbm_info *pbm, unsigned long msi)
+ 	if (err)
+ 		return -ENXIO;
+ 
+-	pci_sun4v_msi_setvalid(pbm->devhandle, msi, HV_MSIVALID_INVALID);
++	err = pci_sun4v_msi_setvalid(pbm->devhandle, msi, HV_MSIVALID_INVALID);
++	if (err)
++		return -ENXIO;
+ 
+ 	return 0;
+ }

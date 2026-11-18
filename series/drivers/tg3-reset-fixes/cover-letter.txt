@@ -1,0 +1,24 @@
+Close and suspend drain reset work while holding RTNL, which the reset
+worker also needs. Reset publication can also overlap cancellation, and
+removal currently releases resources before unregistering the netdevice.
+
+This series makes a contended reset worker retry without waiting for
+RTNL, publishes TX recovery before NAPI completion, gates reset work
+across teardown, and unregisters the netdevice before resource release.
+These are generic tg3 changes with no SPARC or M3000 dependency.
+
+Each patch was applied and built with W=1 for SPARC64 UP/SMP and x86-64
+SMP with PM_SLEEP enabled. Hardware testing used BCM5718 devices in an
+M3000 with a diagnostic integration kernel. It covered reset cancellation,
+reset-triggered close, terminal reset gating, active unbind/rebind and
+controlled open/removal overlaps. Queued and running reset overlaps with
+MSI-loss recovery also passed, followed by hashed network transfers.
+
+The observed tests validate the changed paths; they did not reproduce an
+original-kernel crash. PTP, PHYLIB and host-loaded firmware were absent
+on the tested devices. Suspend/resume and physical PCI-error recovery
+have build coverage only, not runtime qualification.
+
+I used Codex to assist with the implementation, analysis and testing.
+
+base-commit: cee9395acd8043be0644b25c34bfa86623f2b935

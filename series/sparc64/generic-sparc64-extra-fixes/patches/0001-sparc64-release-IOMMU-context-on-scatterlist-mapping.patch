@@ -1,0 +1,37 @@
+From 23329108a92d137e04d51527b1155a54eefc6a2e Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Wed, 14 Oct 2026 09:09:11 +0200
+Subject: [PATCH 1/4] sparc64: release IOMMU context on scatterlist mapping
+ failure
+
+dma_4u_map_sg() allocates a context before allocating DVMA ranges.
+If a range allocation fails, the cleanup releases the mappings but
+leaves the context allocated. Repeated failures can exhaust the
+context bitmap and force mappings to use the context-0 fallback.
+
+Release the context after unwinding the mappings, while the IOMMU
+lock is still held. iommu_free_ctx() already handles context 0.
+
+Fixes: 13fa14e18561 ("[SPARC64]: Add SG merging support back into IOMMU code.")
+Reported-by: sashiko-bot <sashiko-bot@kernel.org>
+Assisted-by: LLM
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/iommu.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/sparc/kernel/iommu.c b/arch/sparc/kernel/iommu.c
+index 7613ab0ffb89..d3c76ee4767f 100644
+--- a/arch/sparc/kernel/iommu.c
++++ b/arch/sparc/kernel/iommu.c
+@@ -586,6 +586,7 @@ static int dma_4u_map_sg(struct device *dev, struct scatterlist *sglist,
+ 		if (s == outs)
+ 			break;
+ 	}
++	iommu_free_ctx(iommu, ctx);
+ 	spin_unlock_irqrestore(&iommu->lock, flags);
+ 
+ 	return -EINVAL;
+-- 
+2.43.0
+

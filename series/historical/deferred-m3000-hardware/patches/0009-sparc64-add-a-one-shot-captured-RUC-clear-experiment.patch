@@ -1,0 +1,133 @@
+From f753b1fb609c4e6901b799222b7d564c20b9d0ef Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Thu, 15 Oct 2026 12:56:34 +0200
+Subject: [RFC PATCH 09/17] sparc64: add a one-shot captured RUC clear
+ experiment
+
+Validate the captured RUC pair and disabled route before writing only
+bits 16 and 48 to the OE clear register. Retain two complete leaf status
+samples and reject further attempts even if status remains asserted.
+
+Finish the capture timer/report and serialize with passive diagnostics.
+Keep the original capture unchanged and leave ICLR and rearm untouched.
+Register definitions: TLU_OTHER_EVENT_STATUS_CLEAR, offset 0x81018.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/pci_fire.c | 82 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 82 insertions(+)
+
+diff --git a/arch/sparc/kernel/pci_fire.c b/arch/sparc/kernel/pci_fire.c
+index 4d5bf9036bd2..d0d1fefe2b3f 100644
+--- a/arch/sparc/kernel/pci_fire.c
++++ b/arch/sparc/kernel/pci_fire.c
+@@ -743,6 +743,9 @@ struct oberon_irq_capture {
+ 	u64 status[8], status_after[8];
+ 	u64 fault[2], header[4], header_after[4];
+ 	bool fault_read, headers_read;
++	bool clear_attempted;
++	int clear_result;
++	u64 clear_after[2][8];
+ };
+ 
+ static int oberon_capture_arm_port = -1;
+@@ -842,12 +845,81 @@ static ssize_t oberon_capture_recovery_show(struct device *dev,
+ 
+ 	if (!cap || dev != &cap->pbm->op->dev)
+ 		return -ENODEV;
++	guard(mutex)(&oberon_diag_lock);
+ 	ret = oberon_capture_recovery_check(cap);
+ 	return sysfs_emit(buf, "check=%d offset=0x81018 mask=0x0001000000010000 writes=0\n",
+ 			  ret);
+ }
+ static DEVICE_ATTR(oberon_capture_recovery, 0400, oberon_capture_recovery_show, NULL);
+ 
++static int oberon_capture_clear_ruc(struct oberon_irq_capture *cap)
++{
++	unsigned long base = cap->pbm->pbm_regs;
++	int pass, i, ret;
++
++	if (cap->clear_attempted)
++		return -EALREADY;
++	ret = oberon_capture_recovery_check(cap);
++	if (ret)
++		return ret;
++	cap->clear_attempted = true;
++	upa_writeq(BIT_ULL(16) | BIT_ULL(48), base + 0x81018);
++	ret = 0;
++	/* Preserve both samples even when a source remains set; never retry. */
++	for (pass = 0; pass < 2; pass++) {
++		for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++) {
++			cap->clear_after[pass][i] =
++				upa_readq(base + oberon_capture_status_regs[i]);
++			if (cap->clear_after[pass][i])
++				ret = -EAGAIN;
++		}
++	}
++	if (!oberon_capture_quarantined(cap->irq))
++		ret = -EBUSY;
++	cap->clear_result = ret;
++	return ret;
++}
++
++static ssize_t oberon_capture_clear_store(struct device *dev,
++					struct device_attribute *attr,
++					const char *buf, size_t count)
++{
++	struct oberon_irq_capture *cap = oberon_live_capture;
++	int ret;
++
++	if (!cap || dev != &cap->pbm->op->dev || !sysfs_streq(buf, "1"))
++		return -EINVAL;
++	if (!oberon_capture_quarantined(cap->irq))
++		return -EBUSY;
++	timer_delete_sync(&cap->deadline);
++	flush_work(&cap->report);
++	guard(mutex)(&oberon_diag_lock);
++	ret = oberon_capture_clear_ruc(cap);
++	return ret ? ret : count;
++}
++static DEVICE_ATTR_WO(oberon_capture_clear);
++
++static ssize_t oberon_capture_clear_result_show(struct device *dev,
++					       struct device_attribute *attr,
++					       char *buf)
++{
++	struct oberon_irq_capture *cap = oberon_live_capture;
++	int len, i;
++
++	if (!cap || dev != &cap->pbm->op->dev)
++		return -ENODEV;
++	guard(mutex)(&oberon_diag_lock);
++	len = sysfs_emit(buf, "attempted=%u result=%d ack=0 rearm=0\n",
++			 cap->clear_attempted, cap->clear_result);
++	for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++)
++		len += sysfs_emit_at(buf, len, "reg=%lx first=%016llx second=%016llx\n",
++				     oberon_capture_status_regs[i],
++				     cap->clear_after[0][i], cap->clear_after[1][i]);
++	return len;
++}
++static DEVICE_ATTR(oberon_capture_clear_result, 0400,
++		   oberon_capture_clear_result_show, NULL);
++
+ static void oberon_capture_report(struct work_struct *work)
+ {
+ 	struct oberon_irq_capture *cap = container_of(work,
+@@ -957,7 +1029,17 @@ static int __init oberon_capture_init(void)
+ 		if (!ret)
+ 			ret = device_create_file(&selected->pbm->op->dev,
+ 						 &dev_attr_oberon_capture_recovery);
++		if (!ret)
++			ret = device_create_file(&selected->pbm->op->dev,
++						 &dev_attr_oberon_capture_clear);
++		if (!ret)
++			ret = device_create_file(&selected->pbm->op->dev,
++						 &dev_attr_oberon_capture_clear_result);
+ 		if (ret) {
++			device_remove_file(&selected->pbm->op->dev,
++					   &dev_attr_oberon_capture_clear);
++			device_remove_file(&selected->pbm->op->dev,
++					   &dev_attr_oberon_capture_recovery);
+ 			device_remove_file(&selected->pbm->op->dev,
+ 					   &dev_attr_oberon_capture_arm);
+ 			oberon_live_capture = NULL;

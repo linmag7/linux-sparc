@@ -1,0 +1,1172 @@
+From 7036da48cf3758f70991a5b1068f4a859c315595 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 7 Nov 2026 00:29:51 +0100
+Subject: [RFC PATCH 1/3] sparc64: add runtime SPARC64 V CPU,
+ MMU and SMP support
+
+Recognize SPARC64 V and validate the PRIMEPOWER 250 firmware identity,
+MMU modes and kernel TLB reservations. Reuse the Fujitsu physical TSB
+and demap paths; validate secondary MIDs 0 and 1 before joining Linux.
+Check supported MMU modes again after firmware returns.
+
+Acknowledge degradation before enabling interrupts. Zero ECC status
+retries; nested and unsupported errors stop with a locked-image record.
+Corrected incoming data needs scrubbing and is not treated as recovered.
+
+References: SPARC64 V Supplement R1.0 5.2.9, 5.2.12, F.1, F.10.1,
+F.10.7, P.1.4, P.7.1/P.7.4 and R.3; JPS1 Commonality F.10.11 and
+N.4.2/N.4.3. Huge pages and CPU hotplug remain unsupported.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/head_64.h    |  11 +++
+ arch/sparc/include/asm/hugetlb.h    |   2 +-
+ arch/sparc/include/asm/pgtable_64.h |   2 +-
+ arch/sparc/include/asm/setup.h      |   3 +
+ arch/sparc/include/asm/sparc64_v.h  |  24 +++++
+ arch/sparc/include/asm/spitfire.h   |   7 ++
+ arch/sparc/kernel/cpu.c             |   5 +
+ arch/sparc/kernel/entry.h           |   1 +
+ arch/sparc/kernel/head_64.S         |  19 +++-
+ arch/sparc/kernel/helpers.S         | 148 ++++++++++++++++++++++++++++
+ arch/sparc/kernel/prom_64.c         |   3 +-
+ arch/sparc/kernel/ptrace_64.c       |   4 +-
+ arch/sparc/kernel/setup_64.c        |  87 +++++++++++++---
+ arch/sparc/kernel/smp_64.c          | 125 +++++++++++++++++++++--
+ arch/sparc/kernel/trampoline_64.S   |  41 ++++++++
+ arch/sparc/kernel/traps_64.c        |  11 +++
+ arch/sparc/mm/init_64.c             |  46 ++++-----
+ arch/sparc/mm/tsb.c                 |  17 ++--
+ arch/sparc/mm/ultra.S               |   8 +-
+ arch/sparc/prom/cif.S               |   9 ++
+ 20 files changed, 516 insertions(+), 57 deletions(-)
+ create mode 100644 arch/sparc/include/asm/sparc64_v.h
+
+diff --git a/arch/sparc/include/asm/head_64.h b/arch/sparc/include/asm/head_64.h
+index a977db986ad8..94ae85035359 100644
+--- a/arch/sparc/include/asm/head_64.h
++++ b/arch/sparc/include/asm/head_64.h
+@@ -31,6 +31,17 @@
+ 	be,pn %icc, label; \
+ 	 nop
+ 
++#define __SPARC64_V_ID 0x00040005
++
++#define BRANCH_IF_SPARC64_V(tmp1, tmp2, label) \
++	rdpr %ver, %tmp1; \
++	srlx %tmp1, 32, %tmp1; \
++	sethi %hi(__SPARC64_V_ID), %tmp2; \
++	or %tmp2, %lo(__SPARC64_V_ID), %tmp2; \
++	cmp %tmp1, %tmp2; \
++	be,pn %icc, label; \
++	 nop
++
+ #define __CHEETAH_ID	0x003e0014
+ #define __JALAPENO_ID	0x003e0016
+ #define __SERRANO_ID	0x003e0022
+diff --git a/arch/sparc/include/asm/hugetlb.h b/arch/sparc/include/asm/hugetlb.h
+index 53b087562851..3ef3ce7ea4a9 100644
+--- a/arch/sparc/include/asm/hugetlb.h
++++ b/arch/sparc/include/asm/hugetlb.h
+@@ -6,7 +6,7 @@
+ #include <asm/spitfire.h>
+ 
+ #ifdef CONFIG_HUGETLB_PAGE
+-#define hugepages_supported() (tlb_type != sparc64_vii)
++#define hugepages_supported() (!sparc64_fujitsu_mmu())
+ 
+ struct pud_huge_patch_entry {
+ 	unsigned int addr;
+diff --git a/arch/sparc/include/asm/pgtable_64.h b/arch/sparc/include/asm/pgtable_64.h
+index b6dda7b731da..aa77dc1f5a81 100644
+--- a/arch/sparc/include/asm/pgtable_64.h
++++ b/arch/sparc/include/asm/pgtable_64.h
+@@ -227,7 +227,7 @@ static inline pte_t pfn_pte(unsigned long pfn, pgprot_t prot)
+ }
+ 
+ #ifdef CONFIG_TRANSPARENT_HUGEPAGE
+-#define has_transparent_hugepage() (tlb_type != sparc64_vii)
++#define has_transparent_hugepage() (!sparc64_fujitsu_mmu())
+ 
+ static inline pmd_t pfn_pmd(unsigned long page_nr, pgprot_t pgprot)
+ {
+diff --git a/arch/sparc/include/asm/setup.h b/arch/sparc/include/asm/setup.h
+index 10adafeae04a..c940e49d854a 100644
+--- a/arch/sparc/include/asm/setup.h
++++ b/arch/sparc/include/asm/setup.h
+@@ -56,6 +56,9 @@ void sparc64_vii_check_mmu_state(void);
+ extern unsigned long sparc64_vii_mmu_fault[4];
+ void sparc64_vii_ecc_trap(void);
+ void sparc64_vii_ecc_trap_tl1(void);
++void sparc64_v_fatal_trap(void);
++void sparc64_v_ecc_trap(void);
++void sparc64_v_ecc_trap_tl1(void);
+ 
+ /* unaligned_64.c */
+ int handle_ldf_stq(u32 insn, struct pt_regs *regs);
+diff --git a/arch/sparc/include/asm/sparc64_v.h b/arch/sparc/include/asm/sparc64_v.h
+new file mode 100644
+index 000000000000..f72fbd768a3f
+--- /dev/null
++++ b/arch/sparc/include/asm/sparc64_v.h
+@@ -0,0 +1,24 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _SPARC64_V_H
++#define _SPARC64_V_H
++
++/* SPARC64 V Supplement R1.0, F.10.1 Table F-3, pp92-93. */
++#define SPARC64_V_MCNTL_NC_CACHE	(1UL << 16)
++#define SPARC64_V_MCNTL_FORCE_I	(1UL << 15)
++#define SPARC64_V_MCNTL_FORCE_D	(1UL << 14)
++#define SPARC64_V_MCNTL_RMD_MASK	(3UL << 12)
++#define SPARC64_V_MCNTL_RMD_2	(2UL << 12)
++#define SPARC64_V_MCNTL_HASH	(1UL << 8)
++#define SPARC64_V_MCNTL_UNSUPPORTED (SPARC64_V_MCNTL_NC_CACHE | \
++	SPARC64_V_MCNTL_FORCE_I | SPARC64_V_MCNTL_FORCE_D | \
++	SPARC64_V_MCNTL_HASH)
++
++/* V 5.2.12 Table 5-3, and R.3 Table R-3. */
++#define SPARC64_V_DCU_MMU_ENABLE	0xcUL
++#define SPARC64_V_DCU_WEAK_SPCA	(1UL << 41)
++#define SPARC64_V_UPA_AM_SHIFT	39
++#define SPARC64_V_UPA_MID_SHIFT	17
++
++unsigned long sparc64_v_secondary_check(void);
++
++#endif /* _SPARC64_V_H */
+diff --git a/arch/sparc/include/asm/spitfire.h b/arch/sparc/include/asm/spitfire.h
+index 9bfa9348dd5a..a9ae10321b07 100644
+--- a/arch/sparc/include/asm/spitfire.h
++++ b/arch/sparc/include/asm/spitfire.h
+@@ -76,10 +76,17 @@ enum ultra_tlb_layout {
+ 	cheetah_plus = 2,
+ 	hypervisor = 3,
+ 	sparc64_vii = 4,
++	sparc64_v = 5,
+ };
+ 
+ extern enum ultra_tlb_layout tlb_type;
+ 
++/* Shared JPS MMU/cache operations, not a platform or SMP capability. */
++static inline bool sparc64_fujitsu_mmu(void)
++{
++	return tlb_type == sparc64_vii || tlb_type == sparc64_v;
++}
++
+ extern int sun4v_chip_type;
+ 
+ extern int cheetah_pcache_forced_on;
+diff --git a/arch/sparc/kernel/cpu.c b/arch/sparc/kernel/cpu.c
+index 19cf910ac41d..1063cce7376c 100644
+--- a/arch/sparc/kernel/cpu.c
++++ b/arch/sparc/kernel/cpu.c
+@@ -132,7 +132,11 @@ static const struct manufacturer_info __initconst manufacturer_info[] = {
+ 		CPU(2, "Texas Instruments, Inc. - MicroSparc II"),
+ 		CPU(3, "Texas Instruments, Inc. - SuperSparc 51"),
+ 		CPU(4, "Texas Instruments, Inc. - SuperSparc 61"),
++#ifdef CONFIG_SPARC64
++		CPU(5, "Fujitsu SPARC64 V"),
++#else
+ 		CPU(5, "Texas Instruments, Inc. - unknown"),
++#endif
+ #ifdef CONFIG_SPARC64
+ 		CPU(7, "Fujitsu SPARC64 VII / VII+"),
+ #endif
+@@ -144,6 +148,7 @@ static const struct manufacturer_info __initconst manufacturer_info[] = {
+ 		/* SparcClassic */
+ 		FPU(4, "TI MicroSparc on chip FPU"),
+ #ifdef CONFIG_SPARC64
++		FPU(5, "Fujitsu SPARC64 V integrated FPU"),
+ 		FPU(7, "Fujitsu SPARC64 VII integrated FPU"),
+ #endif
+ 		FPU(-1, NULL)
+diff --git a/arch/sparc/kernel/entry.h b/arch/sparc/kernel/entry.h
+index 1d5f0c5fff90..ca01349bd1d9 100644
+--- a/arch/sparc/kernel/entry.h
++++ b/arch/sparc/kernel/entry.h
+@@ -250,6 +250,7 @@ void init_irqwork_curcpu(void);
+ void sun4v_register_mondo_queues(int this_cpu);
+ 
+ void sparc64_vii_ecc_error(struct pt_regs *regs, unsigned long afsr);
++void sparc64_v_ecc_error(struct pt_regs *regs, unsigned long afsr);
+ 
+ #endif /* CONFIG_SPARC32 */
+ #endif /* _ENTRY_H */
+diff --git a/arch/sparc/kernel/head_64.S b/arch/sparc/kernel/head_64.S
+index 9ab386edbc86..5e0720b78ffa 100644
+--- a/arch/sparc/kernel/head_64.S
++++ b/arch/sparc/kernel/head_64.S
+@@ -486,6 +486,7 @@ EXPORT_SYMBOL(sun4v_chip_type)
+ 80:
+ 	BRANCH_IF_SUN4V(g1, jump_to_sun4u_init)
+ 	/* Preserve Fujitsu firmware cache/MMU control, not Spitfire LSU. */
++	BRANCH_IF_SPARC64_V(g1,g7,jump_to_sun4u_init)
+ 	BRANCH_IF_SPARC64_VII(g1,g7,jump_to_sun4u_init)
+ 	BRANCH_IF_CHEETAH_BASE(g1,g7,cheetah_boot)
+ 	BRANCH_IF_CHEETAH_PLUS_OR_FOLLOWON(g1,g7,cheetah_plus_boot)
+@@ -576,6 +577,7 @@ sun4v_init:
+ 	ba,a,pt		%xcc, niagara_tlb_fixup
+ 
+ sun4u_continue:
++	BRANCH_IF_SPARC64_V(g1,g7,sparc64_v_tlb_fixup)
+ 	BRANCH_IF_SPARC64_VII(g1,g7,sparc64_vii_tlb_fixup)
+ 	BRANCH_IF_ANY_CHEETAH(g1, g7, cheetah_tlb_fixup)
+ 
+@@ -695,10 +697,18 @@ cheetah_tlb_fixup:
+ 
+ 	ba,a,pt	%xcc, tlb_fixup_done
+ 
++sparc64_v_tlb_fixup:
++	call	sparc64_v_check_mmu_state
++	 nop
++	mov	5, %g2		/* enum ultra_tlb_layout: sparc64_v */
++	ba,pt	%xcc, fujitsu_tlb_fixup
++	 nop
++
+ sparc64_vii_tlb_fixup:
+ 	call	sparc64_vii_check_mmu_state
+ 	 nop
+ 	mov	4, %g2
++fujitsu_tlb_fixup:
+ 	sethi	%hi(tlb_type), %g1
+ 	stw	%g2, [%g1 + %lo(tlb_type)]
+ 	call	generic_patch_copyops
+@@ -707,7 +717,7 @@ sparc64_vii_tlb_fixup:
+ 	 nop
+ 	call	generic_patch_pageops
+ 	 nop
+-	call	sparc64_vii_patch_cachetlbops
++	call	fujitsu_patch_cachetlbops
+ 	 nop
+ 	ba,a,pt	%xcc, tlb_fixup_done
+ 
+@@ -839,9 +849,15 @@ setup_trap_table:
+ 	call	%o1
+ 	 add	%sp, (2047 + 128), %o0
+ 
++	BRANCH_IF_SPARC64_V(o2, o3, .Lv_check_cif_mmu)
+ 	BRANCH_IF_SPARC64_VII(o2, o3, .Lvii_check_cif_mmu)
+ 	ba,pt	%xcc, 2f
+ 	 nop
++.Lv_check_cif_mmu:
++	call	sparc64_v_check_mmu_state
++	 nop
++	ba,pt	%xcc, 2f
++	 nop
+ .Lvii_check_cif_mmu:
+ 	call	sparc64_vii_check_mmu_state
+ 	 nop
+@@ -867,6 +883,7 @@ setup_trap_table:
+ 	sllx	%o2, 32, %o2
+ 	wr	%o2, 0, %tick_cmpr
+ 
++	BRANCH_IF_SPARC64_V(o2, o3, 1f)
+ 	BRANCH_IF_SPARC64_VII(o2, o3, 1f)
+ 	BRANCH_IF_ANY_CHEETAH(o2, o3, 1f)
+ 
+diff --git a/arch/sparc/kernel/helpers.S b/arch/sparc/kernel/helpers.S
+index 3218c2ebf6e6..1e620632a0ca 100644
+--- a/arch/sparc/kernel/helpers.S
++++ b/arch/sparc/kernel/helpers.S
+@@ -219,3 +219,151 @@ sparc64_vii_check_mmu_state:
+ sparc64_vii_mmu_fault:
+ 	.xword	0, 0, 0, 0
+ 	.previous
++
++	/* V Supplement 5.2.12, F.10.1/F.10.7 and R.3: retain the qualified MMU modes. */
++	.align 32
++	.globl sparc64_v_check_mmu_state
++	.type sparc64_v_check_mmu_state,#function
++sparc64_v_check_mmu_state:
++	ldxa	[%g0] 0x45, %o2
++	and	%o2, 0xc, %o3
++	cmp	%o3, 0xc
++	bne,pn	%xcc, .Lv_mmu_bad
++	 mov	1, %o1
++	srlx	%o2, 41, %o3
++	andcc	%o3, 1, %g0
++	bne,pn	%xcc, .Lv_mmu_bad
++	 nop
++	mov	8, %o1
++	ldxa	[%o1] 0x45, %o2
++	set	0x1f100, %o3
++	and	%o2, %o3, %o3
++	set	0x2000, %o4
++	cmp	%o3, %o4
++	bne,pn	%xcc, .Lv_mmu_bad
++	 mov	2, %o1
++	ldxa	[%g0] 0x4a, %o2
++	srlx	%o2, 39, %o3
++	and	%o3, 3, %o3
++	cmp	%o3, 1
++	bgu,pn	%xcc, .Lv_mmu_bad
++	 mov	3, %o1
++	mov	0x48, %o5
++.Lv_mmu_tsb:
++	ldxa	[%o5] 0x58, %o2
++	brnz,pn	%o2, .Lv_mmu_bad
++	 mov	%o5, %o1
++	cmp	%o5, 0x50
++	be,pt	%xcc, .Lv_mmu_next
++	 nop
++	ldxa	[%o5] 0x50, %o2
++	brnz,pn	%o2, .Lv_mmu_bad
++	 or	%o5, 0x100, %o1
++.Lv_mmu_next:
++	add	%o5, 8, %o5
++	cmp	%o5, 0x58
++	bleu,pt	%xcc, .Lv_mmu_tsb
++	 nop
++	retl
++	 nop
++.Lv_mmu_bad:
++	/* The firmware lock may be held; record the mismatch without calling PROM. */
++	wrpr	%g0, 15, %pil
++	rdpr	%pstate, %o3
++	andn	%o3, PSTATE_IE, %o3
++	wrpr	%o3, 0, %pstate
++	sethi	%hi(sparc64_v_mmu_fault), %o3
++	or	%o3, %lo(sparc64_v_mmu_fault), %o3
++	stx	%o1, [%o3 + 8]
++	stx	%o2, [%o3 + 16]
++	stx	%o7, [%o3 + 24]
++	set	0x56534d4d, %o2
++	stx	%o2, [%o3]
++	membar	#Sync
++1:	ba,pt	%xcc, 1b
++	 nop
++	.size sparc64_v_check_mmu_state,.-sparc64_v_check_mmu_state
++
++	.data
++	.align 32
++	/* Fault record: magic, register (1 DCU, 2 MCNTL, 3 UPA, or TSB offset), value, caller. */
++	.globl sparc64_v_mmu_fault
++sparc64_v_mmu_fault:
++	.xword 0, 0, 0, 0
++	.previous
++
++	.align 32
++	.globl sparc64_v_ecc_trap
++sparc64_v_ecc_trap:
++	/* V Supplement P.1.4/P.7.1: clear pending degradation before enabling IE. */
++	ldxa	[%g0] 0x4c, %g4
++	brz,pn	%g4, .Lv_empty_ecc
++	 nop
++	andncc	%g4, (1 << 10), %g0
++	bne,pn	%xcc, .Lv_unhandled_ecc
++	 nop
++	stxa	%g4, [%g0] 0x4c
++	membar	#Sync
++	rdpr	%pil, %g2
++	wrpr	%g0, PIL_NORMAL_MAX, %pil
++	ba,pt	%xcc, etrap_irq
++	 rd	%pc, %g7
++#ifdef CONFIG_TRACE_IRQFLAGS
++	call	trace_hardirqs_off
++	 nop
++#endif
++	mov	%l4, %o1
++	call	sparc64_v_ecc_error
++	 add	%sp, PTREGS_OFF, %o0
++	ba,a,pt	%xcc, rtrap_irq
++.Lv_empty_ecc:
++	retry
++.Lv_unhandled_ecc:
++	sethi	%hi(sparc64_v_fault_record), %g1
++	or	%g1, %lo(sparc64_v_fault_record), %g1
++	stx	%g4, [%g1 + 48]
++	mov	8, %g2
++	ldxa	[%g2] 0x4d, %g2
++	stx	%g2, [%g1 + 56]
++	ba,pt	%xcc, sparc64_v_fatal_trap
++	 nop
++
++	.globl sparc64_v_ecc_trap_tl1
++sparc64_v_ecc_trap_tl1:
++	/* Nested entry cannot assume a usable stack or unused trap globals. */
++	ba,pt	%xcc, sparc64_v_fatal_trap
++	 nop
++
++	.align 32
++	.globl sparc64_v_fatal_trap
++	.type sparc64_v_fatal_trap, #function
++sparc64_v_fatal_trap:
++	wrpr %g0, 15, %pil
++	sethi %hi(sparc64_v_fault_record), %g1
++	or %g1, %lo(sparc64_v_fault_record), %g1
++	rdpr %tpc, %g2
++	stx %g2, [%g1 + 8]
++	rdpr %tnpc, %g2
++	stx %g2, [%g1 + 16]
++	rdpr %tstate, %g2
++	stx %g2, [%g1 + 24]
++	rdpr %tl, %g2
++	stx %g2, [%g1 + 32]
++	rdpr %tt, %g2
++	stx %g2, [%g1 + 40]
++	/* Best-effort record in the locked image; no recovery or firmware. */
++	sethi %hi(0x53505600), %g2
++	or %g2, %lo(0x53505600), %g2
++	stx %g2, [%g1]
++	membar #Sync
++1:	ba,pt %xcc, 1b
++	 nop
++
++	.size sparc64_v_fatal_trap, .-sparc64_v_fatal_trap
++
++	.data
++	.align 64
++	.globl sparc64_v_fault_record
++sparc64_v_fault_record:
++	.xword 0, 0, 0, 0, 0, 0, 0, 0
++	.previous
+diff --git a/arch/sparc/kernel/prom_64.c b/arch/sparc/kernel/prom_64.c
+index 66c585e980cf..ed5817f67000 100644
+--- a/arch/sparc/kernel/prom_64.c
++++ b/arch/sparc/kernel/prom_64.c
+@@ -377,7 +377,8 @@ char * __init build_path_component(struct device_node *dp)
+ 
+ static const char *get_mid_prop(void)
+ {
+-	return (tlb_type == spitfire ? "upa-portid" : "portid");
++	return (tlb_type == spitfire || tlb_type == sparc64_v ?
++		"upa-portid" : "portid");
+ }
+ 
+ bool arch_find_n_match_cpu_physical_id(struct device_node *cpun,
+diff --git a/arch/sparc/kernel/ptrace_64.c b/arch/sparc/kernel/ptrace_64.c
+index 0d537ae7bef3..92da7fd558f4 100644
+--- a/arch/sparc/kernel/ptrace_64.c
++++ b/arch/sparc/kernel/ptrace_64.c
+@@ -109,8 +109,8 @@ void flush_ptrace_access(struct vm_area_struct *vma, struct page *page,
+ {
+ 	BUG_ON(len > PAGE_SIZE);
+ 
+-	if (tlb_type == sparc64_vii) {
+-		/* VII caches are coherent; ASI_DCACHE_INVALIDATE is not valid. */
++	if (sparc64_fujitsu_mmu()) {
++		/* Fujitsu caches handle aliases without Sun diagnostic ASIs. */
+ 		flush_icache_range((unsigned long)kaddr,
+ 				   (unsigned long)kaddr + len);
+ 		return;
+diff --git a/arch/sparc/kernel/setup_64.c b/arch/sparc/kernel/setup_64.c
+index 971e84ef66f2..7af592f76eb4 100644
+--- a/arch/sparc/kernel/setup_64.c
++++ b/arch/sparc/kernel/setup_64.c
+@@ -45,6 +45,7 @@
+ #include <asm/timer.h>
+ #include <asm/sections.h>
+ #include <asm/setup.h>
++#include <asm/sparc64_v.h>
+ #include <asm/mmu.h>
+ #include <asm/ns87303.h>
+ #include <asm/btext.h>
+@@ -158,7 +159,8 @@ static void __init per_cpu_patch(void)
+ 	unsigned long ver;
+ 	int is_jbus;
+ 
+-	if (tlb_type == spitfire && !this_is_starfire)
++	if (tlb_type == sparc64_v ||
++	    (tlb_type == spitfire && !this_is_starfire))
+ 		return;
+ 
+ 	is_jbus = 0;
+@@ -353,11 +355,10 @@ static void __init pause_patch(void)
+ }
+ 
+ /*
+- * Route restrainable ECC (0x63) to the VII C handler.
+- * Other patched errors record state and halt without touching Spitfire
+- * error/cache registers, including at TL>1.
++ * Fujitsu restrainable ECC uses CPU-specific C handlers; other errors halt.
++ * Avoid Spitfire error registers on both Fujitsu implementations.
+  */
+-static void __init vii_patch_error_traps(void)
++static void __init fujitsu_patch_error_traps(void (*handler)(void))
+ {
+ 	static const unsigned int traps[] = { 0x0a, 0x32, 0x40, 0x63 };
+ 	unsigned int *tables[] = { sparc64_ttable_tl0, sparc64_ttable_tl1 };
+@@ -366,13 +367,15 @@ static void __init vii_patch_error_traps(void)
+ 	for (i = 0; i < ARRAY_SIZE(tables); i++) {
+ 		for (j = 0; j < ARRAY_SIZE(traps); j++) {
+ 			unsigned int *slot = tables[i] + traps[j] * 8;
+-			void (*handler)(void) = sparc64_vii_fatal_trap;
++			void (*target)(void) = handler;
+ 			long delta;
+ 
+-			if (traps[j] == 0x63)
+-				handler = i ? sparc64_vii_ecc_trap_tl1 :
+-					      sparc64_vii_ecc_trap;
+-			delta = (long)handler - (long)slot;
++			if (tlb_type == sparc64_vii && traps[j] == 0x63)
++				target = i ? sparc64_vii_ecc_trap_tl1 :
++					     sparc64_vii_ecc_trap;
++			if (tlb_type == sparc64_v && traps[j] == 0x63)
++				target = i ? sparc64_v_ecc_trap_tl1 : sparc64_v_ecc_trap;
++			delta = (long)target - (long)slot;
+ 
+ 			/* ba (disp22), followed by nop. */
+ 			if (delta < -(1L << 23) || delta >= (1L << 23)) {
+@@ -388,10 +391,72 @@ static void __init vii_patch_error_traps(void)
+ 	}
+ }
+ 
++static void __init sparc64_v_check_boot(void)
++{
++	char name[sizeof("FJSV,GPUZC-M") + 1] = {};
++	char model[sizeof("250") + 1] = {};
++	unsigned long ver, dcu, mcntl, upa, ext;
++	unsigned int offset;
++
++	/* The supported firmware identifies this board by root name and model. */
++	prom_getstring(prom_root_node, "name", name, sizeof(name) - 1);
++	prom_getstring(prom_root_node, "model", model, sizeof(model) - 1);
++	if (strcmp(prom_root_compatible, "sun4us") ||
++	    strcmp(name, "FJSV,GPUZC-M") || strcmp(model, "250")) {
++		prom_printf("SPARC64 V: unsupported platform; expected PRIMEPOWER 250\n");
++		prom_halt();
++	}
++
++	__asm__ __volatile__("rdpr %%ver, %0" : "=r" (ver));
++	__asm__ __volatile__("ldxa [%%g0] 0x45, %0" : "=r" (dcu));
++	__asm__ __volatile__("ldxa [%1] 0x45, %0"
++			     : "=r" (mcntl) : "r" (8UL));
++	__asm__ __volatile__("ldxa [%%g0] 0x4a, %0" : "=r" (upa));
++
++	/* V F.10.1: preserve supported firmware MMU modes. */
++	if ((mcntl & SPARC64_V_MCNTL_UNSUPPORTED) ||
++	    (mcntl & SPARC64_V_MCNTL_RMD_MASK) != SPARC64_V_MCNTL_RMD_2 ||
++	    (dcu & SPARC64_V_DCU_MMU_ENABLE) != SPARC64_V_DCU_MMU_ENABLE ||
++	    (dcu & SPARC64_V_DCU_WEAK_SPCA) ||
++	    ((upa >> SPARC64_V_UPA_AM_SHIFT) & 3) > 1 ||
++	    ((upa >> SPARC64_V_UPA_MID_SHIFT) & 0x1f)) {
++		prom_printf("SPARC64-V: VER=%lx DCUCR=%lx MCNTL=%lx UPA=%lx\n",
++			    ver, dcu, mcntl, upa);
++		prom_printf("SPARC64-V: unsupported controls or nonzero boot MID\n");
++		prom_halt();
++	}
++	/*
++	 * Physical TSB bases must not be XORed with inherited extensions.
++	 * JPS1 Commonality F.10.7 defines extensions for both MMUs.
++	 */
++	for (offset = TSB_EXTENSION_P; offset <= TSB_EXTENSION_N; offset += 8) {
++		__asm__ __volatile__("ldxa [%1] %2, %0"
++				     : "=r" (ext) : "r" (offset), "i" (ASI_DMMU));
++		if (ext) {
++			prom_printf("SPARC64-V: D TSB extension %x=%lx unsupported\n",
++				    offset, ext);
++			prom_halt();
++		}
++		if (offset == TSB_EXTENSION_S)
++			continue;
++		__asm__ __volatile__("ldxa [%1] %2, %0"
++				     : "=r" (ext) : "r" (offset), "i" (ASI_IMMU));
++		if (ext) {
++			prom_printf("SPARC64-V: I TSB extension %x=%lx unsupported\n",
++				    offset, ext);
++			prom_halt();
++		}
++	}
++	/* V F.5 and Appendix P: IAE, DAE, ADE and ECC error. */
++	fujitsu_patch_error_traps(sparc64_v_fatal_trap);
++}
++
+ void __init start_early_boot(void)
+ {
+ 	int cpu;
+ 
++	if (tlb_type == sparc64_v)
++		sparc64_v_check_boot();
+ 	check_if_starfire();
+ 	per_cpu_patch();
+ 	sun4v_patch();
+@@ -400,7 +465,7 @@ void __init start_early_boot(void)
+ 	if (tlb_type == sparc64_vii) {
+ 		unsigned long mcntl;
+ 
+-		vii_patch_error_traps();
++		fujitsu_patch_error_traps(sparc64_vii_fatal_trap);
+ 
+ 		__asm__ __volatile__("ldxa [%1] 0x45, %0"
+ 				     : "=r" (mcntl) : "r" (8UL));
+diff --git a/arch/sparc/kernel/smp_64.c b/arch/sparc/kernel/smp_64.c
+index ab010c2f77bc..98f603fdb81c 100644
+--- a/arch/sparc/kernel/smp_64.c
++++ b/arch/sparc/kernel/smp_64.c
+@@ -54,6 +54,7 @@
+ #include <asm/ldc.h>
+ #include <asm/hypervisor.h>
+ #include <asm/pcr.h>
++#include <asm/sparc64_v.h>
+ 
+ #include "cpumap.h"
+ #include "kernel.h"
+@@ -101,6 +102,85 @@ extern void setup_sparc64_timer(void);
+ 
+ static volatile unsigned long callin_flag = 0;
+ 
++/* Written before Linux owns the secondary trap table; no per-CPU accesses. */
++static struct {
++	unsigned long ver, dcu, mcntl, upa, error;
++	unsigned long itlb[32], dtlb[32];
++} v_secondary;
++static unsigned int v_expected_mid;
++
++/* Called with the PROM lock held and a temporary mapped stack. */
++unsigned long noinstr __no_stack_protector sparc64_v_secondary_check(void)
++{
++	unsigned long ver, dcu, mcntl, upa, ext, error = 0;
++	unsigned int i, first = 16;
++
++	__asm__ __volatile__("rdpr %%ver, %0" : "=r" (ver));
++	__asm__ __volatile__("ldxa [%%g0] 0x45, %0" : "=r" (dcu));
++	__asm__ __volatile__("ldxa [%1] 0x45, %0"
++			     : "=r" (mcntl) : "r" (8UL));
++	__asm__ __volatile__("ldxa [%%g0] 0x4a, %0" : "=r" (upa));
++	v_secondary.ver = ver;
++	v_secondary.dcu = dcu;
++	v_secondary.mcntl = mcntl;
++	v_secondary.upa = upa;
++	/* V R1.0 5.2.12, F.10.1 and R.3: preserve supported firmware modes. */
++	if ((mcntl & SPARC64_V_MCNTL_UNSUPPORTED) ||
++	    (mcntl & SPARC64_V_MCNTL_RMD_MASK) != SPARC64_V_MCNTL_RMD_2 ||
++	    (dcu & SPARC64_V_DCU_MMU_ENABLE) != SPARC64_V_DCU_MMU_ENABLE ||
++	    (dcu & SPARC64_V_DCU_WEAK_SPCA) ||
++	    ((upa >> SPARC64_V_UPA_AM_SHIFT) & 3) > 1 ||
++	    ((upa >> SPARC64_V_UPA_MID_SHIFT) & 0x1f) != v_expected_mid)
++		error |= 1;
++	for (i = TSB_EXTENSION_P; i <= TSB_EXTENSION_N; i += 8) {
++		__asm__ __volatile__("ldxa [%1] %2, %0"
++			: "=r" (ext) : "r" (i), "i" (ASI_DMMU));
++		if (ext)
++			error |= 2;
++		if (i == TSB_EXTENSION_S)
++			continue;
++		__asm__ __volatile__("ldxa [%1] %2, %0"
++			: "=r" (ext) : "r" (i), "i" (ASI_IMMU));
++		if (ext)
++			error |= 2;
++	}
++	if (num_kernel_image_mappings < 1 || num_kernel_image_mappings > 2)
++		error |= 4;
++	else
++		first -= num_kernel_image_mappings;
++	/* V F.1 Table F-1: 32 fTLB entries, with locking in this bank only. */
++	for (i = 0; i < 32; i++) {
++		unsigned long d = cheetah_get_ldtlb_data(i);
++		unsigned long it = cheetah_get_litlb_data(i);
++
++		v_secondary.dtlb[i] = d;
++		v_secondary.itlb[i] = it;
++		if (i >= first && i < 16 &&
++		    (((d & (_PAGE_VALID | _PAGE_L_4U)) ==
++		      (_PAGE_VALID | _PAGE_L_4U)) ||
++		     ((it & (_PAGE_VALID | _PAGE_L_4U)) ==
++		      (_PAGE_VALID | _PAGE_L_4U))))
++			error |= 8;
++	}
++	WRITE_ONCE(v_secondary.error, error);
++	/* Publish the captured state before the secondary leaves validation. */
++	wmb();
++	return error;
++}
++
++static void v_secondary_report(unsigned int cpu)
++{
++	unsigned int i;
++
++	pr_debug("V-SMP: CPU%u VER=%lx DCU=%lx MCNTL=%lx UPA=%lx error=%lx\n",
++		cpu, v_secondary.ver, v_secondary.dcu, v_secondary.mcntl,
++		v_secondary.upa, v_secondary.error);
++	for (i = 0; i < 32; i++)
++		if ((v_secondary.itlb[i] | v_secondary.dtlb[i]) & _PAGE_VALID)
++			pr_debug("V-SMP: inherited fTLB[%u] I=%lx D=%lx\n", i,
++				v_secondary.itlb[i], v_secondary.dtlb[i]);
++}
++
+ void smp_callin(void)
+ {
+ 	int cpuid = hard_smp_processor_id();
+@@ -358,6 +438,12 @@ static int smp_boot_one_cpu(unsigned int cpu, struct task_struct *idle)
+ 	callin_flag = 0;
+ 	if (tlb_type == sparc64_vii)
+ 		WRITE_ONCE(vii_startup_mcntl, ~0UL);
++	if (tlb_type == sparc64_v) {
++		v_expected_mid = cpu;
++		v_secondary.error = ~0UL;
++		/* Publish the expected MID before firmware starts the secondary. */
++		wmb();
++	}
+ 	cpu_new_thread = task_thread_info(idle);
+ 
+ 	if (tlb_type == hypervisor) {
+@@ -381,6 +467,8 @@ static int smp_boot_one_cpu(unsigned int cpu, struct task_struct *idle)
+ 		udelay(100);
+ 	}
+ 
++	if (tlb_type == sparc64_v)
++		v_secondary_report(cpu);
+ 	if (callin_flag) {
+ 		ret = 0;
+ 	} else {
+@@ -398,10 +486,10 @@ static int smp_boot_one_cpu(unsigned int cpu, struct task_struct *idle)
+ }
+ 
+ /*
+- * Serialize targets through BUSY/NACK pair zero for simple retry handling.
+- * VII Extensions N.4.3 permits pipelining through multiple pairs.
++ * Serialize one target through BUSY/NACK pair zero (V/VII Appendix N).
++ * JPS1 N.4.2/N.4.3 defines dispatch; VII N.4.3 also permits pipelining.
+  */
+-static void vii_xcall_deliver(struct trap_per_cpu *tb, int cnt)
++static void fujitsu_xcall_deliver(struct trap_per_cpu *tb, int cnt)
+ {
+ 	u64 *data = __va(tb->cpu_mondo_block_pa);
+ 	u16 *cpus = __va(tb->cpu_list_pa);
+@@ -415,6 +503,14 @@ static void vii_xcall_deliver(struct trap_per_cpu *tb, int cnt)
+ 		unsigned long status = 0;
+ 		int retry;
+ 
++		/* JPS1 Commonality N.4.2/N.4.3: pair zero must be idle. */
++		if (tlb_type == sparc64_v) {
++			__asm__ __volatile__("ldxa [%%g0] %1, %0"
++				: "=r" (status) : "i" (ASI_INTR_DISPATCH_STAT));
++			if (status & 1)
++				panic("V IPI initially busy target=%u status=%lx",
++				      cpus[i], status);
++		}
+ 		for (retry = 0; retry < 10000; retry++) {
+ 			int polls = 1000000;
+ 
+@@ -436,13 +532,14 @@ static void vii_xcall_deliver(struct trap_per_cpu *tb, int cnt)
+ 			__asm__ __volatile__("wrpr %0, 0, %%pstate"
+ 				: : "r" (pstate) : "memory");
+ 			if (!polls)
+-				panic("VII IPI busy timeout target=%u status=%lx", cpus[i], status);
++				panic("Fujitsu IPI busy timeout target=%u status=%lx",
++				      cpus[i], status);
+ 			if (!(status & 2))
+ 				break;
+ 			udelay(2);
+ 		}
+ 		if (retry == 10000)
+-			panic("VII IPI NACK timeout target=%u status=%lx", cpus[i], status);
++			panic("Fujitsu IPI NACK timeout target=%u status=%lx", cpus[i], status);
+ 	}
+ }
+ 
+@@ -1257,12 +1354,22 @@ void __irq_entry smp_penguin_jailcell(int irq, struct pt_regs *regs)
+ 
+ void __init smp_prepare_cpus(unsigned int max_cpus)
+ {
++	unsigned int cpu;
++
++	if (tlb_type == sparc64_v) {
++		for_each_present_cpu(cpu)
++			if (cpu > 1)
++				set_cpu_present(cpu, false);
++		pr_info("SPARC64 V: present CPUs %*pbl\n",
++			cpumask_pr_args(cpu_present_mask));
++		return;
++	}
+ }
+ 
+ void __init smp_setup_processor_id(void)
+ {
+-	if (tlb_type == sparc64_vii)
+-		xcall_deliver_impl = vii_xcall_deliver;
++	if (tlb_type == sparc64_vii || tlb_type == sparc64_v)
++		xcall_deliver_impl = fujitsu_xcall_deliver;
+ 	else if (tlb_type == spitfire)
+ 		xcall_deliver_impl = spitfire_xcall_deliver;
+ 	else if (tlb_type == cheetah || tlb_type == cheetah_plus)
+@@ -1395,8 +1502,8 @@ int __cpu_disable(void)
+ 	cpuinfo_sparc *c;
+ 	int i;
+ 
+-	/* VII secondary startup does not implement offline/restart. */
+-	if (tlb_type == sparc64_vii)
++	/* Fujitsu secondary startup does not implement offline/restart. */
++	if (tlb_type == sparc64_vii || tlb_type == sparc64_v)
+ 		return -EOPNOTSUPP;
+ 
+ 	for_each_cpu(i, &cpu_core_map[cpu])
+diff --git a/arch/sparc/kernel/trampoline_64.S b/arch/sparc/kernel/trampoline_64.S
+index 664d69b84b83..feb27814e78c 100644
+--- a/arch/sparc/kernel/trampoline_64.S
++++ b/arch/sparc/kernel/trampoline_64.S
+@@ -53,6 +53,7 @@ tramp_stack:
+ 	.globl		sparc64_cpu_startup, sparc64_cpu_startup_end
+ sparc64_cpu_startup:
+ 	BRANCH_IF_SUN4V(g1, niagara_startup)
++	BRANCH_IF_SPARC64_V(g1, g5, niagara_startup)
+ 	BRANCH_IF_SPARC64_VII(g1, g5, vii_startup)
+ 	BRANCH_IF_CHEETAH_BASE(g1, g5, cheetah_startup)
+ 	BRANCH_IF_CHEETAH_PLUS_OR_FOLLOWON(g1, g5, cheetah_plus_startup)
+@@ -158,6 +159,24 @@ startup_continue:
+ 	sub		%g1, STACKFRAME_SZ + STACK_BIAS + 256, %sp
+ 	flushw
+ 
++	BRANCH_IF_SPARC64_V(g1, g5, v_check_secondary)
++	ba,pt	%xcc, v_secondary_checked
++	 nop
++v_check_secondary:
++	call	sparc64_v_secondary_check
++	 nop
++	brz,pt	%o0, v_secondary_checked
++	 nop
++	/* Fail closed, but release the PROM lock for boot-CPU diagnostics. */
++	sethi	%hi(prom_entry_lock), %g2
++	or	%g2, %lo(prom_entry_lock), %g2
++	membar	#Sync
++	stb	%g0, [%g2 + 3]
++v_secondary_failed:
++	ba,pt	%xcc, v_secondary_failed
++	 nop
++v_secondary_checked:
++
+ 	/* Setup the loop variables:
+ 	 * %l3: VADDR base
+ 	 * %l4: TTE base
+@@ -173,6 +192,7 @@ startup_continue:
+ 	lduw		[%l6 + %lo(num_kernel_image_mappings)], %l6
+ 
+ 	mov		15, %l7
++	BRANCH_IF_SPARC64_V(g1,g5,2f)
+ 	BRANCH_IF_SPARC64_VII(g1,g5,2f)
+ 	BRANCH_IF_ANY_CHEETAH(g1,g5,2f)
+ 
+@@ -310,6 +330,13 @@ after_lock_tlb:
+ 	.previous
+ 
+ 	membar		#Sync
++	BRANCH_IF_SUN4V(g1, 9f)
++	BRANCH_IF_SPARC64_V(g1, g3, 8f)
++	ba,pt		%xcc, 9f
++	 nop
++8:	sethi		%hi(KERNBASE), %g1
++	flush		%g1
++9:
+ 	mov		SECONDARY_CONTEXT, %g7
+ 
+ 661:	stxa		%g0, [%g7] ASI_DMMU
+@@ -319,6 +346,13 @@ after_lock_tlb:
+ 	.previous
+ 
+ 	membar		#Sync
++	BRANCH_IF_SUN4V(g1, 9f)
++	BRANCH_IF_SPARC64_V(g1, g3, 8f)
++	ba,pt		%xcc, 9f
++	 nop
++8:	sethi		%hi(KERNBASE), %g1
++	flush		%g1
++9:
+ 
+ 	/* Everything we do here, until we properly take over the
+ 	 * trap table, must be done with extreme care.  We cannot
+@@ -370,6 +404,13 @@ after_lock_tlb:
+ 	.previous
+ 
+ 	membar		#Sync
++	BRANCH_IF_SUN4V(g1, 9f)
++	BRANCH_IF_SPARC64_V(g1, g3, 8f)
++	ba,pt		%xcc, 9f
++	 nop
++8:	sethi		%hi(KERNBASE), %g1
++	flush		%g1
++9:
+ 
+ 	wrpr		%g0, 0, %wstate
+ 
+diff --git a/arch/sparc/kernel/traps_64.c b/arch/sparc/kernel/traps_64.c
+index d6d3d8164910..434a8903cacb 100644
+--- a/arch/sparc/kernel/traps_64.c
++++ b/arch/sparc/kernel/traps_64.c
+@@ -2716,6 +2716,17 @@ void do_privact(struct pt_regs *regs)
+ 	do_privop(regs);
+ }
+ 
++/* SPARC64 V R1.0 Supplement, Appendix P.7.4. */
++void sparc64_v_ecc_error(struct pt_regs *regs, unsigned long afsr)
++{
++	enum ctx_state prev_state = exception_enter();
++
++	/* Entry acknowledged degradation with IE clear and keeps PIL raised. */
++	pr_warn_ratelimited("SPARC64 V: CPU %u cache/TLB degradation, AFSR=%lx\n",
++			    smp_processor_id(), afsr);
++	exception_exit(prev_state);
++}
++
+ /* SPARC64 VII Extensions, Appendix P.7.4. */
+ void sparc64_vii_ecc_error(struct pt_regs *regs, unsigned long afsr)
+ {
+diff --git a/arch/sparc/mm/init_64.c b/arch/sparc/mm/init_64.c
+index 2d0db5012423..23c6854efc50 100644
+--- a/arch/sparc/mm/init_64.c
++++ b/arch/sparc/mm/init_64.c
+@@ -272,7 +272,7 @@ static inline void tsb_insert(struct tsb *ent, unsigned long tag, unsigned long
+ 	unsigned long tsb_addr = (unsigned long) ent;
+ 
+ 	if (tlb_type == cheetah_plus || tlb_type == hypervisor ||
+-	    tlb_type == sparc64_vii)
++	    sparc64_fujitsu_mmu())
+ 		tsb_addr = __pa(tsb_addr);
+ 
+ 	__tsb_insert(tsb_addr, tag, pte);
+@@ -502,7 +502,7 @@ EXPORT_SYMBOL(flush_dcache_folio);
+ 
+ void __kprobes flush_icache_range(unsigned long start, unsigned long end)
+ {
+-	if (tlb_type == sparc64_vii) {
++	if (sparc64_fujitsu_mmu()) {
+ 		/* Coherent caches still require instruction-stream synchronization. */
+ 		__asm__ __volatile__("membar #Sync\n\tflush %0"
+ 				     : : "r" (start) : "memory");
+@@ -543,6 +543,8 @@ void mmu_info(struct seq_file *m)
+ 		seq_printf(m, "MMU Type\t: Cheetah\n");
+ 	else if (tlb_type == cheetah_plus)
+ 		seq_printf(m, "MMU Type\t: Cheetah+\n");
++	else if (tlb_type == sparc64_v)
++		seq_puts(m, "MMU Type\t: Fujitsu SPARC64 V\n");
+ 	else if (tlb_type == sparc64_vii)
+ 		seq_puts(m, "MMU Type\t: Fujitsu SPARC64 VII\n");
+ 	else if (tlb_type == spitfire)
+@@ -686,12 +688,12 @@ static unsigned long kern_large_tte(unsigned long paddr);
+  * associative bank. Check existing reservations, firmware
+  * status and physical slot readback before using the mappings.
+  */
+-static void __init vii_check_slots(void)
++static void __init fujitsu_check_slots(void)
+ {
+ 	int i;
+ 
+ 	if (num_kernel_image_mappings > 2) {
+-		prom_printf("VII-BOOT: kernel exceeds initial 8MB mapping budget\n");
++		prom_printf("Fujitsu-MMU: kernel exceeds initial 8MB mapping budget\n");
+ 		prom_halt();
+ 	}
+ 	for (i = 16 - num_kernel_image_mappings; i <= 15; i++) {
+@@ -702,17 +704,17 @@ static void __init vii_check_slots(void)
+ 		      (_PAGE_VALID | _PAGE_L_4U)) ||
+ 		     ((t & (_PAGE_VALID | _PAGE_L_4U)) ==
+ 		      (_PAGE_VALID | _PAGE_L_4U))) {
+-			prom_printf("VII-BOOT: reserved slot %d occupied; halted\n", i);
++			prom_printf("Fujitsu-MMU: reserved slot %d occupied; halted\n", i);
+ 			prom_halt();
+ 		}
+ 	}
+ }
+ 
+-static void __init vii_check_mapping(int slot, unsigned long va,
++static void __init fujitsu_check_mapping(int slot, unsigned long va,
+ 				     unsigned long tte)
+ {
+ 	/* VII F.2 #238 leaves PA/VA bits 21:13 arbitrary on 4MB TLB reads. */
+-	unsigned long offset_mask = GENMASK(21, 13);
++	unsigned long offset_mask = tlb_type == sparc64_vii ? GENMASK(21, 13) : 0;
+ 	unsigned long mask = (_PAGE_VALID | _PAGE_SZALL_4U |
+ 		_PAGE_PADDR_VII | _PAGE_L_4U) & ~offset_mask;
+ 	unsigned long d = cheetah_get_ldtlb_data(slot);
+@@ -722,7 +724,7 @@ static void __init vii_check_mapping(int slot, unsigned long va,
+ 
+ 	if ((d & mask) != (tte & mask) || (t & mask) != (tte & mask) ||
+ 	    ((dt ^ va) & ~offset_mask) || ((it ^ va) & ~offset_mask)) {
+-		prom_printf("VII-BOOT: mapping readback mismatch; halted\n");
++		prom_printf("Fujitsu-MMU: mapping readback mismatch; halted\n");
+ 		prom_halt();
+ 	}
+ }
+@@ -738,8 +740,8 @@ static void __init remap_kernel(void)
+ 
+ 	kern_locked_tte_data = tte_data;
+ 
+-	if (tlb_type == sparc64_vii)
+-		vii_check_slots();
++	if (sparc64_fujitsu_mmu())
++		fujitsu_check_slots();
+ 
+ 	/* Now lock us into the TLBs via Hypervisor or OBP. */
+ 	if (tlb_type == hypervisor) {
+@@ -754,19 +756,19 @@ static void __init remap_kernel(void)
+ 			long ret;
+ 
+ 			ret = prom_dtlb_load(tlb_ent - i, tte_data, tte_vaddr);
+-			if (ret && tlb_type == sparc64_vii) {
++			if (ret && sparc64_fujitsu_mmu()) {
+ 				prom_printf("SUNW,dtlb-load failed: idx=%d va=%lx tte=%lx rc=%lx\n",
+ 					    tlb_ent - i, tte_vaddr, tte_data, ret);
+ 				prom_halt();
+ 			}
+ 			ret = prom_itlb_load(tlb_ent - i, tte_data, tte_vaddr);
+-			if (ret && tlb_type == sparc64_vii) {
++			if (ret && sparc64_fujitsu_mmu()) {
+ 				prom_printf("SUNW,itlb-load failed: idx=%d va=%lx tte=%lx rc=%lx\n",
+ 					    tlb_ent - i, tte_vaddr, tte_data, ret);
+ 				prom_halt();
+ 			}
+-			if (tlb_type == sparc64_vii)
+-				vii_check_mapping(tlb_ent - i, tte_vaddr, tte_data);
++			if (sparc64_fujitsu_mmu())
++				fujitsu_check_mapping(tlb_ent - i, tte_vaddr, tte_data);
+ 			tte_vaddr += 0x400000;
+ 			tte_data += 0x400000;
+ 		}
+@@ -805,7 +807,7 @@ void __flush_dcache_range(unsigned long start, unsigned long end)
+ {
+ 	unsigned long va;
+ 
+-	if (tlb_type == sparc64_vii) {
++	if (sparc64_fujitsu_mmu()) {
+ 		__asm__ __volatile__("membar #Sync" : : : "memory");
+ 		return;
+ 	}
+@@ -2433,8 +2435,8 @@ void __init paging_init(void)
+ 	else
+ 		sun4u_pgprot_init();
+ 
+-	/* VII supports ASI_QUAD_LDD_PHYS (0x34); avoid shared-TLB TSB aliases. */
+-	if (tlb_type == cheetah_plus || tlb_type == sparc64_vii ||
++	/* V and VII support physical quad loads (V F.11, p104). */
++	if (tlb_type == cheetah_plus || sparc64_fujitsu_mmu() ||
+ 	    tlb_type == hypervisor) {
+ 		tsb_phys_patch();
+ 		ktsb_phys_patch();
+@@ -2456,11 +2458,11 @@ void __init paging_init(void)
+ 	read_obp_memory("available", &pavail[0], &pavail_ents);
+ 	read_obp_memory("available", &pavail[0], &pavail_ents);
+ 
+-	if (tlb_type == sparc64_vii) {
++	if (sparc64_fujitsu_mmu()) {
+ 		for (i = 0; i < pall_ents; i++) {
+ 			if (pall[i].phys_addr >= (1UL << 40) ||
+ 			    pall[i].reg_size > (1UL << 40) - pall[i].phys_addr) {
+-				prom_printf("VII-BOOT: RAM exceeds initial PA layout\n");
++				prom_printf("Fujitsu-MMU: RAM exceeds initial PA layout\n");
+ 				prom_halt();
+ 			}
+ 		}
+@@ -2910,11 +2912,11 @@ void __flush_tlb_all(void)
+ 			}
+ 		}
+ 	} else if (tlb_type == cheetah || tlb_type == cheetah_plus ||
+-		   tlb_type == sparc64_vii) {
++		   sparc64_fujitsu_mmu()) {
+ 		cheetah_flush_dtlb_all();
+ 		cheetah_flush_itlb_all();
+-		/* JPS2 F.10.1 requires instruction visibility after demap-all. */
+-		if (tlb_type == sparc64_vii)
++		/* JPS1/JPS2 F.10.1: demap-all needs instruction visibility. */
++		if (sparc64_fujitsu_mmu())
+ 			__asm__ __volatile__("flush %0"
+ 					     : : "r" (KERNBASE) : "memory");
+ 	}
+diff --git a/arch/sparc/mm/tsb.c b/arch/sparc/mm/tsb.c
+index ba5dec3cb0f7..9090a1792732 100644
+--- a/arch/sparc/mm/tsb.c
++++ b/arch/sparc/mm/tsb.c
+@@ -127,7 +127,7 @@ void flush_tsb_user(struct tlb_batch *tb)
+ 		base = (unsigned long) mm->context.tsb_block[MM_TSB_BASE].tsb;
+ 		nentries = mm->context.tsb_block[MM_TSB_BASE].tsb_nentries;
+ 		if (tlb_type == cheetah_plus || tlb_type == hypervisor ||
+-		    tlb_type == sparc64_vii)
++		    sparc64_fujitsu_mmu())
+ 			base = __pa(base);
+ 		if (tb->hugepage_shift == PAGE_SHIFT)
+ 			__flush_tsb_one(tb, PAGE_SHIFT, base, nentries);
+@@ -142,7 +142,7 @@ void flush_tsb_user(struct tlb_batch *tb)
+ 		base = (unsigned long) mm->context.tsb_block[MM_TSB_HUGE].tsb;
+ 		nentries = mm->context.tsb_block[MM_TSB_HUGE].tsb_nentries;
+ 		if (tlb_type == cheetah_plus || tlb_type == hypervisor ||
+-		    tlb_type == sparc64_vii)
++		    sparc64_fujitsu_mmu())
+ 			base = __pa(base);
+ 		__flush_huge_tsb_one(tb, REAL_HPAGE_SHIFT, base, nentries,
+ 				     tb->hugepage_shift);
+@@ -162,7 +162,7 @@ void flush_tsb_user_page(struct mm_struct *mm, unsigned long vaddr,
+ 		base = (unsigned long) mm->context.tsb_block[MM_TSB_BASE].tsb;
+ 		nentries = mm->context.tsb_block[MM_TSB_BASE].tsb_nentries;
+ 		if (tlb_type == cheetah_plus || tlb_type == hypervisor ||
+-		    tlb_type == sparc64_vii)
++		    sparc64_fujitsu_mmu())
+ 			base = __pa(base);
+ 		if (hugepage_shift == PAGE_SHIFT)
+ 			__flush_tsb_one_entry(base, vaddr, PAGE_SHIFT,
+@@ -178,7 +178,7 @@ void flush_tsb_user_page(struct mm_struct *mm, unsigned long vaddr,
+ 		base = (unsigned long) mm->context.tsb_block[MM_TSB_HUGE].tsb;
+ 		nentries = mm->context.tsb_block[MM_TSB_HUGE].tsb_nentries;
+ 		if (tlb_type == cheetah_plus || tlb_type == hypervisor ||
+-		    tlb_type == sparc64_vii)
++		    sparc64_fujitsu_mmu())
+ 			base = __pa(base);
+ 		__flush_huge_tsb_one_entry(base, vaddr, REAL_HPAGE_SHIFT,
+ 					   nentries, hugepage_shift);
+@@ -274,9 +274,12 @@ static void setup_tsb_params(struct mm_struct *mm, unsigned long tsb_idx, unsign
+ 	}
+ 	tte |= pte_sz_bits(page_sz);
+ 
+-	/* VII siblings share TLBs: per-mm TSBs cannot reuse a fixed VA/slot. */
++	/*
++	 * Physical TSBs also avoid locked-slot aliases on VII siblings.
++	 * V supports the same accesses without requiring a shared TLB.
++	 */
+ 	if (tlb_type == cheetah_plus || tlb_type == hypervisor ||
+-	    tlb_type == sparc64_vii) {
++	    sparc64_fujitsu_mmu()) {
+ 		/* Physical mapping, no locked TLB entry for TSB.  */
+ 		tsb_reg |= tsb_paddr;
+ 
+@@ -509,7 +512,7 @@ void tsb_grow(struct mm_struct *mm, unsigned long tsb_index, unsigned long rss)
+ 		unsigned long new_tsb_base = (unsigned long) new_tsb;
+ 
+ 		if (tlb_type == cheetah_plus || tlb_type == hypervisor ||
+-		    tlb_type == sparc64_vii) {
++		    sparc64_fujitsu_mmu()) {
+ 			old_tsb_base = __pa(old_tsb_base);
+ 			new_tsb_base = __pa(new_tsb_base);
+ 		}
+diff --git a/arch/sparc/mm/ultra.S b/arch/sparc/mm/ultra.S
+index 4942b793badb..368baa333d7f 100644
+--- a/arch/sparc/mm/ultra.S
++++ b/arch/sparc/mm/ultra.S
+@@ -1148,8 +1148,12 @@ __vii_xcall_flush_tlb_page:
+ 
+ #endif /* CONFIG_SMP */
+ 
+-	.globl		sparc64_vii_patch_cachetlbops
+-sparc64_vii_patch_cachetlbops:
++/*
++ * SPARC64 V shares the JPS1 F.10.1/F.10.11 demap and synchronization rules.
++ * Its context high bits read as zero; user huge pages remain disabled.
++ */
++	.globl		fujitsu_patch_cachetlbops
++fujitsu_patch_cachetlbops:
+ 	save		%sp, -128, %sp
+ 
+ 	sethi		%hi(__flush_tlb_mm), %o0
+diff --git a/arch/sparc/prom/cif.S b/arch/sparc/prom/cif.S
+index dd06bb1fb90c..b23c378a4d5a 100644
+--- a/arch/sparc/prom/cif.S
++++ b/arch/sparc/prom/cif.S
+@@ -6,6 +6,7 @@
+  */
+ 
+ #include <asm/pstate.h>
++#include <asm/head_64.h>
+ #include <asm/cpudata.h>
+ #include <asm/thread_info.h>
+ 
+@@ -24,6 +25,14 @@ prom_cif_direct:
+ 	mov	%l0, %g4
+ 	mov	%l1, %g5
+ 	mov	%l3, %g6
++	BRANCH_IF_SUN4V(o2, .Lcif_return)
++	BRANCH_IF_SPARC64_V(o2, o3, .Lv_cif_return)
++.Lcif_return:
++	ret
++	 restore
++.Lv_cif_return:
++	call	sparc64_v_check_mmu_state
++	 nop
+ 	ret
+ 	 restore
+ 

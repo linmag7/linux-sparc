@@ -1,0 +1,111 @@
+Several years ago I salvaged an M3000 SPARC Enterprise box being
+decommissioned at work. The box has been sitting ever since, as it did
+not run Linux. It did not seem impossible to get Linux running, but
+my earlier attempts failed. I recently found some documentation:
+"SPARC JPS2: Common Specification" and the "Fujitsu SPARC64 VII
+Extensions", which gave me some of the missing pieces.
+Getting this up and running required extensive testing, some
+kernel instrumentation, debug printouts and many reboot iterations.
+Codex assisted with debugging, instrumentation, code drafting, review
+and commit-message preparation. Along the way, I stumbled upon some
+generic sparc and driver bugs that this series addresses as well.
+
+This series adds CPU, MMU, SMP, Oberon PCIe and firmware console support
+for the Fujitsu SPARC Enterprise M3000, based on v7.3-rc1.
+
+Patches 1-7 fix generic sparc64 code used by the port: page clearing,
+secondary startup locking, kernel PUD mappings, IRQ allocation,
+firmware-property validation, DMA segment boundaries and IOMMU table
+initialization. Patches 8-10 add VII, Oberon and HVC support.
+VII CPUs and Oberon bridges are detected at runtime; no platform-specific
+CPU or bridge Kconfig selection is required. HVC remains selectable.
+
+Four independent fixes are in a separate follow-up series: IOMMU context
+cleanup, PROM short writes, cookie IRQ allocation and interrupt-vector
+bounds. They are useful independently and are not prerequisites for
+applying or building this series. The PROM short-write fix also affects
+the M3000 early console if firmware returns short writes.
+
+The on-board BCM5718 also needs the separately submitted netdev patch:
+  [PATCH net-next v3] tg3: normalize inherited BCM5718 register byte order
+It is independent of this SPARC series and was included in hardware
+validation kernels.
+
+Changes since v4
+----------------
+- Check VII MMU invariants after the boot CPU's direct set-trap-table
+  firmware call, before writing the primary context.
+- Select VII IRQ targets from the online CPU mask. The generic IRQ tree
+  expects processor groups below cores, while VII proc_id denotes a
+  package; preserve the existing scheduler topology and other CPU paths.
+- Latch and acknowledge degradation AFSR bits with PSTATE.IE clear, then
+  pass the snapshot to the C logger with PIL raised. Empty TL0 indications
+  retry; unsupported errors retain a stackless fatal path.
+- Replace the returning nested ECC handler with a stackless stop. Neither
+  an unsafe stack nor interrupted trap globals can support that return.
+  Save AFSR in the fatal record. VII Extensions Table P-2 masks ECC with
+  IE clear; this does not establish a fault in IE-disabled TLB maintenance.
+- Fold these corrections into patch 8. The other nine patches are
+  unchanged, including Greg Kroah-Hartman's HVC Reviewed-by tag.
+
+Testing
+-------
+GCC 13.3/binutils 2.42 W=1 UP and SMP vmlinux builds passed with the
+standalone tg3 fix. Existing FusionMPT unused-variable warnings remain.
+All ten patches apply with git am to vanilla v7.3-rc1. The resulting
+series plus tg3 has the same source tree as the built test kernels.
+
+A host ASan/UBSan harness exercises the actual VII IRQ mapper across
+all nonempty online masks of 8- and 16-CPU synthetic systems, including
+sparse and reversed core identifiers. Every online CPU is selected once
+per round. UP/SMP disassembly confirms the firmware-return check and
+ECC acknowledgment/entry ordering.
+
+The exact v5 plus tg3 images booted on the M3000 in true UP and SMP
+(eight CPUs, 16 GiB installed). Both passed 32 fork/COW rounds over 64
+pages, 1,000 remap/protection rounds, huge-page rejection checks, 32 MiB
+direct-disk readback and SSH image-transfer checksum verification. The
+SMP COW test migrated across every CPU; remap/protection ran on CPUs 0
+and 7. HVC open/write/close markers from every active CPU were observed
+on XSCF. Taint stayed zero, without warning, Oops or panic in the test log.
+
+With PCI_MSI=y, Oberon used legacy interrupts as intended; storage and
+network IRQ delivery was observed on CPUs 4 and 5. Scheduler topology
+still reports four two-thread cores within one package. No hardware
+follow-up or generic MSI series was included in either test image.
+
+Earlier v4 testing covered M3000, Ultra45 UP and a T5120 sun4v guest,
+with the exact tree and configuration qualifications documented in v4.
+Those other-platform boots are historical evidence, not v5 runtime tests.
+No ECC event or unsupported MMU state was injected. Successful workload
+tests do not validate hardware ECC recovery or nested-error reachability.
+
+Current limitations
+-------------------
+VII HugeTLB and THP need further MMU work and testing and are refused at
+runtime. Compiling them in remains supported for other processors in the
+same kernel. VII CPU offlining is not supported.
+
+Runtime CPU/bridge matching can also select these paths on other VII/VII+
+systems, including M4000-M9000. Only the M3000 has been tested; mixed
+VI/VII domains are unsupported, and hvc0 binds only on the M3000.
+
+Shared contexts and hardware TSB prefetch must remain disabled. If the
+state check fails while PROM is locked, the firmware console cannot
+report it and other CPUs can stall behind that lock. The four-word
+sparc64_vii_mmu_fault record is identified in System.map; recovering it
+after a reset has not been validated. Supporting enabled firmware modes
+requires a preservation/restoration protocol.
+
+Oberon uses legacy interrupts; MSI and native bridge error recovery are
+not implemented. A boot with a larger NR_CPUS remains useful validation. CPU error handling
+only attempts recovery from TL0 cache/TLB degradation. All nested ECC
+and unsupported errors stop without entering C; the shared fatal record
+is best-effort and simultaneous failures can overwrite it. Other patched
+error traps remain fatal, including PCI config-access errors. IPI retry
+policy and broader error recovery remain separate work.
+
+HVC calls firmware; a call that never returns remains unbounded. Fast
+pasted input can exceed the firmware FIFO, and console testing does not
+establish panic-path reliability.
+

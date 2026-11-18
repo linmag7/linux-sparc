@@ -1,0 +1,29 @@
+From 1f2383ac8a31428468d1612cf74fde5a4e8e9ccd Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 6 Nov 2026 11:17:03 +0100
+Subject: [RFC PATCH 1/1] sparc64: report IRQ descriptor exhaustion through
+ the kernel log
+
+Use the registered console for the descriptor allocation failure message,
+as for handler-data allocation failure. Keep the existing halt behavior.
+This complements the runtime logging cleanup for the allocation check
+added by the M3000 prerequisite series.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/irq_64.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/sparc/kernel/irq_64.c b/arch/sparc/kernel/irq_64.c
+index 1a118e28a21e..b63130bc77e8 100644
+--- a/arch/sparc/kernel/irq_64.c
++++ b/arch/sparc/kernel/irq_64.c
+@@ -639,7 +639,7 @@ unsigned int build_irq(int inofixup, unsigned long iclr, unsigned long imap)
+ 	if (!irq) {
+ 		irq = irq_alloc(0, ino);
+ 		if (!irq) {
+-			prom_printf("IRQ: cannot allocate interrupt descriptor.\n");
++			pr_emerg("IRQ: cannot allocate interrupt descriptor.\n");
+ 			prom_halt();
+ 		}
+ 		bucket_set_irq(__pa(bucket), irq);

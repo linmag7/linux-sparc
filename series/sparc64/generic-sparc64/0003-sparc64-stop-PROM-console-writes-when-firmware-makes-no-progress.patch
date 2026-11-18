@@ -1,0 +1,38 @@
+From 6a5fd7a3c9f5a11b967c9fc311a369786309c34f Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 6 Nov 2026 08:22:58 +0100
+Subject: [RFC PATCH 3/9] sparc64: stop PROM console writes when firmware
+ makes no progress
+
+The console loop retries negative results and zero-length writes forever.
+It also subtracts counts larger than the remaining buffer length.
+
+Stop the current chunk on no progress, an error or an oversized count.
+Continue short writes only while they consume bytes from the buffer, and
+ignore nonpositive input lengths. A firmware call that never returns is
+outside this loop's control.
+
+Fixes: 595a251c0740 ("sparc: Write to prom console using indirect buffer.")
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/prom/console_64.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/arch/sparc/prom/console_64.c b/arch/sparc/prom/console_64.c
+index d58b42f0658f..4fe7a8db94bf 100644
+--- a/arch/sparc/prom/console_64.c
++++ b/arch/sparc/prom/console_64.c
+@@ -36,10 +36,10 @@ static int __prom_console_write_buf(const char *buf, int len)
+ 
+ void prom_console_write_buf(const char *buf, int len)
+ {
+-	while (len) {
++	while (len > 0) {
+ 		int n = __prom_console_write_buf(buf, len);
+-		if (n < 0)
+-			continue;
++		if (n <= 0 || n > len)
++			break;
+ 		len -= n;
+ 		buf += n;
+ 	}

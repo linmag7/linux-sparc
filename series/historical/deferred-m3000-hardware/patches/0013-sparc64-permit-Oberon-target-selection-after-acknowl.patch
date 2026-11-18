@@ -1,0 +1,55 @@
+From 982711d6fa33a9253f999ee47187048df14ccffc Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Thu, 15 Oct 2026 14:12:49 +0200
+Subject: [RFC PATCH 13/17] sparc64: permit Oberon target selection after
+ acknowledgment
+
+The inherited event leaves ICLR in state 1, so the idle-state guard
+correctly prevents target selection before its first capture. Permit
+selection after successful masked acknowledgment and before rearm.
+
+Retain the idle and disabled checks, preserve the captured record, and
+reject failed clear/acknowledgment and already rearmed state.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/irq_64.c   | 10 ++++++++--
+ arch/sparc/kernel/pci_fire.c |  3 +++
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/arch/sparc/kernel/irq_64.c b/arch/sparc/kernel/irq_64.c
+index 531c9cf2d41a..cc7c05a35035 100644
+--- a/arch/sparc/kernel/irq_64.c
++++ b/arch/sparc/kernel/irq_64.c
+@@ -847,9 +847,15 @@ int oberon_target_capture(unsigned int irq, unsigned int cpu)
+ 	raw_spin_lock_irqsave(&desc->lock, flags);
+ 	data = irq_desc_get_handler_data(desc);
+ 	if (!data || desc->irq_data.chip != &oberon_capture_chip ||
+-	    desc->action || data->capture_live || data->captured ||
+-	    data->capture_target_attempted)
++	    desc->action || data->capture_armed || data->capture_target_attempted ||
++	    data->capture_rearm_attempted)
+ 		goto out;
++	if (data->capture_live) {
++		if (!data->captured || !data->capture_ack_attempted)
++			goto out;
++	} else if (data->captured) {
++		goto out;
++	}
+ 	val = upa_readq(data->imap);
+ 	if (val != 0x40 || val != data->capture_baseline ||
+ 	    (upa_readq(data->iclr) & 3UL))
+diff --git a/arch/sparc/kernel/pci_fire.c b/arch/sparc/kernel/pci_fire.c
+index 05b570bbcc6c..852ea6fbfcff 100644
+--- a/arch/sparc/kernel/pci_fire.c
++++ b/arch/sparc/kernel/pci_fire.c
+@@ -1130,6 +1130,9 @@ static ssize_t oberon_capture_target_store(struct device *dev,
+ 	guard(mutex)(&oberon_diag_lock);
+ 	if (cap->target_requested)
+ 		return -EBUSY;
++	if (cap->ack_requested && (!cap->clear_attempted || cap->clear_result ||
++				   !cap->ack.written || cap->ack_result))
++		return -EBUSY;
+ 	cap->target_requested = true;
+ 	cap->target_cpu = cpu;
+ 	cap->target_result = oberon_target_capture(cap->irq, cpu);

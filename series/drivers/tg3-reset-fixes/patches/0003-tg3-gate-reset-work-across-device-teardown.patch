@@ -1,0 +1,198 @@
+From 4258f31c2b6299513d82872d13fec970097bf90e Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 7 Nov 2026 17:57:32 +0100
+Subject: [PATCH 3/4] tg3: gate reset work across device teardown
+
+Serialize reset publication and retry against a persistent scheduling
+gate. Close the gate before draining work, and reopen it only after
+successful start or resume. Keep it permanently closed on removal and
+shutdown, including across an intervening open.
+
+Serialize lifecycle transitions with RTNL and drain reset work before
+removing firmware and PHY resources. Handle reset-triggered close without
+waiting for the current callback itself.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ drivers/net/ethernet/broadcom/tg3.c | 69 ++++++++++++++++++++++-------
+ drivers/net/ethernet/broadcom/tg3.h |  3 ++
+ 2 files changed, 56 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/net/ethernet/broadcom/tg3.c b/drivers/net/ethernet/broadcom/tg3.c
+index 456edcc2deb7..d0a2bcbdebac 100644
+--- a/drivers/net/ethernet/broadcom/tg3.c
++++ b/drivers/net/ethernet/broadcom/tg3.c
+@@ -7237,17 +7237,52 @@ static int tg3_poll_work(struct tg3_napi *tnapi, int work_done, int budget)
+ 
+ static inline void tg3_reset_task_schedule(struct tg3 *tp)
+ {
+-	if (!test_and_set_bit(TG3_FLAG_RESET_TASK_PENDING, tp->tg3_flags))
++	guard(spinlock_irqsave)(&tp->reset_lock);
++	if (tp->reset_enabled &&
++	    !test_and_set_bit(TG3_FLAG_RESET_TASK_PENDING, tp->tg3_flags))
+ 		schedule_delayed_work(&tp->reset_task, 0);
+ }
+ 
+-static inline void tg3_reset_task_cancel(struct tg3 *tp)
++static void tg3_reset_task_retry(struct tg3 *tp)
+ {
+-	if (test_and_clear_bit(TG3_FLAG_RESET_TASK_PENDING, tp->tg3_flags))
++	guard(spinlock_irqsave)(&tp->reset_lock);
++	if (tp->reset_enabled)
++		schedule_delayed_work(&tp->reset_task, 1);
++}
++
++static void tg3_reset_task_cancel(struct tg3 *tp)
++{
++	ASSERT_RTNL();
++	scoped_guard(spinlock_irqsave, &tp->reset_lock)
++		tp->reset_enabled = false;
++
++	/* A failed reset closes the device from its own callback. */
++	if (current_work() == &tp->reset_task.work)
++		cancel_delayed_work(&tp->reset_task);
++	else
+ 		cancel_delayed_work_sync(&tp->reset_task);
++
++	guard(spinlock_irqsave)(&tp->reset_lock);
++	tg3_flag_clear(tp, RESET_TASK_PENDING);
+ 	tg3_flag_clear(tp, TX_RECOVERY_PENDING);
+ }
+ 
++static void tg3_reset_task_enable(struct tg3 *tp)
++{
++	ASSERT_RTNL();
++	guard(spinlock_irqsave)(&tp->reset_lock);
++	if (!tp->reset_stopping)
++		tp->reset_enabled = true;
++}
++
++static void tg3_reset_task_stop(struct tg3 *tp)
++{
++	ASSERT_RTNL();
++	scoped_guard(spinlock_irqsave, &tp->reset_lock)
++		tp->reset_stopping = true;
++	tg3_reset_task_cancel(tp);
++}
++
+ static int tg3_poll_msix(struct napi_struct *napi, int budget)
+ {
+ 	struct tg3_napi *tnapi = container_of(napi, struct tg3_napi, napi);
+@@ -11267,12 +11302,12 @@ static void tg3_reset_task(struct work_struct *work)
+ 
+ 	/* Close and suspend can cancel this work while holding RTNL. */
+ 	if (!rtnl_trylock()) {
+-		schedule_delayed_work(&tp->reset_task, 1);
++		tg3_reset_task_retry(tp);
+ 		return;
+ 	}
+ 	tg3_full_lock(tp, 0);
+ 
+-	if (tp->pcierr_recovery || !netif_running(tp->dev) ||
++	if (!tp->reset_enabled || tp->pcierr_recovery || !netif_running(tp->dev) ||
+ 	    tp->pdev->error_state != pci_channel_io_normal) {
+ 		tg3_flag_clear(tp, RESET_TASK_PENDING);
+ 		tg3_full_unlock(tp);
+@@ -11302,10 +11337,6 @@ static void tg3_reset_task(struct work_struct *work)
+ 		tg3_full_unlock(tp);
+ 		tp->irq_sync = 0;
+ 		tg3_napi_enable(tp);
+-		/* Clear this flag so that tg3_reset_task_cancel() will not
+-		 * call cancel_delayed_work_sync() and wait forever.
+-		 */
+-		tg3_flag_clear(tp, RESET_TASK_PENDING);
+ 		netdev_unlock(tp->dev);
+ 		dev_close(tp->dev);
+ 		goto out;
+@@ -11727,6 +11758,8 @@ static int tg3_start(struct tg3 *tp, bool reset_phy, bool test_irq,
+ 		}
+ 	}
+ 
++	tg3_reset_task_enable(tp);
++
+ 	tg3_phy_start(tp);
+ 
+ 	tg3_hwmon_open(tp);
+@@ -17765,6 +17798,7 @@ static int tg3_init_one(struct pci_dev *pdev,
+ #endif
+ 	spin_lock_init(&tp->lock);
+ 	spin_lock_init(&tp->indirect_lock);
++	spin_lock_init(&tp->reset_lock);
+ 	INIT_DELAYED_WORK(&tp->reset_task, tg3_reset_task);
+ 
+ 	tp->regs = pci_ioremap_bar(pdev, BAR_0);
+@@ -18081,12 +18115,14 @@ static void tg3_remove_one(struct pci_dev *pdev)
+ 	if (dev) {
+ 		struct tg3 *tp = netdev_priv(dev);
+ 
++		rtnl_lock();
++		tg3_reset_task_stop(tp);
++		rtnl_unlock();
++
+ 		tg3_ptp_fini(tp);
+ 
+ 		release_firmware(tp->fw);
+ 
+-		tg3_reset_task_cancel(tp);
+-
+ 		if (tg3_flag(tp, USE_PHYLIB)) {
+ 			tg3_phy_fini(tp);
+ 			tg3_mdio_fini(tp);
+@@ -18166,6 +18202,8 @@ static int tg3_resume(struct device *device)
+ 	if (err)
+ 		goto out;
+ 
++	tg3_reset_task_enable(tp);
++
+ 	tg3_timer_start(tp);
+ 
+ 	tg3_netif_start(tp);
+@@ -18234,9 +18272,8 @@ static void tg3_shutdown(struct pci_dev *pdev)
+ 	struct net_device *dev = pci_get_drvdata(pdev);
+ 	struct tg3 *tp = netdev_priv(dev);
+ 
+-	tg3_reset_task_cancel(tp);
+-
+ 	rtnl_lock();
++	tg3_reset_task_stop(tp);
+ 
+ 	netif_device_detach(dev);
+ 
+@@ -18281,10 +18318,8 @@ static pci_ers_result_t tg3_io_error_detected(struct pci_dev *pdev,
+ 
+ 	netdev_info(netdev, "PCI I/O error detected\n");
+ 
+-	/* Want to make sure that the reset task doesn't run */
+-	tg3_reset_task_cancel(tp);
+-
+ 	rtnl_lock();
++	tg3_reset_task_cancel(tp);
+ 
+ 	/* Could be second call or maybe we don't have netdev yet */
+ 	if (!netdev || tp->pcierr_recovery || !netif_running(netdev))
+@@ -18407,6 +18442,8 @@ static void tg3_io_resume(struct pci_dev *pdev)
+ 
+ 	netif_device_attach(netdev);
+ 
++	tg3_reset_task_enable(tp);
++
+ 	tg3_timer_start(tp);
+ 
+ 	tg3_netif_start(tp);
+diff --git a/drivers/net/ethernet/broadcom/tg3.h b/drivers/net/ethernet/broadcom/tg3.h
+index e5716a969e00..c0f2cbab1b53 100644
+--- a/drivers/net/ethernet/broadcom/tg3.h
++++ b/drivers/net/ethernet/broadcom/tg3.h
+@@ -3373,6 +3373,9 @@ struct tg3 {
+ 	struct tg3_hw_stats		*hw_stats;
+ 	dma_addr_t			stats_mapping;
+ 	struct delayed_work		reset_task;
++	/* Serialize reset publication against gate transitions. */
++	spinlock_t			reset_lock;
++	bool				reset_enabled, reset_stopping;
+ 	struct sk_buff			*tx_tstamp_skb;
+ 	u64				pre_tx_ts;
+ 
+-- 
+2.43.0
+

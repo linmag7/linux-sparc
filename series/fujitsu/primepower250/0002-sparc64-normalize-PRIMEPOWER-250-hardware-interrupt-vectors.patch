@@ -1,0 +1,90 @@
+From 7cd0e44af9edfd1675f6fdac523031710482b315 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 7 Nov 2026 00:29:51 +0100
+Subject: [RFC PATCH 2/3] sparc64: normalize PRIMEPOWER 250 hardware
+ interrupt vectors
+
+PRIMEPOWER firmware marks Psycho bridges with interrupt-extension.
+Its UART delivers vector 0x20eb, while build_irq() registers bucket
+0xeb using IMAP_IGN | IMAP_INO. The raw vector exceeds the table.
+
+Apply that representation to hardware vectors on the identified board.
+Cross-call dispatch precedes the mask; other platforms keep an identity
+mask. The encoding follows captured firmware properties and UART traffic.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/irq_64.h   | 2 ++
+ arch/sparc/kernel/irq_64.c        | 3 +++
+ arch/sparc/kernel/ivec.S          | 5 +++++
+ arch/sparc/kernel/prom_irqtrans.c | 7 +++++++
+ 4 files changed, 17 insertions(+)
+
+diff --git a/arch/sparc/include/asm/irq_64.h b/arch/sparc/include/asm/irq_64.h
+index c3e88f2f8e80..da6dd95b6d0f 100644
+--- a/arch/sparc/include/asm/irq_64.h
++++ b/arch/sparc/include/asm/irq_64.h
+@@ -15,6 +15,8 @@
+ #include <asm/pil.h>
+ #include <asm/ptrace.h>
+ 
++extern unsigned long primepower_irq_mask;
++
+ /* IMAP/ICLR register defines */
+ #define IMAP_VALID		0x80000000UL	/* IRQ Enabled		*/
+ #define IMAP_TID_UPA		0x7c000000UL	/* UPA TargetID		*/
+diff --git a/arch/sparc/kernel/irq_64.c b/arch/sparc/kernel/irq_64.c
+index b63130bc77e8..a3235bc10d17 100644
+--- a/arch/sparc/kernel/irq_64.c
++++ b/arch/sparc/kernel/irq_64.c
+@@ -49,6 +49,9 @@
+ #include "cpumap.h"
+ #include "kstack.h"
+ 
++/* Match extended PRIMEPOWER vectors to the IRQ bucket index. */
++unsigned long primepower_irq_mask __ro_after_init = ~0UL;
++
+ struct ino_bucket *ivector_table;
+ unsigned long ivector_table_pa;
+ 
+diff --git a/arch/sparc/kernel/ivec.S b/arch/sparc/kernel/ivec.S
+index 94ba2c3a29c1..525396e0210d 100644
+--- a/arch/sparc/kernel/ivec.S
++++ b/arch/sparc/kernel/ivec.S
+@@ -22,6 +22,11 @@ do_ivec:
+ 	stxa		%g0, [%g0] ASI_INTR_RECEIVE
+ 	membar		#Sync
+ 
++	/* Hardware vectors only: cross-call dispatch has already branched. */
++	sethi		%hi(primepower_irq_mask), %g2
++	ldx		[%g2 + %lo(primepower_irq_mask)], %g2
++	and		%g3, %g2, %g3
++
+ 	sethi		%hi(ivector_table_pa), %g2
+ 	ldx		[%g2 + %lo(ivector_table_pa)], %g2
+ 	sllx		%g3, 4, %g3
+diff --git a/arch/sparc/kernel/prom_irqtrans.c b/arch/sparc/kernel/prom_irqtrans.c
+index 58c5b4565f41..58c505d75a3c 100644
+--- a/arch/sparc/kernel/prom_irqtrans.c
++++ b/arch/sparc/kernel/prom_irqtrans.c
+@@ -10,6 +10,7 @@
+ #include <asm/prom.h>
+ #include <asm/irq.h>
+ #include <asm/upa.h>
++#include <asm/spitfire.h>
+ 
+ #include "prom.h"
+ 
+@@ -77,6 +78,12 @@ static void __init psycho_irq_trans_init(struct device_node *dp)
+ 
+ 	dp->irq_trans = prom_early_alloc(sizeof(struct of_irq_controller));
+ 	dp->irq_trans->irq_build = psycho_irq_build;
++	if (tlb_type == sparc64_v &&
++	    of_property_match_string(of_root, "name", "FJSV,GPUZC-M") >= 0 &&
++	    of_property_match_string(of_root, "model", "250") >= 0 &&
++	    of_property_present(dp, "interrupt-extension"))
++		primepower_irq_mask = IMAP_IGN | IMAP_INO;
++
+ 
+ 	regs = of_get_property(dp, "reg", NULL);
+ 	dp->irq_trans->data = (void *) regs[2].phys_addr;

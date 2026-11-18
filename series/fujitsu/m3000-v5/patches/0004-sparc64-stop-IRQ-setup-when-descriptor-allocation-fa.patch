@@ -1,0 +1,37 @@
+From b2fef0c5d395d23ebd66730fcf28e8cdc343075f Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Wed, 14 Oct 2026 09:09:11 +0200
+Subject: [PATCH v5 04/10] sparc64: stop IRQ setup when descriptor allocation
+ fails
+
+irq_alloc() returns zero on failure, but build_irq() then configures
+IRQ 0, which is reserved for the timer, as a device interrupt.
+
+Halt before publishing the IRQ or changing its descriptor, matching the
+existing fatal handler-data allocation path. Returning zero would let
+callers continue treating the timer IRQ as a valid device interrupt.
+
+Fixes: 8047e247c899 ("[SPARC64]: Virtualize IRQ numbers.")
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/irq_64.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/arch/sparc/kernel/irq_64.c b/arch/sparc/kernel/irq_64.c
+index 3f55c69d5f3b..4cceeba726ab 100644
+--- a/arch/sparc/kernel/irq_64.c
++++ b/arch/sparc/kernel/irq_64.c
+@@ -619,6 +619,10 @@ unsigned int build_irq(int inofixup, unsigned long iclr, unsigned long imap)
+ 	irq = bucket_get_irq(__pa(bucket));
+ 	if (!irq) {
+ 		irq = irq_alloc(0, ino);
++		if (!irq) {
++			prom_printf("IRQ: cannot allocate interrupt descriptor.\n");
++			prom_halt();
++		}
+ 		bucket_set_irq(__pa(bucket), irq);
+ 		irq_set_chip_and_handler_name(irq, &sun4u_irq,
+ 					      handle_fasteoi_irq, "IVEC");
+-- 
+2.43.0
+

@@ -1,0 +1,72 @@
+From 7d6e6ec5abfe2ae7a32b457e2289f5c18bde2086 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 6 Nov 2026 19:22:53 +0100
+Subject: [RFC PATCH 6/9] sparc64: move panic recovery reporting into
+ architecture code
+
+Move the existing Stop-A enable and recovery hint into sparc64 setup
+code so platform policy can report whether firmware recovery is available.
+Preserve its call position, message and behavior. The sparc32 path is
+unchanged.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/setup.h | 1 +
+ arch/sparc/kernel/setup_64.c   | 7 +++++++
+ kernel/panic.c                 | 7 ++++++-
+ 3 files changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/arch/sparc/include/asm/setup.h b/arch/sparc/include/asm/setup.h
+index 21bed5514028..19e526320249 100644
+--- a/arch/sparc/include/asm/setup.h
++++ b/arch/sparc/include/asm/setup.h
+@@ -48,6 +48,7 @@ unsigned long safe_compute_effective_address(struct pt_regs *, unsigned int);
+ 
+ #ifdef CONFIG_SPARC64
+ void __init start_early_boot(void);
++void sparc_panic_exit(void);
+ 
+ /* unaligned_64.c */
+ int handle_ldf_stq(u32 insn, struct pt_regs *regs);
+diff --git a/arch/sparc/kernel/setup_64.c b/arch/sparc/kernel/setup_64.c
+index 63615f5c99b4..6ab436497a7c 100644
+--- a/arch/sparc/kernel/setup_64.c
++++ b/arch/sparc/kernel/setup_64.c
+@@ -693,5 +693,12 @@ void sun_do_break(void)
+ }
+ EXPORT_SYMBOL(sun_do_break);
+ 
++void sparc_panic_exit(void)
++{
++	stop_a_enabled = 1;
++	pr_emerg("Press Stop-A (L1-A) from sun keyboard or send break\n"
++		 "twice on console to return to the boot prom\n");
++}
++
+ int stop_a_enabled = 1;
+ EXPORT_SYMBOL(stop_a_enabled);
+diff --git a/kernel/panic.c b/kernel/panic.c
+index 213725b612aa..6a883a510cca 100644
+--- a/kernel/panic.c
++++ b/kernel/panic.c
+@@ -24,6 +24,9 @@
+ #include <linux/delay.h>
+ #include <linux/kexec.h>
+ #include <linux/panic_notifier.h>
++#ifdef CONFIG_SPARC64
++#include <asm/setup.h>
++#endif
+ #include <linux/sched.h>
+ #include <linux/string_helpers.h>
+ #include <linux/sysrq.h>
+@@ -742,7 +745,9 @@ void vpanic(const char *fmt, va_list args)
+ 			reboot_mode = panic_reboot_mode;
+ 		emergency_restart();
+ 	}
+-#ifdef __sparc__
++#ifdef CONFIG_SPARC64
++	sparc_panic_exit();
++#elif defined(__sparc__)
+ 	{
+ 		extern int stop_a_enabled;
+ 		/* Make sure the user can actually press Stop-A (L1-A) */

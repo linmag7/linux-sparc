@@ -1,0 +1,41 @@
+From 08829afd641cf40bddbb9b00f3c501b7ca7c2a93 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 7 Nov 2026 17:57:30 +0100
+Subject: [PATCH 2/4] tg3: publish TX recovery work before completing NAPI
+
+The TX recovery exits access tp to queue reset work after releasing
+NAPI ownership. Queue the request first so NAPI shutdown cannot pass
+the completion while that producer still has a reset request to publish.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ drivers/net/ethernet/broadcom/tg3.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/ethernet/broadcom/tg3.c b/drivers/net/ethernet/broadcom/tg3.c
+index 6822c0eb60ae..456edcc2deb7 100644
+--- a/drivers/net/ethernet/broadcom/tg3.c
++++ b/drivers/net/ethernet/broadcom/tg3.c
+@@ -7303,8 +7303,8 @@ static int tg3_poll_msix(struct napi_struct *napi, int budget)
+ 
+ tx_recovery:
+ 	/* work_done is guaranteed to be less than budget. */
+-	napi_complete(napi);
+ 	tg3_reset_task_schedule(tp);
++	napi_complete(napi);
+ 	return work_done;
+ }
+ 
+@@ -7386,8 +7386,8 @@ static int tg3_poll(struct napi_struct *napi, int budget)
+ 
+ tx_recovery:
+ 	/* work_done is guaranteed to be less than budget. */
+-	napi_complete(napi);
+ 	tg3_reset_task_schedule(tp);
++	napi_complete(napi);
+ 	return work_done;
+ }
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,46 @@
+From 6c77622cd34cc03c374ddde6785199c878b5bb71 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 16 Oct 2026 00:23:33 +0200
+Subject: [PATCH 1/8] sparc64: disassociate MSI descriptors after IRQ teardown
+
+The MSI core refuses to free descriptors that remain associated with an
+IRQ. The legacy SPARC teardown releases the IRQ but leaves desc->irq
+set, causing a warning and a descriptor leak when MSI is disabled.
+
+On a T5120, e1000e's first open reaches pci_disable_msi() through
+e1000e_reset_interrupt_capability() and warns in msi_domain_free_descs(),
+leaking the descriptor and tainting the kernel. The same warning was
+observed on an Ultra45 when tg3 closes.
+
+Clear the association after successful hardware teardown and before
+releasing the IRQ. Leave it intact on failure while the IRQ survives.
+
+Fixes: b2bdda205c0c ("PCI/MSI: Let the MSI core free descriptors")
+Fixes: 2f2940d16823 ("genirq/msi: Remove filter from msi_free_descs_free_range()")
+Cc: stable@vger.kernel.org
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/pci_msi.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/arch/sparc/kernel/pci_msi.c b/arch/sparc/kernel/pci_msi.c
+index acb2f83a1d5c..c441fb4802aa 100644
+--- a/arch/sparc/kernel/pci_msi.c
++++ b/arch/sparc/kernel/pci_msi.c
+@@ -185,6 +185,7 @@ static void sparc64_teardown_msi_irq(unsigned int irq,
+ {
+ 	struct pci_pbm_info *pbm = pdev->dev.archdata.host_controller;
+ 	const struct sparc64_msiq_ops *ops = pbm->msi_ops;
++	struct msi_desc *entry = irq_get_msi_desc(irq);
+ 	unsigned int msi_num;
+ 	int i, err;
+ 
+@@ -211,6 +212,8 @@ static void sparc64_teardown_msi_irq(unsigned int irq,
+ 
+ 	free_msi(pbm, msi_num);
+ 
++	irq_set_msi_desc(irq, NULL);
++	entry->irq = 0;
+ 	irq_set_chip(irq, NULL);
+ 	irq_free(irq);
+ }

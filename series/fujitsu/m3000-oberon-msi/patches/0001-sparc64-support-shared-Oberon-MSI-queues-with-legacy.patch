@@ -1,0 +1,868 @@
+From a3570dfa04e2365804aca54707869d7b15164836 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sun, 8 Nov 2026 18:23:58 +0100
+Subject: [RFC PATCH] sparc64: support shared Oberon MSI queues with legacy
+ recovery
+
+Initialize an idle Oberon event queue for recoverable endpoints sharing
+a bridge. Give each vector a distinct lifetime message ID and accept
+function-masked MSI-X allocation unwind without stopping other endpoints.
+
+Stop delivery on queue failure and notify every affected driver outside
+controller locks. Retain published queue storage and never reuse message
+IDs; exhaustion falls back to legacy interrupts. Configurations enabling
+CPU hotplug, kexec or system sleep also retain legacy interrupts.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ Documentation/arch/sparc/index.rst      |   1 +
+ Documentation/arch/sparc/oberon-msi.rst |  91 ++++
+ arch/sparc/kernel/pci_fire.c            | 623 +++++++++++++++++++++++-
+ arch/sparc/kernel/pci_oberon_msi.h      |  50 ++
+ 4 files changed, 764 insertions(+), 1 deletion(-)
+ create mode 100644 Documentation/arch/sparc/oberon-msi.rst
+ create mode 100644 arch/sparc/kernel/pci_oberon_msi.h
+
+diff --git a/Documentation/arch/sparc/index.rst b/Documentation/arch/sparc/index.rst
+index ae884224eec2..69ded8c8c759 100644
+--- a/Documentation/arch/sparc/index.rst
++++ b/Documentation/arch/sparc/index.rst
+@@ -6,6 +6,7 @@ Sparc Architecture
+    :maxdepth: 1
+ 
+    console
++   oberon-msi
+    adi
+ 
+    oradax/oracle-dax
+diff --git a/Documentation/arch/sparc/oberon-msi.rst b/Documentation/arch/sparc/oberon-msi.rst
+new file mode 100644
+index 000000000000..21ee2f2fdc46
+--- /dev/null
++++ b/Documentation/arch/sparc/oberon-msi.rst
+@@ -0,0 +1,91 @@
++.. SPDX-License-Identifier: GPL-2.0
++
++Oberon MSI/MSI-X support
++=======================
++
++Scope
++-----
++
++The M3000 Oberon implementation provides one shared event queue per bridge.
++Endpoints need a legacy IRQ and a driver implementing both permanent MSI
++loss callbacks. Configurations with CPU hotplug, kexec or system sleep keep
++legacy interrupts. The onboard BCM5718 ports are the qualified endpoints;
++callback availability alone is not hardware qualification of other devices.
++
++Normal allocation and teardown
++------------------------------
++
++An initialized bridge owns a 1 MiB coherent allocation containing its event
++queue storage. Once published to hardware, the allocation, mapping, backing
++device reference and queue handler are retained for the rest of the boot.
++Pre-publication failures release their resources normally. This is one
++allocation per initialized bridge, not one allocation per interface open.
++
++Each vector consumes one of 256 message IDs. An ID is never assigned to a
++second vector during the same boot, including after failed setup attempts.
++Teardown invalidates its hardware map, removes software dispatch and waits
++for queue-handler execution before releasing the Linux IRQ. The Linux IRQ
++number can be reused; the retired hardware message ID cannot. Late records
++for retired IDs have no dispatch target and cannot reach a new vector.
++
++When the budget is exhausted, new allocations fail and a driver supporting
++legacy fallback can select INTx. Existing vectors continue using MSI/MSI-X.
++The budget is shared across all endpoints on the bridge and does not recover
++on driver unbind, interface reopen or a function reset. Do not treat the
++number of reopen cycles as an interface guarantee: vector counts and failed
++allocation attempts affect consumption.
++
++This policy trades repeated-allocation capacity for avoiding stale-message
++aliasing. It does not provide unlimited MSI operation across rebinds. Legacy
++fallback at exhaustion is intentional; removing the limit requires a proven
++message-retirement protocol, not a larger software counter.
++
++Failure policy
++--------------
++
++A queue failure permanently blocks new MSI allocations on that bridge,
++invalidates message maps and disables queue delivery. Storage and the
++handler remain retained. A worker notifies affected devices outside
++controller locks, allowing drivers to release vectors and reopen on legacy
++IRQs. A returned error does not skip other devices, but a callback that does
++not return delays later notifications; there is no safe generic callback
++cancellation mechanism.
++
++If recovery fails, the software failure callback can mark an interface
++unavailable while retaining its DMA resources. This does not prove endpoint
++DMA or NAPI has stopped. No register readback, notification result or lack
++of further interrupts is used as permission to reclaim the queue.
++
++Conditions for future reclamation
++---------------------------------
++
++Queue storage reclamation and message-ID reuse are separate problems.
++The implementation does neither. Reuse requires all of the following:
++
++* Stop the old endpoint's MSI producer and establish the applicable PCI
++  ordering boundary for messages already posted by that endpoint.
++* Invalidate the map and establish that previously accepted messages have
++  completed queue publication or will be discarded before a new mapping.
++* Consume old records through that boundary and synchronize CPU consumers
++  without resetting or discarding other endpoints' shared-queue records.
++* Only then return the ID to the allocator.
++
++Whole-queue reclamation additionally requires stopping every producer,
++completing every possible DMA write and removing the published queue address
++before freeing storage or the mapping. Synchronizing CPU IRQ handlers alone
++does not provide that device-side completion boundary.
++
++IDLE state, equal head/tail pointers and stable repeated reads are snapshots,
++not a documented fence for all earlier endpoint writes. The EQWR_N latch is
++cleared during consumption and is not treated as an independent completion
++fence. A software generation counter cannot distinguish old and new uses
++when the incoming record contains only the reused message ID. A fixed delay
++or successful stress test is not a substitute for the ordering contract.
++
++Unsupported extensions
++----------------------
++
++Queue reclamation, ID reuse, per-vector queue affinity and suspend/resume
++are not implemented. Actual PCIe faults, runtime PM, AER overlap, hot removal
++and other endpoint drivers require further qualification. Bridge error
++interrupt handling is outside this MSI/MSI-X implementation.
+diff --git a/arch/sparc/kernel/pci_fire.c b/arch/sparc/kernel/pci_fire.c
+index 8a9ed2ae8fbf..401f0a4b48cf 100644
+--- a/arch/sparc/kernel/pci_fire.c
++++ b/arch/sparc/kernel/pci_fire.c
+@@ -3,6 +3,7 @@
+  *
+  * Copyright (C) 2007 David S. Miller (davem@davemloft.net)
+  */
++#include <linux/workqueue.h>
+ #include <linux/kernel.h>
+ #include <linux/pci.h>
+ #include <linux/slab.h>
+@@ -13,12 +14,20 @@
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+ #include <linux/numa.h>
++#include <linux/mutex.h>
++#include <linux/spinlock.h>
++#include <linux/list.h>
++#include <linux/dma-mapping.h>
++#include <linux/sizes.h>
+ 
+ #include <asm/prom.h>
+ #include <asm/irq.h>
+ #include <asm/upa.h>
++#include <asm/trap_block.h>
+ 
++#include "iommu_common.h"
+ #include "pci_impl.h"
++#include "pci_oberon_msi.h"
+ 
+ #define DRIVER_NAME	"fire"
+ #define PFX		DRIVER_NAME ": "
+@@ -152,6 +161,8 @@ struct pci_msiq_entry {
+ #define MSI_CLEAR(MSI)			(0x028000UL + (MSI) * 0x8UL)
+ #define  MSI_CLEAR_EQWR_N		0x4000000000000000UL
+ 
++#define OBERON_MSI_IMAP_MONDO		BIT_ULL(63)
++
+ #define IMONDO_DATA0			0x02C000UL
+ #define  IMONDO_DATA0_DATA		0xffffffffffffffc0UL
+ 
+@@ -357,6 +368,611 @@ static void pci_fire_msi_init(struct pci_pbm_info *pbm)
+ {
+ 	sparc64_pbm_msi_init(pbm, &pci_fire_msiq_ops);
+ }
++
++static int oberon_msi_cells(struct device_node *dp, const char *name,
++			    u32 *cells, size_t count)
++{
++	if (of_property_count_u32_elems(dp, name) != count)
++		return -EINVAL;
++	return of_property_read_u32_array(dp, name, cells, count);
++}
++
++static int oberon_msi_geometry(struct pci_pbm_info *pbm,
++			       struct oberon_msi_geometry *g)
++{
++	struct device_node *dp = pbm->op->dev.of_node;
++	const struct linux_prom64_registers *regs;
++	const char *range = "msi-eq-to-devino";
++	int len;
++
++	regs = of_get_property(dp, "reg", &len);
++	if (!regs || len < sizeof(*regs) || regs[0].reg_size < 0x34010 ||
++	    pbm->pbm_regs > ~0UL - 0x34010)
++		return -EINVAL;
++	if (!of_find_property(dp, range, NULL))
++		range = "msi-eq-devino";
++	if (oberon_msi_cells(dp, "#msi-eqs", &g->queues, 1) ||
++	    oberon_msi_cells(dp, "msi-eq-size", &g->entries, 1) ||
++	    oberon_msi_cells(dp, range, g->queue_range, 3) ||
++	    oberon_msi_cells(dp, "#msi", &g->messages, 1) ||
++	    oberon_msi_cells(dp, "msi-ranges", g->message_range, 2) ||
++	    oberon_msi_cells(dp, "msi-data-mask", &g->data_mask, 1) ||
++	    oberon_msi_cells(dp, "msix-data-width", &g->msix_width, 1) ||
++	    oberon_msi_cells(dp, "msi-address-ranges", g->addresses, 6) ||
++	    oberon_msi_cells(dp, "ino-bitmap", g->ino_bitmap, 2))
++		return -EINVAL;
++	return oberon_msi_validate(g);
++}
++
++enum oberon_message_state {
++	OBERON_MSG_UNUSED,
++	OBERON_MSG_RESERVED,
++	OBERON_MSG_LIVE,
++	OBERON_MSG_RETIRED,
++	OBERON_MSG_QUARANTINED,
++};
++
++struct oberon_msi_peer {
++	struct list_head node;
++	struct pci_dev *pdev;
++	unsigned int vectors;
++	bool blocked;
++	bool notified;
++};
++
++struct oberon_msi_message {
++	struct oberon_msi_peer *peer;
++	unsigned int irq;
++	u8 state;
++};
++
++/* Published queue storage remains owned by this bridge until reboot. */
++struct oberon_msi {
++	struct list_head node;
++	struct list_head peers;
++	struct work_struct fault_work;
++	struct pci_pbm_info *pbm;
++	struct pci_dev *pdev;
++	void *allocation;
++	dma_addr_t dma;
++	struct pci_msiq_entry *queue;
++	unsigned long imap, iclr;
++	unsigned int irq, next, head;
++	struct oberon_msi_message messages[256];
++	unsigned int endpoint_failures, invalidation_failures;
++	unsigned int blocked_publications;
++	atomic64_t records;
++	atomic64_t unbound_records;
++	u64 release_state, release_tail;
++	unsigned int releases, release_head;
++	bool failed;
++	raw_spinlock_t publish_lock; /* Order map publication against fault stop. */
++	struct mutex lock; /* Serialize vector allocation and teardown. */
++};
++
++/* Peer references cover allocated vectors; blocked peers stay pinned. */
++static struct oberon_msi_peer *oberon_msi_peer_get(struct oberon_msi *t,
++						   struct pci_dev *pdev)
++{
++	struct oberon_msi_peer *peer;
++
++	lockdep_assert_held(&t->lock);
++	if (READ_ONCE(t->failed) ||
++	    pdev->dev.archdata.host_controller != t->pbm)
++		return ERR_PTR(-EIO);
++	list_for_each_entry(peer, &t->peers, node) {
++		if (peer->pdev != pdev)
++			continue;
++		if (peer->blocked)
++			return ERR_PTR(-EIO);
++		peer->vectors++;
++		return peer;
++	}
++	peer = kzalloc_obj(*peer);
++	if (!peer)
++		return ERR_PTR(-ENOMEM);
++	peer->pdev = pci_dev_get(pdev);
++	peer->vectors = 1;
++	list_add_tail(&peer->node, &t->peers);
++	return peer;
++}
++
++static void oberon_msi_peer_put(struct oberon_msi *t,
++				struct oberon_msi_peer *peer)
++{
++	lockdep_assert_held(&t->lock);
++	if (WARN_ON_ONCE(!peer->vectors))
++		return;
++	peer->vectors--;
++	if (READ_ONCE(t->failed))
++		peer->blocked = true;
++	if (peer->vectors || peer->blocked)
++		return;
++	list_del(&peer->node);
++	pci_dev_put(peer->pdev);
++	kfree(peer);
++}
++
++/* Notify every affected device without holding controller locks. */
++static void oberon_msi_fault_work(struct work_struct *work)
++{
++	struct oberon_msi *t = container_of(work, struct oberon_msi,
++						fault_work);
++	struct oberon_msi_peer *peer;
++	unsigned int i;
++
++	scoped_guard(mutex, &t->lock) {
++		list_for_each_entry(peer, &t->peers, node)
++			peer->blocked = true;
++		for (i = 0; i < t->next; i++)
++			if (t->messages[i].state == OBERON_MSG_LIVE)
++				t->messages[i].state = OBERON_MSG_QUARANTINED;
++	}
++	for (;;) {
++		enum pci_msi_loss_outcome outcome = PCI_MSI_LOSS_UNRESOLVED;
++		struct pci_dev *pdev = NULL;
++		int ret;
++
++		scoped_guard(mutex, &t->lock) {
++			list_for_each_entry(peer, &t->peers, node) {
++				if (peer->notified)
++					continue;
++				peer->notified = true;
++				pdev = pci_dev_get(peer->pdev);
++				break;
++			}
++		}
++		if (!pdev)
++			break;
++		/* Driver teardown re-enters this owner; blocked peers stay pinned. */
++		ret = pci_msi_notify_lost(pdev, &outcome);
++		scoped_guard(mutex, &t->lock) {
++			list_for_each_entry(peer, &t->peers, node)
++				if (peer->pdev == pdev && peer->vectors && ret >= 0) {
++					ret = -EBUSY;
++					outcome = PCI_MSI_LOSS_UNRESOLVED;
++				}
++		}
++		if (ret < 0) {
++			int failure = pci_msi_report_failure(pdev);
++
++			if (failure < 0)
++				dev_err(&pdev->dev,
++					"Oberon MSI software failure handoff unresolved (%d)\n",
++					failure);
++			dev_err(&pdev->dev,
++				"Oberon MSI recovery unresolved: outcome %u, error %d; controller remains blocked\n",
++				outcome, ret);
++		} else {
++			dev_info(&pdev->dev,
++				 "Oberon MSI notification complete: outcome %u; controller remains blocked\n",
++				 outcome);
++		}
++		pci_dev_put(pdev);
++	}
++}
++
++static DEFINE_MUTEX(oberon_msi_init_lock);
++static LIST_HEAD(oberon_msi_owners);
++static DEFINE_MUTEX(oberon_msi_owners_lock);
++
++static struct oberon_msi *oberon_msi_owner(struct pci_dev *pdev)
++{
++	struct oberon_msi *t;
++
++	guard(mutex)(&oberon_msi_owners_lock);
++	list_for_each_entry(t, &oberon_msi_owners, node)
++		if (t->pbm == pdev->dev.archdata.host_controller)
++			return t;
++	return NULL;
++}
++
++static int oberon_msi_claim(struct oberon_msi *t)
++{
++	struct oberon_msi *owner;
++
++	guard(mutex)(&oberon_msi_owners_lock);
++	list_for_each_entry(owner, &oberon_msi_owners, node)
++		if (owner->pbm == t->pbm)
++			return -EBUSY;
++	list_add_tail(&t->node, &oberon_msi_owners);
++	return 0;
++}
++
++static void oberon_msi_unclaim(struct oberon_msi *t)
++{
++	guard(mutex)(&oberon_msi_owners_lock);
++	list_del_init(&t->node);
++}
++
++static void __oberon_msi_stop(struct oberon_msi *t)
++{
++	unsigned long regs = t->pbm->pbm_regs;
++	unsigned int i;
++	bool first = !READ_ONCE(t->failed);
++
++	lockdep_assert_held(&t->publish_lock);
++	WRITE_ONCE(t->failed, true);
++	upa_writeq(upa_readq(t->imap) & ~IMAP_VALID, t->imap);
++	upa_readq(t->imap);
++	for (i = 0; i < 256; i++)
++		upa_writeq(0, regs + MSI_MAP(i));
++	upa_readq(regs + MSI_MAP(255));
++	upa_writeq(EVENT_QUEUE_CONTROL_CLEAR_DIS,
++		   regs + EVENT_QUEUE_CONTROL_CLEAR(0));
++	upa_readq(regs + EVENT_QUEUE_STATE(0));
++	/* No drain guarantee is assumed: storage and the handler remain pinned. */
++	if (first)
++		schedule_work(&t->fault_work);
++}
++
++static void oberon_msi_stop(struct oberon_msi *t)
++{
++	guard(raw_spinlock_irqsave)(&t->publish_lock);
++	__oberon_msi_stop(t);
++}
++
++static bool oberon_msi_publish(struct oberon_msi *t, unsigned int msi)
++{
++	unsigned long regs = t->pbm->pbm_regs;
++
++	guard(raw_spinlock_irqsave)(&t->publish_lock);
++	if (READ_ONCE(t->failed)) {
++		t->blocked_publications++;
++		return false;
++	}
++	/* Publish dispatch state before making the hardware message map valid. */
++	wmb();
++	upa_writeq(MSI_CLEAR_EQWR_N, regs + MSI_CLEAR(msi));
++	upa_writeq(MSI_MAP_VALID, regs + MSI_MAP(msi));
++	if ((upa_readq(regs + MSI_MAP(msi)) &
++	     (MSI_MAP_VALID | MSI_MAP_EQNUM)) != MSI_MAP_VALID) {
++		__oberon_msi_stop(t);
++		return false;
++	}
++	return true;
++}
++
++static irqreturn_t oberon_msi_interrupt(int irq, void *cookie)
++{
++	struct oberon_msi *t = cookie;
++	unsigned long regs = t->pbm->pbm_regs;
++	unsigned int n;
++
++	if (READ_ONCE(t->failed))
++		return IRQ_HANDLED;
++	if (upa_readq(regs + EVENT_QUEUE_STATE(0)) != EVENT_QUEUE_STATE_ACTIVE ||
++	    upa_readq(regs + EVENT_QUEUE_TAIL(0)) & EVENT_QUEUE_TAIL_OFLOW)
++		goto fault;
++	for (n = 0; n < 128; n++) {
++		struct pci_msiq_entry *e = &t->queue[t->head];
++		u64 word = READ_ONCE(e->word0);
++		unsigned int msi, vector, type;
++
++		if (!(word & MSIQ_WORD0_FMT_TYPE))
++			break;
++		dma_rmb();
++		type = (word & MSIQ_WORD0_FMT_TYPE) >>
++			(MSIQ_WORD0_FMT_TYPE_SHIFT + 3);
++		msi = word & MSIQ_WORD0_DATA0;
++		if ((type != MSIQ_TYPE_MSI32 && type != MSIQ_TYPE_MSI64) ||
++		    msi >= 256)
++			goto fault;
++		upa_writeq(MSI_CLEAR_EQWR_N, regs + MSI_CLEAR(msi));
++		vector = READ_ONCE(t->messages[msi].irq);
++		if (vector)
++			generic_handle_irq(vector);
++		else
++			atomic64_inc(&t->unbound_records);
++		WRITE_ONCE(e->word0, word & ~MSIQ_WORD0_FMT_TYPE);
++		t->head = (t->head + 1) & 127;
++		atomic64_inc(&t->records);
++	}
++	/* Publish consumed records before advancing the hardware head. */
++	dma_wmb();
++	upa_writeq(t->head, regs + EVENT_QUEUE_HEAD(0));
++	upa_readq(regs + EVENT_QUEUE_HEAD(0));
++	return IRQ_HANDLED;
++
++fault:
++	oberon_msi_stop(t);
++	dev_err(&t->pdev->dev, "Oberon MSI queue fault; delivery stopped, storage retained\n");
++	return IRQ_HANDLED;
++}
++
++static struct irq_chip oberon_msi_chip = {
++	.name = "Oberon-MSI",
++	.irq_mask = pci_msi_mask_irq,
++	.irq_unmask = pci_msi_unmask_irq,
++	.irq_enable = pci_msi_unmask_irq,
++	.irq_disable = pci_msi_mask_irq,
++};
++
++static int oberon_msi_owner_init(struct pci_dev *pdev);
++
++static int oberon_msi_setup(unsigned int *irq_p, struct pci_dev *pdev,
++			    struct msi_desc *desc)
++{
++	struct oberon_msi *t;
++	struct pci_driver *driver;
++	struct msi_msg msg = {};
++	struct oberon_msi_peer *peer;
++	unsigned int msi, irq;
++	int err = -ENOSPC;
++
++	/* Allocation runs within the requesting driver's device lifetime. */
++	driver = READ_ONCE(pdev->driver);
++	if (!driver || !driver->msi_lost || !driver->msi_lost_failed ||
++	    !pdev->irq || IS_ENABLED(CONFIG_HOTPLUG_CPU) ||
++	    IS_ENABLED(CONFIG_KEXEC_CORE) || IS_ENABLED(CONFIG_PM_SLEEP))
++		return -EOPNOTSUPP;
++	/* Do not expose an owner to allocation before initialization finishes. */
++	scoped_guard(mutex, &oberon_msi_init_lock) {
++		t = oberon_msi_owner(pdev);
++		if (!t) {
++			err = oberon_msi_owner_init(pdev);
++			if (err)
++				return err;
++			t = oberon_msi_owner(pdev);
++		}
++	}
++	if (!t)
++		return -ENOSPC;
++	mutex_lock(&t->lock);
++	if (READ_ONCE(t->failed) || t->next == 256) {
++		err = -ENOSPC;
++		goto unlock;
++	}
++	peer = oberon_msi_peer_get(t, pdev);
++	if (IS_ERR(peer)) {
++		err = PTR_ERR(peer);
++		goto unlock;
++	}
++	irq = irq_alloc(0, 0);
++	if (!irq) {
++		err = -ENOMEM;
++		oberon_msi_peer_put(t, peer);
++		goto unlock;
++	}
++	/* Retire each message number permanently so late records cannot alias. */
++	msi = t->next++;
++	t->messages[msi].peer = peer;
++	t->messages[msi].state = OBERON_MSG_RESERVED;
++	irq_set_chip_and_handler_name(irq, &oberon_msi_chip,
++				      handle_simple_irq, "MSI");
++	WRITE_ONCE(t->messages[msi].irq, irq);
++	if (!oberon_msi_publish(t, msi)) {
++		WRITE_ONCE(t->messages[msi].irq, 0);
++		synchronize_irq(t->irq);
++		irq_free(irq);
++		t->messages[msi].state = OBERON_MSG_QUARANTINED;
++		t->messages[msi].peer = NULL;
++		oberon_msi_peer_put(t, peer);
++		err = -EIO;
++		goto unlock;
++	}
++	t->messages[msi].state = OBERON_MSG_LIVE;
++	if (desc->pci.msi_attrib.is_64) {
++		msg.address_hi = t->pbm->msi64_start >> 32;
++		msg.address_lo = t->pbm->msi64_start;
++	} else {
++		msg.address_lo = t->pbm->msi32_start;
++	}
++	msg.data = msi;
++	irq_set_msi_desc(irq, desc);
++	pci_write_msi_msg(irq, &msg);
++	*irq_p = irq;
++	err = 0;
++unlock:
++	mutex_unlock(&t->lock);
++	return err;
++}
++
++static bool oberon_msi_endpoint_masked(struct pci_dev *pdev,
++				       const struct msi_desc *desc)
++{
++	u16 flags;
++	int cap, offset, enable;
++
++	if (pci_dev_is_disconnected(pdev))
++		return false;
++	if (desc->pci.msi_attrib.is_msix) {
++		cap = pdev->msix_cap;
++		offset = PCI_MSIX_FLAGS;
++		enable = PCI_MSIX_FLAGS_ENABLE;
++	} else {
++		cap = pdev->msi_cap;
++		offset = PCI_MSI_FLAGS;
++		enable = PCI_MSI_FLAGS_ENABLE;
++	}
++	/* MSI-X allocation rollback runs enabled with all vectors masked. */
++	return cap && !pci_read_config_word(pdev, cap + offset, &flags) &&
++		(!(flags & enable) ||
++		 (desc->pci.msi_attrib.is_msix && flags & PCI_MSIX_FLAGS_MASKALL));
++}
++
++static void oberon_msi_teardown(unsigned int irq, struct pci_dev *pdev)
++{
++	struct oberon_msi *t = oberon_msi_owner(pdev);
++	struct msi_desc *desc = irq_get_msi_desc(irq);
++	unsigned int i;
++
++	if (!t)
++		return;
++	mutex_lock(&t->lock);
++	for (i = 0; i < t->next; i++) {
++		if (!t->messages[i].peer ||
++		    t->messages[i].peer->pdev != pdev ||
++		    READ_ONCE(t->messages[i].irq) != irq)
++			continue;
++		if (!desc || !oberon_msi_endpoint_masked(pdev, desc)) {
++			t->endpoint_failures++;
++			oberon_msi_stop(t);
++		}
++		upa_writeq(0, t->pbm->pbm_regs + MSI_MAP(i));
++		if (upa_readq(t->pbm->pbm_regs + MSI_MAP(i)) & MSI_MAP_VALID) {
++			t->invalidation_failures++;
++			oberon_msi_stop(t);
++		}
++		WRITE_ONCE(t->messages[i].irq, 0);
++		synchronize_irq(t->irq);
++		/* Samples describe teardown; they do not establish DMA completion. */
++		t->release_state = upa_readq(t->pbm->pbm_regs +
++					     EVENT_QUEUE_STATE(0));
++		t->release_tail = upa_readq(t->pbm->pbm_regs +
++					    EVENT_QUEUE_TAIL(0));
++		t->release_head = READ_ONCE(t->head);
++		t->releases++;
++		t->messages[i].state = READ_ONCE(t->failed) ?
++			OBERON_MSG_QUARANTINED : OBERON_MSG_RETIRED;
++		irq_set_msi_desc(irq, NULL);
++		if (desc)
++			desc->irq = 0;
++		irq_set_chip(irq, NULL);
++		irq_free(irq);
++		oberon_msi_peer_put(t, t->messages[i].peer);
++		t->messages[i].peer = NULL;
++		break;
++	}
++	mutex_unlock(&t->lock);
++}
++
++static int oberon_msi_owner_init(struct pci_dev *pdev)
++{
++	struct oberon_msi_geometry g;
++	struct oberon_msi *t;
++	struct pci_pbm_info *pbm;
++	unsigned long regs, slot, i;
++	dma_addr_t aligned;
++	int err;
++
++	pci_dev_get(pdev);
++	pbm = pdev->dev.archdata.host_controller;
++	err = -EINVAL;
++	if (!pbm || !pbm->is_oberon ||
++	    (pdev->class >> 8) != PCI_CLASS_NETWORK_ETHERNET)
++		goto put;
++	err = oberon_msi_geometry(pbm, &g);
++	if (err)
++		goto put;
++	if (g.message_range[0] || g.messages != 256)
++		goto invalid;
++	regs = pbm->pbm_regs;
++	if (upa_readq(regs + EVENT_QUEUE_BASE_ADDR_REG) ||
++	    upa_readq(regs + MSI_32BIT_ADDR) || upa_readq(regs + MSI_64BIT_ADDR))
++		goto busy;
++	for (i = 0; i < 5; i++)
++		if (upa_readq(regs + 0x30000 + i * 8))
++			goto busy;
++	for (i = 0; i < 256; i++)
++		if (upa_readq(regs + MSI_MAP(i)))
++			goto busy;
++	for (i = 0; i < g.queues; i++)
++		if (upa_readq(regs + EVENT_QUEUE_STATE(i)) != EVENT_QUEUE_STATE_IDLE ||
++		    upa_readq(regs + EVENT_QUEUE_HEAD(i)) ||
++		    upa_readq(regs + EVENT_QUEUE_TAIL(i)) ||
++		    upa_readq(regs + 0x1000 + (g.queue_range[2] + i) * 8) ||
++		    upa_readq(regs + 0x1400 + (g.queue_range[2] + i) * 8))
++			goto busy;
++	t = kzalloc_obj(*t);
++	if (!t) {
++		err = -ENOMEM;
++		goto put;
++	}
++	INIT_LIST_HEAD(&t->node);
++	INIT_LIST_HEAD(&t->peers);
++	INIT_WORK(&t->fault_work, oberon_msi_fault_work);
++	t->pbm = pbm;
++	/* The retained owner holds the enumeration reference to this device. */
++	t->pdev = pdev;
++	mutex_init(&t->lock);
++	raw_spin_lock_init(&t->publish_lock);
++	err = oberon_msi_claim(t);
++	if (err)
++		goto free;
++	t->allocation = dma_alloc_coherent(&pdev->dev, SZ_1M, &t->dma, GFP_KERNEL);
++	if (!t->allocation) {
++		err = -ENOMEM;
++		goto free;
++	}
++	err = -EINVAL;
++	if (t->dma < pbm->iommu->tbl.table_map_base ||
++	    t->dma > (u64)pbm->iommu->dma_addr_mask + 1 - SZ_1M ||
++	    !IS_ALIGNED(t->dma, IO_PAGE_SIZE))
++		goto free_dma;
++	aligned = ALIGN(t->dma, OBERON_EQ_ALIGNMENT);
++	if (aligned - t->dma > SZ_1M - g.queues * OBERON_EQ_BYTES)
++		goto free_dma;
++	slot = (t->dma - pbm->iommu->tbl.table_map_base) >> IO_PAGE_SHIFT;
++	for (i = 0; i < SZ_1M / IO_PAGE_SIZE; i++) {
++		u64 expected = IOPTE_VALID | IOPTE_CACHE | IOPTE_WRITE |
++			(__pa(t->allocation + (i << IO_PAGE_SHIFT)) & IOPTE_PAGE);
++
++		if (iopte_val(pbm->iommu->page_table[slot + i]) != expected)
++			goto free_dma;
++	}
++	t->queue = t->allocation + aligned - t->dma;
++	t->imap = regs + 0x1000 + g.queue_range[2] * 8;
++	t->iclr = regs + 0x1400 + g.queue_range[2] * 8;
++	upa_writeq(OBERON_MSI_IMAP_MONDO | BIT_ULL(6), t->imap);
++	t->irq = oberon_build_irq((pbm->portid << 6) + g.queue_range[2] - BIT(6),
++				  t->iclr, t->imap);
++	if (!t->irq) {
++		err = -ENOMEM;
++		goto restore_imap;
++	}
++	err = request_irq(t->irq, oberon_msi_interrupt,
++			  IRQF_NO_AUTOEN | IRQF_NO_THREAD | IRQF_NOBALANCING,
++			  "Oberon-MSIQ", t);
++	if (err)
++		goto restore_imap;
++	/* From publication onward, neither the DMA mapping nor handler is freed. */
++	dma_wmb();
++	upa_writeq(aligned, regs + EVENT_QUEUE_BASE_ADDR_REG);
++	upa_writeq(pbm->portid << 6, regs + IMONDO_DATA0);
++	upa_writeq(0, regs + IMONDO_DATA1);
++	pbm->msi32_start = g.addresses[1];
++	pbm->msi64_start = (u64)g.addresses[3] << 32 | g.addresses[4];
++	upa_writeq(pbm->msi32_start, regs + MSI_32BIT_ADDR);
++	upa_writeq(pbm->msi64_start, regs + MSI_64BIT_ADDR);
++	if (upa_readq(regs + EVENT_QUEUE_BASE_ADDR_REG) != aligned ||
++	    upa_readq(regs + IMONDO_DATA0) != ((u64)pbm->portid << 6) ||
++	    upa_readq(regs + IMONDO_DATA1) ||
++	    upa_readq(regs + MSI_32BIT_ADDR) != pbm->msi32_start ||
++	    upa_readq(regs + MSI_64BIT_ADDR) != pbm->msi64_start)
++		goto retained;
++	upa_writeq(EVENT_QUEUE_CONTROL_SET_EN, regs + EVENT_QUEUE_CONTROL_SET(0));
++	if (upa_readq(regs + EVENT_QUEUE_STATE(0)) != EVENT_QUEUE_STATE_ACTIVE)
++		goto retained;
++	atomic64_set(&t->records, 0);
++	atomic64_set(&t->unbound_records, 0);
++	enable_irq(t->irq);
++	dev_info(&pdev->dev, "Oberon MSI ready: queue 0, IRQ %u, DVMA %pad; storage pinned\n",
++		 t->irq, &aligned);
++	return 0;
++
++retained:
++	oberon_msi_stop(t);
++	dev_err(&pdev->dev, "Oberon MSI initialization failed; storage and handler retained\n");
++	return -EIO;
++restore_imap:
++	upa_writeq(0, t->imap);
++free_dma:
++	dma_free_coherent(&pdev->dev, SZ_1M, t->allocation, t->dma);
++free:
++	oberon_msi_unclaim(t);
++	kfree(t);
++put:
++	pci_dev_put(pdev);
++	return err;
++busy:
++	err = -EBUSY;
++	goto put;
++invalid:
++	err = -EINVAL;
++	goto put;
++}
++
+ #else /* CONFIG_PCI_MSI */
+ static void pci_fire_msi_init(struct pci_pbm_info *pbm)
+ {
+@@ -491,6 +1107,12 @@ static int pci_fire_pbm_init(struct pci_pbm_info *pbm,
+ 
+ 	if (!pbm->is_oberon)
+ 		pci_fire_msi_init(pbm);
++	else if (IS_ENABLED(CONFIG_PCI_MSI)) {
++#ifdef CONFIG_PCI_MSI
++		pbm->setup_msi_irq = oberon_msi_setup;
++		pbm->teardown_msi_irq = oberon_msi_teardown;
++#endif
++	}
+ 
+ 	pbm->pci_bus = pci_scan_one_pbm(pbm, &op->dev);
+ 
+@@ -531,7 +1153,6 @@ static int fire_probe(struct platform_device *op)
+ 	if (err)
+ 		goto out_free_iommu;
+ 
+-	dev_set_drvdata(&op->dev, pbm);
+ 
+ 	return 0;
+ 
+diff --git a/arch/sparc/kernel/pci_oberon_msi.h b/arch/sparc/kernel/pci_oberon_msi.h
+new file mode 100644
+index 000000000000..75f842c5c32f
+--- /dev/null
++++ b/arch/sparc/kernel/pci_oberon_msi.h
+@@ -0,0 +1,50 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef PCI_OBERON_MSI_H
++#define PCI_OBERON_MSI_H
++
++#include <linux/errno.h>
++#include <linux/types.h>
++
++#define OBERON_EQ_ALIGNMENT (512U * 1024)
++#define OBERON_EQ_BYTES (128U * 64)
++
++struct oberon_msi_geometry {
++	u32 queues;
++	u32 entries;
++	u32 queue_range[3];
++	u32 messages;
++	u32 message_range[2];
++	u32 data_mask;
++	u32 msix_width;
++	u32 addresses[6];
++	u32 ino_bitmap[2];
++};
++
++static inline int oberon_msi_validate(const struct oberon_msi_geometry *g)
++{
++	u64 bitmap = ((u64)g->ino_bitmap[1] << 32) | g->ino_bitmap[0];
++	u32 first = g->queue_range[2];
++	u32 i;
++
++	/* Initially support the zero-based queue layout observed on M3000. */
++	if (!g->queues || g->queues > 36 || g->entries != 128 ||
++	    g->queue_range[0] || g->queue_range[1] != g->queues ||
++	    first < 0x18 || first > 0x3b || g->queues > 0x3c - first)
++		return -EINVAL;
++	if (!g->messages || g->messages > 256 ||
++	    g->message_range[0] > 255 ||
++	    g->messages > 256 - g->message_range[0] ||
++	    g->message_range[1] != g->messages ||
++	    g->data_mask != 0xff || g->msix_width < 8 || g->msix_width > 32)
++		return -EINVAL;
++	if (g->addresses[0] || (g->addresses[1] & 0xffff) ||
++	    (g->addresses[4] & 0xffff) ||
++	    g->addresses[2] != 0x10000 || g->addresses[5] != 0x10000)
++		return -EINVAL;
++	for (i = 0; i < g->queues; i++)
++		if (!(bitmap & (1ULL << (first + i))))
++			return -EINVAL;
++	return 0;
++}
++
++#endif /* PCI_OBERON_MSI_H */
+-- 
+2.43.0
+

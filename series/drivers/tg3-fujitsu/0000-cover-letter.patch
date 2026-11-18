@@ -1,0 +1,19 @@
+From: Magnus Lindholm <linmag7@gmail.com>
+Subject: [RFC PATCH 0/1] Recognize Fujitsu BCM5703C adapters
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Add the tested Fujitsu BCM5703C PCI identities to tg3. This applies on
+vanilla v7.3-rc1 and is separate from the M3000 BCM5718 byte-order fix.
+Earlier PRIMEPOWER tests covered automatic binding and packet transfers.
+
+The exact cleaned integration booted PRIMEPOWER UP/SMP with automatic
+tg3 binding. Hash-checked PCI#01 transfers passed on CPU0 and CPU1,
+including close/reopen and return to CPU0. Tests used the integrated
+stack; final transfer qualification was on PCI#01.
+
+Magnus Lindholm:
+  tg3: Add Fujitsu BCM5703C copper adapters
+
+base-commit: cee9395acd8043be0644b25c34bfa86623f2b935

@@ -1,0 +1,43 @@
+From a69077032300ff044b959a3c81edf8c8534568c0 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Thu, 1 Oct 2026 19:12:25 +0200
+Subject: [RFC PATCH 1/1] scsi: spi: retry a transient failure of the
+ initial DV inquiry
+
+After an IOC reset a Fusion SPI controller can return DID_SOFT_ERROR
+for the first inquiry, with no data transferred. Domain validation uses
+REQ_FAILFAST_DRIVER, so this retryable result aborts validation and leaves
+the target using asynchronous transfers.
+
+Allow bounded retries while obtaining the reference inquiry at narrow
+asynchronous settings. Keep the subsequent comparison and transfer-mode
+tests fail-fast so retries cannot hide failures at a negotiated speed.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ drivers/scsi/scsi_transport_spi.c | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/scsi/scsi_transport_spi.c b/drivers/scsi/scsi_transport_spi.c
+index 3e3da8c2ff26..5257a775e138 100644
+--- a/drivers/scsi/scsi_transport_spi.c
++++ b/drivers/scsi/scsi_transport_spi.c
+@@ -720,10 +720,15 @@ spi_dv_device_compare_inquiry(struct scsi_device *sdev, u8 *buffer,
+ 	};
+ 
+ 	for (r = 0; r < retries; r++) {
+-		memset(ptr, 0, len);
++		int retry_count = ptr == buffer ? DV_RETRIES : 0;
+ 
+-		result = spi_execute(sdev, spi_inquiry, REQ_OP_DRV_IN,
+-				     ptr, len, NULL);
++		/* Retry only the reference read at narrow asynchronous settings. */
++		do {
++			memset(ptr, 0, len);
++			result = spi_execute(sdev, spi_inquiry, REQ_OP_DRV_IN,
++					     ptr, len, NULL);
++		} while (result == (DID_SOFT_ERROR << 16) && retry_count-- &&
++			 scsi_device_online(sdev));
+ 		
+ 		if(result || !scsi_device_online(sdev)) {
+ 			scsi_device_set_state(sdev, SDEV_QUIESCE);

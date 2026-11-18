@@ -1,0 +1,233 @@
+[
+  {
+    "branch": "archive/2026-11-18/fujitsu/m3000-v5",
+    "base": "cee9395acd8043be0644b25c34bfa86623f2b935",
+    "tip": "4542781ab46d822372ec5e3ce5a3ad680fcc6998",
+    "patches": [
+      "m3000-v5/patches/0001-sparc64-return-from-the-generic-clear_page-implement.patch",
+      "m3000-v5/patches/0002-sparc64-honor-queued-spinlock-layout-in-secondary-st.patch",
+      "m3000-v5/patches/0003-sparc64-avoid-huge-kernel-PUD-mappings-with-small-ha.patch",
+      "m3000-v5/patches/0004-sparc64-stop-IRQ-setup-when-descriptor-allocation-fa.patch",
+      "m3000-v5/patches/0005-sparc64-validate-Fire-register-properties-before-ini.patch",
+      "m3000-v5/patches/0006-sparc64-retain-the-DMA-segment-start-across-SG-entri.patch",
+      "m3000-v5/patches/0007-sparc64-zero-newly-allocated-IOMMU-page-tables.patch",
+      "m3000-v5/patches/0008-sparc64-add-SPARC64-VII-CPU-MMU-and-SMP-support.patch",
+      "m3000-v5/patches/0009-sparc64-add-M3000-Oberon-PCIe-support.patch",
+      "m3000-v5/patches/0010-hvc-add-an-M3000-firmware-console-backend.patch"
+    ],
+    "status": "Held local v5 candidate",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/sparc64/common-review69",
+    "base": "cee9395acd8043be0644b25c34bfa86623f2b935",
+    "tip": "50ab5a351768103333dc3c95d354cb8e4bfd03c5",
+    "patches": [
+      "generic-sparc64/0001-sparc64-capture-secondary-CPUs-before-normal-firmware-reboot.patch",
+      "generic-sparc64/0002-sparc64-advance-the-PROM-console-buffer-by-bytes-written.patch",
+      "generic-sparc64/0003-sparc64-stop-PROM-console-writes-when-firmware-makes-no-progress.patch",
+      "generic-sparc64/0004-sparc64-use-the-kernel-log-for-runtime-capable-fatal-diagnostics.patch",
+      "generic-sparc64/0005-sparc-avoid-waiting-for-the-PROM-output-buffer-during-panic.patch",
+      "generic-sparc64/0006-sparc64-move-panic-recovery-reporting-into-architecture-code.patch",
+      "generic-sparc64/0007-sparc64-cache-the-firmware-input-node-during-console-discovery.patch",
+      "generic-sparc64/0008-sparc64-provide-status-from-the-direct-firmware-interface.patch",
+      "generic-sparc64/0009-sparc64-check-client-interface-status-in-PROM-wrappers.patch"
+    ],
+    "status": "Consolidated generic fixes and API preparation",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/sparc64/extra-fixes",
+    "base": "cee9395acd8043be0644b25c34bfa86623f2b935",
+    "tip": "04af1ca96029eb2b08235a756f7249ba768cbe53",
+    "patches": [
+      "generic-sparc64-extra-fixes/patches/0001-sparc64-release-IOMMU-context-on-scatterlist-mapping.patch",
+      "generic-sparc64-extra-fixes/patches/0003-sparc64-stop-cookie-IRQ-setup-after-allocation-failu.patch",
+      "generic-sparc64-extra-fixes/patches/0004-sparc64-validate-sun4u-interrupt-vectors-before-tabl.patch"
+    ],
+    "status": "Retained non-overlapping fixes; original patch 2 excluded",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/sparc64/msi-lifecycle",
+    "base": "cee9395acd8043be0644b25c34bfa86623f2b935",
+    "tip": "65b5e12a8b8a380f24b5f961a40b49e746577a74",
+    "patches": [
+      "generic-sparc64-msi/patches/0001-sparc64-disassociate-MSI-descriptors-after-IRQ-teard.patch",
+      "generic-sparc64-msi/patches/0002-sparc64-initialize-MSI-dispatch-before-requesting-qu.patch",
+      "generic-sparc64-msi/patches/0003-sparc64-retain-published-MSI-queues-on-initializatio.patch",
+      "generic-sparc64-msi/patches/0004-sparc64-synchronize-MSI-queue-dispatch-before-releas.patch",
+      "generic-sparc64-msi/patches/0005-sparc64-check-MSI-invalidation-before-completing-tea.patch",
+      "generic-sparc64-msi/patches/0006-sparc64-validate-and-order-MSI-queue-consumption.patch",
+      "generic-sparc64-msi/patches/0007-sparc64-quarantine-MSI-IDs-after-failed-hardware-tea.patch",
+      "generic-sparc64-msi/patches/0008-sparc64-stage-MSI-queue-enable-after-handler-registr.patch"
+    ],
+    "status": "Generic MSI lifecycle review series",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/sparc64/m3000-companion",
+    "base": "4542781ab46d822372ec5e3ce5a3ad680fcc6998",
+    "tip": "a801e922a55f94876b81e54fe0dd1ed071b1dc85",
+    "patches": [
+      "generic-sparc64-m3000-companion/0001-sparc64-report-IRQ-descriptor-exhaustion-through-the-kernel-log.patch"
+    ],
+    "status": "M3000-dependent common IRQ diagnostics",
+    "dependencies": [
+      "fujitsu/m3000-v5"
+    ]
+  },
+  {
+    "branch": "archive/2026-11-18/serial/sunsu",
+    "base": "cee9395acd8043be0644b25c34bfa86623f2b935",
+    "tip": "694d3bfdcfe82ea6850ede0e34a4f2cb5c786f73",
+    "patches": [
+      "generic-serial-sunsu/0001-serial-sunsu-preserve-receive-errors-across-transmit-polling.patch",
+      "generic-serial-sunsu/0002-serial-sunsu-avoid-waiting-for-a-port-lock-during-panic.patch",
+      "generic-serial-sunsu/0003-serial-sunsu-hand-the-console-to-firmware-explicitly.patch"
+    ],
+    "status": "Serial review series",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/drivers/sunhme",
+    "base": "cee9395acd8043be0644b25c34bfa86623f2b935",
+    "tip": "4c0b91441d0d61f98ca626ea499384c5488ec7ef",
+    "patches": [
+      "sunhme/0001-net-sunhme-handle-DP83843-reset-and-vendor-register-differences.patch"
+    ],
+    "status": "Independent driver patch",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/drivers/tg3-fujitsu",
+    "base": "cee9395acd8043be0644b25c34bfa86623f2b935",
+    "tip": "b4bcf31f9f43e7569f6c705704dde49dcaf0a5bd",
+    "patches": [
+      "tg3-fujitsu/0001-tg3-Add-Fujitsu-BCM5703C-copper-adapters.patch"
+    ],
+    "status": "Independent driver patch",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/drivers/mptfusion-endian",
+    "base": "cee9395acd8043be0644b25c34bfa86623f2b935",
+    "tip": "00df14ad9808c18242e4faeaf670f18b0882eba6",
+    "patches": [
+      "mptfusion-endian/0001-scsi-mptfusion-decode-cached-firmware-before-PIO-reload.patch"
+    ],
+    "status": "Independent driver patch",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/drivers/mptfusion-initiator-id",
+    "base": "cee9395acd8043be0644b25c34bfa86623f2b935",
+    "tip": "f91284d709438a249899da52a4f90149ac2e0de9",
+    "patches": [
+      "mptfusion-initiator-id/0001-scsi-mptfusion-honor-PRIMEPOWER-250-firmware-initiator-identity.patch"
+    ],
+    "status": "Independent driver patch",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/drivers/tg3-bcm5718-byteorder",
+    "base": "cee9395acd8043be0644b25c34bfa86623f2b935",
+    "tip": "762f39fd418c08b9631a749f2024f2ff0e992ea6",
+    "patches": [
+      "tg3-bcm5718-byteorder/0001-tg3-normalize-inherited-BCM5718-register-byte-order.patch"
+    ],
+    "status": "Independent driver patch",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/drivers/pci-uli-ehci",
+    "base": "cee9395acd8043be0644b25c34bfa86623f2b935",
+    "tip": "106ce724c5bb84b62626e8f6f88300fa062e9702",
+    "patches": [
+      "pci-uli-ehci/patches/0001-PCI-Disable-MSI-for-ULi-5239-revision-01-with-subsys.patch"
+    ],
+    "status": "Independent driver patch",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/workarounds/spi-dv-workaround",
+    "base": "cee9395acd8043be0644b25c34bfa86623f2b935",
+    "tip": "7f12fb80e889a4bb4716feaf2b0142141610cc07",
+    "patches": [
+      "spi-dv-workaround/0001-scsi-spi-retry-a-transient-failure-of-the-initial-DV-inquiry.patch"
+    ],
+    "status": "Workaround, root cause unresolved",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/drivers/tg3-reset-fixes",
+    "base": "cee9395acd8043be0644b25c34bfa86623f2b935",
+    "tip": "71b26a96254993bca4fbb2f5a0a4accc0082e2e5",
+    "patches": [
+      "tg3-reset-fixes/patches/0001-tg3-defer-reset-work-when-RTNL-is-busy.patch",
+      "tg3-reset-fixes/patches/0002-tg3-publish-TX-recovery-work-before-completing-NAPI.patch",
+      "tg3-reset-fixes/patches/0003-tg3-gate-reset-work-across-device-teardown.patch",
+      "tg3-reset-fixes/patches/0004-tg3-unregister-the-netdevice-before-releasing-its-re.patch"
+    ],
+    "status": "Four generic reset/removal fixes",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/pci/msi-loss-api",
+    "base": "cee9395acd8043be0644b25c34bfa86623f2b935",
+    "tip": "6620e956f38eb34eac52671fc9d1be1357c0ebf6",
+    "patches": [
+      "pci-msi-loss-api/patches/0001-PCI-MSI-notify-drivers-of-permanent-interrupt-delive.patch"
+    ],
+    "status": "Proposed PCI API; RFC",
+    "dependencies": []
+  },
+  {
+    "branch": "archive/2026-11-18/drivers/tg3-msi-recovery",
+    "base": "578900df1ff49410c878db86e35dd7192f2aabe8",
+    "tip": "5b6eaad22926a8158e04f0d209900f666a293382",
+    "patches": [
+      "tg3-msi-recovery/patches/0001-tg3-recover-permanent-MSI-loss-or-latch-the-interfac.patch"
+    ],
+    "status": "Driver consumer RFC",
+    "dependencies": [
+      "drivers/tg3-reset-fixes",
+      "pci/msi-loss-api"
+    ]
+  },
+  {
+    "branch": "archive/2026-11-18/fujitsu/primepower250-review69",
+    "base": "36b013ed8c5631246e4281992e411a3cb019cafa",
+    "tip": "1ba964406424bdbc8492da404fa0f6ae61af7459",
+    "patches": [
+      "primepower250/0001-sparc64-add-runtime-SPARC64-V-CPU-MMU-and-SMP-support.patch",
+      "primepower250/0002-sparc64-normalize-PRIMEPOWER-250-hardware-interrupt-vectors.patch",
+      "primepower250/0003-sparc64-manage-PRIMEPOWER-IRQ-and-firmware-ownership.patch"
+    ],
+    "status": "Platform RFC; restricted IRQ migration",
+    "dependencies": [
+      "fujitsu/m3000-v5",
+      "sparc64/common-review69",
+      "sparc64/m3000-companion",
+      "serial/sunsu",
+      "driver patches and SPI workaround listed in recipe"
+    ]
+  },
+  {
+    "branch": "archive/2026-11-18/fujitsu/m3000-msi-bounded",
+    "base": "ad93a717ddb15ede6a71c6ee862d0aba0b193976",
+    "tip": "7c9d6f5241d03911a343cf8f95e4b260c0d4efbb",
+    "patches": [
+      "m3000-oberon-msi/patches/0001-sparc64-support-shared-Oberon-MSI-queues-with-legacy.patch"
+    ],
+    "status": "Bounded RFC; 256 lifetime IDs; error interrupts deferred",
+    "dependencies": [
+      "fujitsu/m3000-v5",
+      "sparc64/msi-lifecycle",
+      "drivers/tg3-reset-fixes",
+      "drivers/tg3-bcm5718-byteorder",
+      "pci/msi-loss-api",
+      "drivers/tg3-msi-recovery"
+    ]
+  }
+]

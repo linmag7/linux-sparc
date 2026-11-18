@@ -1,0 +1,91 @@
+From a8ae763f90c5df4e452e1e79d1764063f6cf3482 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 7 Nov 2026 17:20:51 +0100
+Subject: [PATCH 1/4] tg3: defer reset work when RTNL is busy
+
+Close and suspend cancel reset work with RTNL held, while the reset
+worker acquires RTNL before checking the device state. A worker waiting
+for RTNL can therefore prevent synchronous cancellation from finishing.
+
+Use delayed work and retry one jiffy later if RTNL is busy. Convert
+cancellation to the delayed-work API so the deferred retry is canceled
+before the caller proceeds. Keep RTNL around hardware reset and retain
+the existing self-cancellation avoidance on reset failure.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ drivers/net/ethernet/broadcom/tg3.c | 16 ++++++++++------
+ drivers/net/ethernet/broadcom/tg3.h |  2 +-
+ 2 files changed, 11 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/net/ethernet/broadcom/tg3.c b/drivers/net/ethernet/broadcom/tg3.c
+index 73a4b569b03e..6822c0eb60ae 100644
+--- a/drivers/net/ethernet/broadcom/tg3.c
++++ b/drivers/net/ethernet/broadcom/tg3.c
+@@ -7238,13 +7238,13 @@ static int tg3_poll_work(struct tg3_napi *tnapi, int work_done, int budget)
+ static inline void tg3_reset_task_schedule(struct tg3 *tp)
+ {
+ 	if (!test_and_set_bit(TG3_FLAG_RESET_TASK_PENDING, tp->tg3_flags))
+-		schedule_work(&tp->reset_task);
++		schedule_delayed_work(&tp->reset_task, 0);
+ }
+ 
+ static inline void tg3_reset_task_cancel(struct tg3 *tp)
+ {
+ 	if (test_and_clear_bit(TG3_FLAG_RESET_TASK_PENDING, tp->tg3_flags))
+-		cancel_work_sync(&tp->reset_task);
++		cancel_delayed_work_sync(&tp->reset_task);
+ 	tg3_flag_clear(tp, TX_RECOVERY_PENDING);
+ }
+ 
+@@ -11262,10 +11262,14 @@ static int tg3_restart_hw(struct tg3 *tp, bool reset_phy)
+ 
+ static void tg3_reset_task(struct work_struct *work)
+ {
+-	struct tg3 *tp = container_of(work, struct tg3, reset_task);
++	struct tg3 *tp = container_of(to_delayed_work(work), struct tg3, reset_task);
+ 	int err;
+ 
+-	rtnl_lock();
++	/* Close and suspend can cancel this work while holding RTNL. */
++	if (!rtnl_trylock()) {
++		schedule_delayed_work(&tp->reset_task, 1);
++		return;
++	}
+ 	tg3_full_lock(tp, 0);
+ 
+ 	if (tp->pcierr_recovery || !netif_running(tp->dev) ||
+@@ -11299,7 +11303,7 @@ static void tg3_reset_task(struct work_struct *work)
+ 		tp->irq_sync = 0;
+ 		tg3_napi_enable(tp);
+ 		/* Clear this flag so that tg3_reset_task_cancel() will not
+-		 * call cancel_work_sync() and wait forever.
++		 * call cancel_delayed_work_sync() and wait forever.
+ 		 */
+ 		tg3_flag_clear(tp, RESET_TASK_PENDING);
+ 		netdev_unlock(tp->dev);
+@@ -17761,7 +17765,7 @@ static int tg3_init_one(struct pci_dev *pdev,
+ #endif
+ 	spin_lock_init(&tp->lock);
+ 	spin_lock_init(&tp->indirect_lock);
+-	INIT_WORK(&tp->reset_task, tg3_reset_task);
++	INIT_DELAYED_WORK(&tp->reset_task, tg3_reset_task);
+ 
+ 	tp->regs = pci_ioremap_bar(pdev, BAR_0);
+ 	if (!tp->regs) {
+diff --git a/drivers/net/ethernet/broadcom/tg3.h b/drivers/net/ethernet/broadcom/tg3.h
+index a9e7f88fa26d..e5716a969e00 100644
+--- a/drivers/net/ethernet/broadcom/tg3.h
++++ b/drivers/net/ethernet/broadcom/tg3.h
+@@ -3372,7 +3372,7 @@ struct tg3 {
+ 
+ 	struct tg3_hw_stats		*hw_stats;
+ 	dma_addr_t			stats_mapping;
+-	struct work_struct		reset_task;
++	struct delayed_work		reset_task;
+ 	struct sk_buff			*tx_tstamp_skb;
+ 	u64				pre_tx_ts;
+ 
+-- 
+2.43.0
+

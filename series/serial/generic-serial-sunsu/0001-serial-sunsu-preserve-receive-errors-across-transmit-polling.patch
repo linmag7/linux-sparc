@@ -1,0 +1,136 @@
+From fece07441d39a9d49f24a94484a088add107a0cd Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 6 Nov 2026 09:55:47 +0100
+Subject: [RFC PATCH 1/3] serial: sunsu: preserve receive errors across
+ transmit polling
+
+Console output reads LSR while waiting for the transmitter. These reads
+can clear receive errors before the IRQ handler sees them. Only BREAK
+is saved, and it is restored after error accounting inside a branch that
+is skipped when no other error remains in LSR.
+
+Save all receive-error flags across serial LSR reads and merge them
+before accounting, BREAK handling and termios filtering. Consume saved
+flags once per character and clear them with stale receive state during
+startup under the port lock. Also preserve errors when checking TX empty.
+
+The PC16550D datasheet, SNLS378C, section 8.6.3 describes the clear-on-read
+LSR error bits. This change covers native driver reads; it cannot recover
+status already consumed by firmware.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ drivers/tty/serial/sunsu.c | 40 +++++++++++++++++++++-----------------
+ 1 file changed, 22 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/tty/serial/sunsu.c b/drivers/tty/serial/sunsu.c
+index 4ff3e5c41dab..7ca4b6a73c89 100644
+--- a/drivers/tty/serial/sunsu.c
++++ b/drivers/tty/serial/sunsu.c
+@@ -87,7 +87,7 @@ struct uart_sunsu_port {
+ 	unsigned char		ier;
+ 	unsigned short		rev;
+ 	unsigned char		lcr;
+-	unsigned int		lsr_break_flag;
++	unsigned int		lsr_saved_flags;
+ 	unsigned int		cflag;
+ 
+ 	/* Probing information.  */
+@@ -293,6 +293,16 @@ static void sunsu_enable_ms(struct uart_port *port)
+ 	uart_port_unlock_irqrestore(&up->port, flags);
+ }
+ 
++/* Preserve clear-on-read receive errors until the character is consumed. */
++static unsigned char sunsu_read_lsr(struct uart_sunsu_port *up)
++{
++	unsigned char status = serial_in(up, UART_LSR);
++
++	status |= up->lsr_saved_flags;
++	up->lsr_saved_flags = status & UART_LSR_BRK_ERROR_BITS;
++	return status;
++}
++
+ static void
+ receive_chars(struct uart_sunsu_port *up, unsigned char *status)
+ {
+@@ -306,6 +316,9 @@ receive_chars(struct uart_sunsu_port *up, unsigned char *status)
+ 		flag = TTY_NORMAL;
+ 		up->port.icount.rx++;
+ 
++		*status |= up->lsr_saved_flags;
++		up->lsr_saved_flags = 0;
++
+ 		if (unlikely(*status & (UART_LSR_BI | UART_LSR_PE |
+ 				       UART_LSR_FE | UART_LSR_OE))) {
+ 			/*
+@@ -337,13 +350,6 @@ receive_chars(struct uart_sunsu_port *up, unsigned char *status)
+ 			 */
+ 			*status &= up->port.read_status_mask;
+ 
+-			if (up->port.cons != NULL &&
+-			    up->port.line == up->port.cons->index) {
+-				/* Recover the break flag from console xmit */
+-				*status |= up->lsr_break_flag;
+-				up->lsr_break_flag = 0;
+-			}
+-
+ 			if (*status & UART_LSR_BI) {
+ 				flag = TTY_BREAK;
+ 			} else if (*status & UART_LSR_PE)
+@@ -363,7 +369,7 @@ receive_chars(struct uart_sunsu_port *up, unsigned char *status)
+ 			 */
+ 			 tty_insert_flip_char(port, 0, TTY_OVERRUN);
+ 	ignore_char:
+-		*status = serial_in(up, UART_LSR);
++		*status = sunsu_read_lsr(up);
+ 	} while ((*status & UART_LSR_DR) && (max_count-- > 0));
+ 
+ 	if (saw_console_brk)
+@@ -436,7 +442,7 @@ static irqreturn_t sunsu_serial_interrupt(int irq, void *dev_id)
+ 	uart_port_lock_irqsave(&up->port, &flags);
+ 
+ 	do {
+-		status = serial_in(up, UART_LSR);
++		status = sunsu_read_lsr(up);
+ 		if (status & UART_LSR_DR)
+ 			receive_chars(up, &status);
+ 		check_modem_status(up);
+@@ -523,7 +529,7 @@ static unsigned int sunsu_tx_empty(struct uart_port *port)
+ 	unsigned int ret;
+ 
+ 	uart_port_lock_irqsave(&up->port, &flags);
+-	ret = serial_in(up, UART_LSR) & UART_LSR_TEMT ? TIOCSER_TEMT : 0;
++	ret = sunsu_read_lsr(up) & UART_LSR_TEMT ? TIOCSER_TEMT : 0;
+ 	uart_port_unlock_irqrestore(&up->port, flags);
+ 
+ 	return ret;
+@@ -685,13 +691,14 @@ static int sunsu_startup(struct uart_port *port)
+ 		(void) inb_p(icp);
+ 	}
+ 
+-	/*
+-	 * And clear the interrupt registers again for luck.
+-	 */
++	/* Clear stale receive state before starting a new session. */
++	uart_port_lock_irqsave(&up->port, &flags);
+ 	(void) serial_in(up, UART_LSR);
+ 	(void) serial_in(up, UART_RX);
+ 	(void) serial_in(up, UART_IIR);
+ 	(void) serial_in(up, UART_MSR);
++	up->lsr_saved_flags = 0;
++	uart_port_unlock_irqrestore(&up->port, flags);
+ 
+ 	return 0;
+ }
+@@ -1234,10 +1241,7 @@ static void wait_for_xmitr(struct uart_sunsu_port *up)
+ 
+ 	/* Wait up to 10ms for the character(s) to be sent. */
+ 	do {
+-		status = serial_in(up, UART_LSR);
+-
+-		if (status & UART_LSR_BI)
+-			up->lsr_break_flag = UART_LSR_BI;
++		status = sunsu_read_lsr(up);
+ 
+ 		if (--tmout == 0)
+ 			break;

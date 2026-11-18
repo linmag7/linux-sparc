@@ -1,0 +1,141 @@
+From 55f5c345d70756c361dbf04c85c0352a9c1ea890 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Thu, 1 Oct 2026 21:28:00 +0200
+Subject: [RFC PATCH 1/9] sparc64: capture secondary CPUs before normal
+ firmware reboot
+
+A normal restart leaves secondary CPUs running while the reboot CPU
+enters firmware. A PRIMEPOWER reboot fault contains a Linux TLB cross-call
+handler address with its context packed into the upper word, consistent
+with firmware interpreting the Linux interrupt payload as an address.
+
+Capture secondary CPUs before the firmware boot call, as prom_cmdline()
+already does. Apply this to sparc64 SMP without a processor-model check.
+Keep the LDOM hypervisor reset before capture and release CPUs if the
+firmware call returns.
+
+Give emergency restart a separate entry that skips capture: that path
+may run with unresponsive CPUs and must not wait for their acknowledgment.
+Preserve the generic emergency-restart implementation for sparc32.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/emergency-restart.h | 11 +++++++++++
+ arch/sparc/include/asm/oplib_64.h          |  2 +-
+ arch/sparc/kernel/reboot.c                 | 19 +++++++++++++++----
+ arch/sparc/prom/misc_64.c                  | 13 ++++++++++++-
+ 4 files changed, 39 insertions(+), 6 deletions(-)
+ create mode 100644 arch/sparc/include/asm/emergency-restart.h
+
+diff --git a/arch/sparc/include/asm/emergency-restart.h b/arch/sparc/include/asm/emergency-restart.h
+new file mode 100644
+index 000000000000..92dc6d71efa9
+--- /dev/null
++++ b/arch/sparc/include/asm/emergency-restart.h
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _SPARC_EMERGENCY_RESTART_H
++#define _SPARC_EMERGENCY_RESTART_H
++
++#ifdef CONFIG_SPARC64
++void machine_emergency_restart(void);
++#else
++#include <asm-generic/emergency-restart.h>
++#endif
++
++#endif
+diff --git a/arch/sparc/include/asm/oplib_64.h b/arch/sparc/include/asm/oplib_64.h
+index 1b86d02a8455..4e397f8caeb4 100644
+--- a/arch/sparc/include/asm/oplib_64.h
++++ b/arch/sparc/include/asm/oplib_64.h
+@@ -72,7 +72,7 @@ char *prom_getbootargs(void);
+ /* Miscellaneous routines, don't really fit in any category per se. */
+ 
+ /* Reboot the machine with the command line passed. */
+-void prom_reboot(const char *boot_command);
++void prom_reboot(const char *boot_command, bool capture);
+ 
+ /* Evaluate the forth string passed. */
+ void prom_feval(const char *forth_string);
+diff --git a/arch/sparc/kernel/reboot.c b/arch/sparc/kernel/reboot.c
+index 69c1b6c047d5..c41de768e617 100644
+--- a/arch/sparc/kernel/reboot.c
++++ b/arch/sparc/kernel/reboot.c
+@@ -9,6 +9,7 @@
+ #include <linux/pm.h>
+ #include <linux/of.h>
+ 
++#include <asm/emergency-restart.h>
+ #include <asm/oplib.h>
+ #include <asm/prom.h>
+ #include <asm/setup.h>
+@@ -38,7 +39,7 @@ void machine_halt(void)
+ 	panic("Halt failed!");
+ }
+ 
+-void machine_restart(char *cmd)
++static void sparc_restart(char *cmd, bool capture)
+ {
+ 	char *p;
+ 
+@@ -46,10 +47,20 @@ void machine_restart(char *cmd)
+ 	if (p)
+ 		*p = 0;
+ 	if (cmd)
+-		prom_reboot(cmd);
++		prom_reboot(cmd, capture);
+ 	if (*reboot_command)
+-		prom_reboot(reboot_command);
+-	prom_reboot("");
++		prom_reboot(reboot_command, capture);
++	prom_reboot("", capture);
+ 	panic("Reboot failed!");
+ }
+ 
++void machine_restart(char *cmd)
++{
++	sparc_restart(cmd, true);
++}
++
++void machine_emergency_restart(void)
++{
++	/* Emergency restart cannot wait for other CPUs to respond. */
++	sparc_restart(NULL, false);
++}
+diff --git a/arch/sparc/prom/misc_64.c b/arch/sparc/prom/misc_64.c
+index 3792736ff21f..8966ae89c47e 100644
+--- a/arch/sparc/prom/misc_64.c
++++ b/arch/sparc/prom/misc_64.c
+@@ -49,13 +49,19 @@ void prom_sun4v_guest_soft_state(void)
+ }
+ 
+ /* Reset and reboot the machine with the command 'bcommand'. */
+-void prom_reboot(const char *bcommand)
++void prom_reboot(const char *bcommand, bool capture)
+ {
+ 	unsigned long args[4];
++	unsigned long flags;
+ 
+ #ifdef CONFIG_SUN_LDOMS
+ 	if (ldom_domaining_enabled)
+ 		ldom_reboot(bcommand);
++#endif
++	local_irq_save(flags);
++#ifdef CONFIG_SMP
++	if (capture)
++		smp_capture();
+ #endif
+ 	args[0] = (unsigned long) "boot";
+ 	args[1] = 1;
+@@ -63,6 +69,11 @@ void prom_reboot(const char *bcommand)
+ 	args[3] = (unsigned long) bcommand;
+ 
+ 	p1275_cmd_direct(args);
++#ifdef CONFIG_SMP
++	if (capture)
++		smp_release();
++#endif
++	local_irq_restore(flags);
+ }
+ 
+ /* Forth evaluate the expression contained in 'fstring'. */

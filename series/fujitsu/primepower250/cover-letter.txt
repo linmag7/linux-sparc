@@ -1,0 +1,84 @@
+Add runtime SPARC64 V recognition and PRIMEPOWER 250 support on top of
+the M3000 architecture foundation. No V-specific Kconfig switch is needed.
+The qualified PCI#01 pin-A source can route interrupts to either CPU;
+other sources retain their firmware CPU0 route. This is not general
+migration support for every bridge interrupt or shared pin.
+
+The three platform patches cover CPU/MMU/SMP enablement, extended vector
+normalization, and physical-map/U2U ownership with firmware and UART
+handoff. Generic SPARC64, serial and network/storage changes are separate
+groups. The M3000 Oberon/MSI follow-ups are not prerequisites.
+
+The CPU patch validates supported MMU modes at startup and firmware
+return, checks only actual kernel TLB reservations, and acknowledges
+supported degradation before enabling interrupts. Huge pages and CPU
+hotplug remain unsupported. Corrected incoming ECC needs an unimplemented
+memory-repair step and is not falsely reported as recovered.
+
+Only a qualified root-name query is admitted with the device active.
+Orderly monitor/terminal entry requires explicit UART handoff and closed
+device routes. Panic/oops/NMI refuse new firmware entry and require
+external reset. Already-running firmware or CPU capture is not cancellable
+by this code. Timer selectors remain unread; firmware routes are retained.
+
+The exact cleaned UP and SMP images booted from disk to Gentoo and SSH.
+Both passed native UART traffic, closed-device BREAK/go and active-device
+BREAK refusal. Hash-checked PCI#01 transfers covered CPU0, CPU1, CPU1
+close/reopen and return to CPU0, with interrupts counted only on the
+selected CPU. Taint and bridge error counters remained zero.
+
+Earlier instrumented images qualified the root-name firmware query and
+CPU0/CPU1 RAM panic paths. Held-UART and simulated firmware-owned UART
+panic tests recorded twelve attempted writes, zero UART MMIO and zero
+CIF entry; external recovery completed. These fixtures do not cancel an
+actual in-flight firmware call.
+
+The same cleaned source also passed Ultra45 UP and eight-vCPU T5120
+LDOM boot/reboot, fork/COW and hash-checked disk/network tests. Ultra45
+passed native SUNSU serial traffic and BREAK/go. The LDOM uses eight
+strands of one physical core and virtual I/O. Heavy serial-input bursts
+during console output overran the Ultra45 UART on both old and new
+kernels; paced input passed on both.
+
+No ECC injection, broad shared-map migration, RTC UIE or arbitrary
+active-device firmware coverage is claimed.
+
+CPU references cite the SPARC64 V Implementation Supplement and JPS1.
+The bridge protocol is based on captured firmware and hardware results;
+no U2U register specification has been obtained. Codex assisted with code,
+analysis and commit text during this development.
+
+Magnus Lindholm:
+  sparc64: add runtime SPARC64 V CPU, MMU and SMP support
+  sparc64: normalize PRIMEPOWER 250 hardware interrupt vectors
+  sparc64: manage PRIMEPOWER IRQ and firmware ownership
+
+base-commit: cee9395acd8043be0644b25c34bfa86623f2b935
+prerequisite-patch-id: e868c0a73b769642f4fe50938cd974c60c4907e2
+prerequisite-patch-id: 17f393fb6426bab69d621f79e3563b1471f70fed
+prerequisite-patch-id: 9abd96184ec34339b5646784dfd673c2a0e935d1
+prerequisite-patch-id: 0929bd654419e3762ffa507ab4f3440d05fbd9fd
+prerequisite-patch-id: 87a05a76d782761957216d52606b6dae10e9fcde
+prerequisite-patch-id: 4860af18708e15d81a08c502ab89b118ca4b4383
+prerequisite-patch-id: ed4f55093237f83f4729cc996b61ee1fb532f36a
+prerequisite-patch-id: 4949a3142bf6da48df56cd7c1c83795ba390005f
+prerequisite-patch-id: 37e1bb1ce31633547e7d9b8b4af0e6c58e9ba08e
+prerequisite-patch-id: bba64c07c2b426d0cbef0a40d6373234e2fe2fd2
+prerequisite-patch-id: 9d122d81028d7c118ea520fd1297ee39a9e7567b
+prerequisite-patch-id: 890796c5482978ec2e45e4644553aaf0d719a355
+prerequisite-patch-id: 7760844ae830cce5f51d7bd04d48d1722317cd78
+prerequisite-patch-id: a24889dea603391199390f206954486eca640e83
+prerequisite-patch-id: b49674cf5497928202e54f864353d7b8e824aee8
+prerequisite-patch-id: 5e1f84a57e766b315373455bf8e4aa7c5a9efd52
+prerequisite-patch-id: 9c8d84b0a986e66949223394a0657f3129fce164
+prerequisite-patch-id: 31f0730b984b86586b783793bd3321565838cf41
+prerequisite-patch-id: 13817b765959c95e37c264b8e135afc443e87052
+prerequisite-patch-id: d7fe284b885edbe8ec09149d69b5a168e5c7a1d5
+prerequisite-patch-id: 8a169f9bef06ec1adbe3016076e3799671a9161f
+prerequisite-patch-id: 7443f1929a35e7afcea1f73428f416b017f6cfe9
+prerequisite-patch-id: 0200772857b50d557f20391f751054c35e28f419
+prerequisite-patch-id: 14e54b2a13fa8bb5467a90626e0a1f76757b0108
+prerequisite-patch-id: 5b8253c90e8b97b4b866701525b111ccb8a890e6
+prerequisite-patch-id: c81259bef0049fb7718a266c777aa1228eeaede4
+prerequisite-patch-id: 24466a83b58f51af6f12a7241473830daca274d7
+prerequisite-patch-id: 8521b180bef255dfc3d542e2e9759b11990c21a7

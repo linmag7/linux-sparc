@@ -1,0 +1,31 @@
+These changes separate generic PROM console and panic handling from the
+PRIMEPOWER platform policy. They handle partial and stalled writes,
+avoid waiting for the PROM buffer during panic, capture secondary CPUs
+before orderly reboot, and prepare checked firmware-service wrappers.
+
+The direct wrapper still succeeds on existing platforms. Returning status
+lets a platform refuse entry without callers consuming unchanged result
+cells. That API preparation is separate from the PRIMEPOWER admission
+policy. A firmware call or CPU capture already in progress is not bounded.
+
+These nine patches apply together to vanilla v7.3-rc1 without M3000 or
+PRIMEPOWER support. The exact cleaned integration passed PRIMEPOWER
+UP/SMP boot, serial and firmware-entry checks, plus Ultra45 UP and
+eight-vCPU T5120 LDOM boot/reboot, fork/COW and disk/network checks.
+Ultra45 also passed native serial and BREAK/go. The guest's eight strands
+share one physical core and use virtual I/O; native sun4v PCI and
+cross-core operation were not tested in this qualification.
+The M3000 IRQ-exhaustion logging companion is packaged separately.
+
+Magnus Lindholm:
+  sparc64: capture secondary CPUs before normal firmware reboot
+  sparc64: advance the PROM console buffer by bytes written
+  sparc64: stop PROM console writes when firmware makes no progress
+  sparc64: use the kernel log for runtime-capable fatal diagnostics
+  sparc: avoid waiting for the PROM output buffer during panic
+  sparc64: move panic recovery reporting into architecture code
+  sparc64: cache the firmware input node during console discovery
+  sparc64: provide status from the direct firmware interface
+  sparc64: check client-interface status in PROM wrappers
+
+base-commit: cee9395acd8043be0644b25c34bfa86623f2b935

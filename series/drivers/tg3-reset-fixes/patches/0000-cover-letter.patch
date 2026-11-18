@@ -1,0 +1,43 @@
+From e661d7d20a23a472a814c272c0649bf944336bb8 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sun, 8 Nov 2026 01:09:31 +0100
+Subject: [PATCH 0/4] tg3: serialize reset work with device teardown
+
+Close and suspend drain reset work while holding RTNL, which the reset
+worker also needs. Reset publication can also overlap cancellation, and
+removal currently releases resources before unregistering the netdevice.
+
+This series makes a contended reset worker retry without waiting for
+RTNL, publishes TX recovery before NAPI completion, gates reset work
+across teardown, and unregisters the netdevice before resource release.
+These are generic tg3 changes with no SPARC or M3000 dependency.
+
+Each patch was applied and built with W=1 for SPARC64 UP/SMP and x86-64
+SMP with PM_SLEEP enabled. Hardware testing used BCM5718 devices in an
+M3000 with a diagnostic integration kernel. It covered reset cancellation,
+reset-triggered close, terminal reset gating, active unbind/rebind and
+controlled open/removal overlaps. Queued and running reset overlaps with
+MSI-loss recovery also passed, followed by hashed network transfers.
+
+The observed tests validate the changed paths; they did not reproduce an
+original-kernel crash. PTP, PHYLIB and host-loaded firmware were absent
+on the tested devices. Suspend/resume and physical PCI-error recovery
+have build coverage only, not runtime qualification.
+
+I used Codex to assist with the implementation, analysis and testing.
+
+base-commit: cee9395acd8043be0644b25c34bfa86623f2b935
+
+Magnus Lindholm (4):
+  tg3: defer reset work when RTNL is busy
+  tg3: publish TX recovery work before completing NAPI
+  tg3: gate reset work across device teardown
+  tg3: unregister the netdevice before releasing its resources
+
+ drivers/net/ethernet/broadcom/tg3.c | 88 +++++++++++++++++++++--------
+ drivers/net/ethernet/broadcom/tg3.h |  5 +-
+ 2 files changed, 69 insertions(+), 24 deletions(-)
+
+-- 
+2.43.0
+

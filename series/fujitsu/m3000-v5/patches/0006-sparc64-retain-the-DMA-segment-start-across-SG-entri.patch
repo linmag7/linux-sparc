@@ -1,0 +1,68 @@
+From fca8b998b734c35f8dd46b7c9dfc0e6756519d7f Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Wed, 14 Oct 2026 09:09:12 +0200
+Subject: [PATCH v5 06/10] sparc64: retain the DMA segment start across SG
+ entries
+
+The SG mapping loops reset out_entry to zero for each input entry.
+When extending an output segment, the boundary check therefore tests
+entry zero instead of the segment's actual starting IOMMU entry.
+Adjacent allocations can be merged across a device segment boundary.
+
+Keep out_entry for the lifetime of the mapping loop and update it only
+when starting an output segment, in both sun4u and sun4v.
+
+Fixes: f08802572965 ("sparc64: add the segment boundary checking to IOMMUs while merging SG entries")
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/iommu.c     | 4 ++--
+ arch/sparc/kernel/pci_sun4v.c | 4 ++--
+ 2 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/arch/sparc/kernel/iommu.c b/arch/sparc/kernel/iommu.c
+index 7613ab0ffb89..a23105b64fb9 100644
+--- a/arch/sparc/kernel/iommu.c
++++ b/arch/sparc/kernel/iommu.c
+@@ -451,7 +451,7 @@ static int dma_4u_map_sg(struct device *dev, struct scatterlist *sglist,
+ 	int outcount, incount, i;
+ 	struct strbuf *strbuf;
+ 	struct iommu *iommu;
+-	unsigned long base_shift;
++	unsigned long base_shift, out_entry = 0;
+ 
+ 	BUG_ON(direction == DMA_NONE);
+ 
+@@ -485,7 +485,7 @@ static int dma_4u_map_sg(struct device *dev, struct scatterlist *sglist,
+ 	seg_boundary_size = dma_get_seg_boundary_nr_pages(dev, IO_PAGE_SHIFT);
+ 	base_shift = iommu->tbl.table_map_base >> IO_PAGE_SHIFT;
+ 	for_each_sg(sglist, s, nelems, i) {
+-		unsigned long paddr, npages, entry, out_entry = 0, slen;
++		unsigned long paddr, npages, entry, slen;
+ 		iopte_t *base;
+ 
+ 		slen = s->length;
+diff --git a/arch/sparc/kernel/pci_sun4v.c b/arch/sparc/kernel/pci_sun4v.c
+index 61f14b4c8f90..22584c4de973 100644
+--- a/arch/sparc/kernel/pci_sun4v.c
++++ b/arch/sparc/kernel/pci_sun4v.c
+@@ -489,7 +489,7 @@ static int dma_4v_map_sg(struct device *dev, struct scatterlist *sglist,
+ 	struct atu *atu;
+ 	struct iommu_map_table *tbl;
+ 	u64 mask;
+-	unsigned long base_shift;
++	unsigned long base_shift, out_entry = 0;
+ 	long err;
+ 
+ 	BUG_ON(direction == DMA_NONE);
+@@ -530,7 +530,7 @@ static int dma_4v_map_sg(struct device *dev, struct scatterlist *sglist,
+ 	base_shift = tbl->table_map_base >> IO_PAGE_SHIFT;
+ 
+ 	for_each_sg(sglist, s, nelems, i) {
+-		unsigned long paddr, npages, entry, out_entry = 0, slen;
++		unsigned long paddr, npages, entry, slen;
+ 
+ 		slen = s->length;
+ 		/* Sanity check */
+-- 
+2.43.0
+

@@ -1,0 +1,52 @@
+From c0d71b6c3e552ef69d040c27bc024daf638690e1 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 7 Nov 2026 00:19:06 +0100
+Subject: [RFC PATCH 8/9] sparc64: provide status from the direct firmware
+ interface
+
+Return zero when the direct client-interface wrapper completes. Keep the
+current firmware call and locking behavior unchanged; firmware service
+results remain in the argument cells.
+
+This prepares callers to distinguish a wrapper admission or validation
+failure from a firmware service result.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/oplib_64.h | 2 +-
+ arch/sparc/prom/p1275.c           | 3 ++-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/arch/sparc/include/asm/oplib_64.h b/arch/sparc/include/asm/oplib_64.h
+index 4e397f8caeb4..0cad3897bbd7 100644
+--- a/arch/sparc/include/asm/oplib_64.h
++++ b/arch/sparc/include/asm/oplib_64.h
+@@ -248,6 +248,6 @@ int prom_ihandle2path(int handle, char *buffer, int bufsize);
+ 
+ /* Client interface level routines. */
+ void prom_cif_init(void *cif_handler);
+-void p1275_cmd_direct(unsigned long *);
++int p1275_cmd_direct(unsigned long *);
+ 
+ #endif /* !(__SPARC64_OPLIB_H) */
+diff --git a/arch/sparc/prom/p1275.c b/arch/sparc/prom/p1275.c
+index 51c3f984bbf7..878e29f44004 100644
+--- a/arch/sparc/prom/p1275.c
++++ b/arch/sparc/prom/p1275.c
+@@ -33,7 +33,7 @@ extern void prom_cif_callback(void);
+  */
+ DEFINE_RAW_SPINLOCK(prom_entry_lock);
+ 
+-void p1275_cmd_direct(unsigned long *args)
++int p1275_cmd_direct(unsigned long *args)
+ {
+ 	unsigned long flags;
+ 
+@@ -47,6 +47,7 @@ void p1275_cmd_direct(unsigned long *args)
+ 
+ 	raw_spin_unlock(&prom_entry_lock);
+ 	local_irq_restore(flags);
++	return 0;
+ }
+ 
+ void prom_cif_init(void *cif_handler)

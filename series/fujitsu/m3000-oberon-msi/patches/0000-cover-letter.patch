@@ -1,0 +1,79 @@
+From: Magnus Lindholm <linmag7@gmail.com>
+Subject: [RFC PATCH 0/1] sparc64: add shared Oberon MSI/MSI-X support
+
+Enable bounded MSI/MSI-X support for recoverable endpoints sharing an
+Oberon bridge. The four onboard BCM5718 ports on the M3000 share a bridge;
+this version allows all four to allocate distinct vectors on one queue.
+Generic PCI recovery and tg3 changes remain separate prerequisites.
+
+The queue is stopped on delivery failure. Each affected driver is then
+notified outside controller locks, so its recovery may release vectors
+and reopen using legacy IRQs. A returned failure does not skip other devices; a stalled callback can
+delay later notifications. Partially allocated MSI-X vectors may be released while function
+masking remains enabled, without forcing unrelated devices into recovery.
+
+The supported contract is deliberately bounded: one event queue per
+bridge, 256 lifetime message IDs, no ID reuse, and published queue memory
+retained until reboot. Exhaustion falls back to legacy interrupts.
+CPU-hotplug, kexec and system-sleep configurations retain legacy IRQs.
+The allocation is 1 MiB per initialized bridge, not per reopen. Message
+IDs are consumed across reopen/rebind and failed setup, so indefinite MSI
+operation through repeated allocation cycles is not supported. The fallback
+preserves service but does not replenish the budget. Please review this
+explicit capacity tradeoff as part of the first bounded implementation.
+
+Queue readbacks are not treated as proof of DMA completion. Reclamation,
+ID reuse, per-vector queue affinity and suspend/resume remain future work.
+The architecture documentation specifies separate prerequisites for ID
+reuse and storage reclamation. No available completion guarantee justifies
+adding either in this revision; successful traffic tests are insufficient.
+Bridge error-interrupt capture, clearing and rearming are not included.
+
+Testing on an eight-CPU M3000:
+- All four onboard ports allocated three distinct MSI-X vectors each.
+- GLAN0 and GLAN2 passed simultaneous hashed 8 MiB transfers each way.
+- GLAN2 close/reopen and further transfers passed.
+- After 81 spare-port reopen cycles, ID exhaustion fell back to legacy
+  IRQs without changing management's MSI-X vectors. Both paths then
+  passed further hashed transfers, with taint zero.
+- A separate diagnostic image deliberately stopped the shared MSI queue.
+  All four devices were notified, all 12 vectors released, and all four
+  reopened on legacy IRQs. Both connected ports passed transfers. The
+  queue interrupt count stayed unchanged during those legacy transfers.
+
+The stop fixture exercises containment and real driver recovery, not a
+physical PCIe error or an actual queue overrun. It is not in this patch.
+683 sanitizer-backed mocked callback/lifetime scenarios and ten endpoint
+mask cases passed. UP/SMP W=1 links passed; UP was not booted. Subsequent
+alignment cleanup and the disabled-in-test sleep guard produced identical
+UP/SMP pci_fire objects. UP hibernation compilation/disassembly confirms
+legacy admission. Existing unrelated full-build warnings remain.
+
+The generic PCI API documents callback locking and binding changes. Its
+review added no runtime code. The API still needs maintainer review. Actual runtime-PM,
+AER, hot removal, firmware variants and arbitrary drivers are not claimed
+qualified. Earlier single-device failure/overlap results are supporting
+evidence, not additional four-device hardware tests.
+
+Prerequisites: M3000 v5, the eight generic sparc64 MSI patches, four tg3
+reset/removal fixes, the PCI/MSI recovery API and its tg3 consumer. The
+standalone BCM5718 byte-order fix is included in the tested integration.
+
+Codex assisted with implementation, review and test preparation.
+
+base-commit: 2f705ce300470226b18f7e82d79bef8811b987cd
+prerequisite-patch-id: 44f006e293ae2e1d76a5b3c1f3495610e4c55e42
+prerequisite-patch-id: 87a26db0f19f59cf752e7ed0b9e0d041fd6476ac
+prerequisite-patch-id: 5084388aedfba68c086c4378f34c3c8e91d03337
+prerequisite-patch-id: 6746df23792ceaf63b6b3d35db367434c09ce437
+prerequisite-patch-id: 9def0ebe13d7b0045b9c29e47a60367e1f281e59
+prerequisite-patch-id: 59f119f21d36c29a54a5de54dfff81f58e0111b4
+prerequisite-patch-id: 94e51b531b812103794f7d9f894e146f588b1e2f
+prerequisite-patch-id: a852fec5a8de2af8a7960583ea2985f9dcccc00a
+prerequisite-patch-id: 82a044a9cd046437aff490a053007e3a068efdd9
+prerequisite-patch-id: 59637a35a053529bfb4f8bc5a756dede643d1d4a
+prerequisite-patch-id: 3029f1c14300a5eff57b653cda7c4c5307f11eba
+prerequisite-patch-id: f24061dd9217982374c7617329982da72ef729a0
+prerequisite-patch-id: ddf72ca931ffc0d6ffdfd8e452aacf8cb6b38fa1
+prerequisite-patch-id: 7299cc2f94696bedc0756d68c539bacdccbc55a1
+prerequisite-patch-id: c78f737c77d720e63f7c8db73f39a89eda32effd

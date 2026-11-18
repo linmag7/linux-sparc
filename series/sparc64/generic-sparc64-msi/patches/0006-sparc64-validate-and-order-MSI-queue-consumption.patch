@@ -1,0 +1,258 @@
+From a40dab57e00eb75c043e0931317577398bc228a5 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 16 Oct 2026 00:41:15 +0200
+Subject: [PATCH 6/8] sparc64: validate and order MSI queue consumption
+
+An Ultra45 EHCI controller programmed with MSI 1 reads back 0x0101;
+an invalid record with that value was observed on the shared Fire path.
+With 256 allocated entries, using that value unchecked indexes beyond
+the IRQ table and addresses outside the MSI_CLEAR register array.
+
+Validate queue heads and message numbers before accessing storage or
+hardware state. Consume invalid-number records without dispatch so a
+bad record cannot block later valid records. Keep unknown record types
+on the existing error path.
+
+Order record consumption before publishing the head and retain progress
+after a full wrap or a later error. Drain until empty, preserving the
+existing handler behavior without assuming interrupt reassertion.
+
+Backports require the dispatch initialization changes from
+"sparc64: initialize MSI dispatch before requesting queue IRQs", or an
+equivalent adaptation to the target tree.
+
+Fixes: 9bb3c227c47b ("[SPARC64]: Enable MSI on sun4u Fire PCI-E controllers.")
+Fixes: 759f89e03c9e ("[SPARC64]: Consolidate MSI support code.")
+Cc: <stable@vger.kernel.org> # needs dispatch initialization fix above
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/pci_fire.c  | 26 ++++++++++++++++++++------
+ arch/sparc/kernel/pci_impl.h  |  6 ++++++
+ arch/sparc/kernel/pci_msi.c   | 16 ++++++++++++----
+ arch/sparc/kernel/pci_sun4v.c | 25 ++++++++++++++++++-------
+ 4 files changed, 56 insertions(+), 17 deletions(-)
+
+diff --git a/arch/sparc/kernel/pci_fire.c b/arch/sparc/kernel/pci_fire.c
+index 95840ee256c6..dc37d80909ab 100644
+--- a/arch/sparc/kernel/pci_fire.c
++++ b/arch/sparc/kernel/pci_fire.c
+@@ -151,7 +151,10 @@ struct pci_msiq_entry {
+ static int pci_fire_get_head(struct pci_pbm_info *pbm, unsigned long msiqid,
+ 			     unsigned long *head)
+ {
+-	*head = upa_readq(pbm->pbm_regs + EVENT_QUEUE_HEAD(msiqid));
++	*head = upa_readq(pbm->pbm_regs + EVENT_QUEUE_HEAD(msiqid)) &
++		EVENT_QUEUE_HEAD_VAL;
++	if (*head >= pbm->msiq_ent_count)
++		return -EINVAL;
+ 	return 0;
+ }
+ 
+@@ -159,40 +162,51 @@ static int pci_fire_dequeue_msi(struct pci_pbm_info *pbm, unsigned long msiqid,
+ 				unsigned long *head, unsigned long *msi)
+ {
+ 	unsigned long type_fmt, type, msi_num;
++	u64 word;
++	int result = MSIQ_DISPATCH;
+ 	struct pci_msiq_entry *base, *ep;
+ 
+ 	base = (pbm->msi_queues + ((msiqid - pbm->msiq_first) * 8192));
+ 	ep = &base[*head];
+ 
+-	if ((ep->word0 & MSIQ_WORD0_FMT_TYPE) == 0)
++	word = READ_ONCE(ep->word0);
++	if (!(word & MSIQ_WORD0_FMT_TYPE))
+ 		return 0;
++	dma_rmb();
+ 
+-	type_fmt = ((ep->word0 & MSIQ_WORD0_FMT_TYPE) >>
++	type_fmt = ((word & MSIQ_WORD0_FMT_TYPE) >>
+ 		    MSIQ_WORD0_FMT_TYPE_SHIFT);
+ 	type = (type_fmt >> 3);
+ 	if (unlikely(type != MSIQ_TYPE_MSI32 &&
+ 		     type != MSIQ_TYPE_MSI64))
+ 		return -EINVAL;
+ 
+-	*msi = msi_num = ((ep->word0 & MSIQ_WORD0_DATA0) >>
++	*msi = msi_num = ((word & MSIQ_WORD0_DATA0) >>
+ 			  MSIQ_WORD0_DATA0_SHIFT);
++	if (msi_num < pbm->msi_first ||
++	    msi_num - pbm->msi_first >= pbm->msi_num) {
++		result = MSIQ_DISCARD;
++		goto consume;
++	}
+ 
+ 	upa_writeq(MSI_CLEAR_EQWR_N, pbm->pbm_regs + MSI_CLEAR(msi_num));
+ 
++consume:
+ 	/* Clear the entry.  */
+-	ep->word0 &= ~MSIQ_WORD0_FMT_TYPE;
++	WRITE_ONCE(ep->word0, word & ~MSIQ_WORD0_FMT_TYPE);
+ 
+ 	/* Go to next entry in ring.  */
+ 	(*head)++;
+ 	if (*head >= pbm->msiq_ent_count)
+ 		*head = 0;
+ 
+-	return 1;
++	return result;
+ }
+ 
+ static int pci_fire_set_head(struct pci_pbm_info *pbm, unsigned long msiqid,
+ 			     unsigned long head)
+ {
++	dma_wmb();
+ 	upa_writeq(head, pbm->pbm_regs + EVENT_QUEUE_HEAD(msiqid));
+ 	return 0;
+ }
+diff --git a/arch/sparc/kernel/pci_impl.h b/arch/sparc/kernel/pci_impl.h
+index 065b321a7952..15add2a8021f 100644
+--- a/arch/sparc/kernel/pci_impl.h
++++ b/arch/sparc/kernel/pci_impl.h
+@@ -32,6 +32,12 @@
+ 
+ #ifdef CONFIG_PCI_MSI
+ struct pci_pbm_info;
++enum sparc64_msiq_result {
++	MSIQ_EMPTY,
++	MSIQ_DISPATCH,
++	MSIQ_DISCARD,
++};
++
+ struct sparc64_msiq_ops {
+ 	int (*get_head)(struct pci_pbm_info *pbm, unsigned long msiqid,
+ 			unsigned long *head);
+diff --git a/arch/sparc/kernel/pci_msi.c b/arch/sparc/kernel/pci_msi.c
+index 98ccc126bd2e..7ae8c57be2b3 100644
+--- a/arch/sparc/kernel/pci_msi.c
++++ b/arch/sparc/kernel/pci_msi.c
+@@ -18,7 +18,8 @@ static irqreturn_t sparc64_msiq_interrupt(int irq, void *cookie)
+ 	struct pci_pbm_info *pbm = msiq_cookie->pbm;
+ 	unsigned long msiqid = msiq_cookie->msiqid;
+ 	const struct sparc64_msiq_ops *ops;
+-	unsigned long orig_head, head;
++	unsigned long head;
++	bool consumed = false;
+ 	int err;
+ 
+ 	ops = pbm->msi_ops;
+@@ -27,12 +28,13 @@ static irqreturn_t sparc64_msiq_interrupt(int irq, void *cookie)
+ 	if (unlikely(err < 0))
+ 		goto err_get_head;
+ 
+-	orig_head = head;
+ 	for (;;) {
+ 		unsigned long msi;
+ 
+ 		err = ops->dequeue_msi(pbm, msiqid, &head, &msi);
+-		if (likely(err > 0)) {
++		if (err > 0)
++			consumed = true;
++		if (likely(err == MSIQ_DISPATCH)) {
+ 			unsigned int irq;
+ 
+ 			if (msi < pbm->msi_first ||
+@@ -43,13 +45,17 @@ static irqreturn_t sparc64_msiq_interrupt(int irq, void *cookie)
+ 				generic_handle_irq(irq);
+ 		}
+ 
++		if (err == MSIQ_DISCARD)
++			pr_warn_ratelimited("MSI: discarded invalid message %lu on queue %lu\n",
++					    msi, msiqid);
++
+ 		if (unlikely(err < 0))
+ 			goto err_dequeue;
+ 
+ 		if (err == 0)
+ 			break;
+ 	}
+-	if (likely(head != orig_head)) {
++	if (consumed) {
+ 		err = ops->set_head(pbm, msiqid, head);
+ 		if (unlikely(err < 0))
+ 			goto err_set_head;
+@@ -62,6 +68,8 @@ static irqreturn_t sparc64_msiq_interrupt(int irq, void *cookie)
+ 	goto err_out;
+ 
+ err_dequeue:
++	if (consumed && ops->set_head(pbm, msiqid, head))
++		pr_err("MSI: Cannot commit partial head on msiqid[%lu]\n", msiqid);
+ 	printk(KERN_EMERG "MSI: Dequeue head[%lu] from msiqid[%lu] "
+ 	       "gives error %d\n",
+ 	       head, msiqid, err);
+diff --git a/arch/sparc/kernel/pci_sun4v.c b/arch/sparc/kernel/pci_sun4v.c
+index 84815e4140b9..dbff44ce76c6 100644
+--- a/arch/sparc/kernel/pci_sun4v.c
++++ b/arch/sparc/kernel/pci_sun4v.c
+@@ -976,7 +976,8 @@ static int pci_sun4v_get_head(struct pci_pbm_info *pbm, unsigned long msiqid,
+ 		return -ENXIO;
+ 
+ 	limit = pbm->msiq_ent_count * sizeof(struct pci_sun4v_msiq_entry);
+-	if (unlikely(*head >= limit))
++	if (unlikely(*head >= limit ||
++		     !IS_ALIGNED(*head, sizeof(struct pci_sun4v_msiq_entry))))
+ 		return -EFBIG;
+ 
+ 	return 0;
+@@ -988,6 +989,8 @@ static int pci_sun4v_dequeue_msi(struct pci_pbm_info *pbm,
+ {
+ 	struct pci_sun4v_msiq_entry *ep;
+ 	unsigned long err, type;
++	u64 word;
++	int result = MSIQ_DISPATCH;
+ 
+ 	/* Note: void pointer arithmetic, 'head' is a byte offset  */
+ 	ep = (pbm->msi_queues + ((msiqid - pbm->msiq_first) *
+@@ -995,31 +998,38 @@ static int pci_sun4v_dequeue_msi(struct pci_pbm_info *pbm,
+ 				  sizeof(struct pci_sun4v_msiq_entry))) +
+ 	      *head);
+ 
+-	if ((ep->version_type & MSIQ_TYPE_MASK) == 0)
++	word = READ_ONCE(ep->version_type);
++	if (!(word & MSIQ_TYPE_MASK))
+ 		return 0;
++	dma_rmb();
+ 
+-	type = (ep->version_type & MSIQ_TYPE_MASK) >> MSIQ_TYPE_SHIFT;
++	type = (word & MSIQ_TYPE_MASK) >> MSIQ_TYPE_SHIFT;
+ 	if (unlikely(type != MSIQ_TYPE_MSI32 &&
+ 		     type != MSIQ_TYPE_MSI64))
+ 		return -EINVAL;
+ 
+-	*msi = ep->msi_data;
++	*msi = READ_ONCE(ep->msi_data);
++	if (*msi < pbm->msi_first || *msi - pbm->msi_first >= pbm->msi_num) {
++		result = MSIQ_DISCARD;
++		goto consume;
++	}
+ 
+ 	err = pci_sun4v_msi_setstate(pbm->devhandle,
+-				     ep->msi_data /* msi_num */,
++				     *msi,
+ 				     HV_MSISTATE_IDLE);
+ 	if (unlikely(err))
+ 		return -ENXIO;
+ 
++consume:
+ 	/* Clear the entry.  */
+-	ep->version_type &= ~MSIQ_TYPE_MASK;
++	WRITE_ONCE(ep->version_type, word & ~MSIQ_TYPE_MASK);
+ 
+ 	(*head) += sizeof(struct pci_sun4v_msiq_entry);
+ 	if (*head >=
+ 	    (pbm->msiq_ent_count * sizeof(struct pci_sun4v_msiq_entry)))
+ 		*head = 0;
+ 
+-	return 1;
++	return result;
+ }
+ 
+ static int pci_sun4v_set_head(struct pci_pbm_info *pbm, unsigned long msiqid,
+@@ -1027,6 +1037,7 @@ static int pci_sun4v_set_head(struct pci_pbm_info *pbm, unsigned long msiqid,
+ {
+ 	unsigned long err;
+ 
++	dma_wmb();
+ 	err = pci_sun4v_msiq_sethead(pbm->devhandle, msiqid, head);
+ 	if (unlikely(err))
+ 		return -EINVAL;

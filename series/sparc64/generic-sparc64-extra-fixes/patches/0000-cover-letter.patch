@@ -1,0 +1,64 @@
+From 55c9a95ec80b79ebe6efee85193374cc454d8137 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Wed, 14 Oct 2026 10:44:47 +0200
+Subject: [PATCH 0/4] sparc64: fix DMA cleanup, PROM output and IRQ validation
+
+These four fixes address existing sparc64 error paths found while
+preparing and reviewing Fujitsu M3000 support:
+
+1. Release the IOMMU context when scatterlist mapping fails.
+2. Advance PROM output by the bytes written and stop on no progress.
+3. Stop cookie IRQ setup when allocation fails.
+4. Check sun4u interrupt-vector bounds before indexing the table.
+
+They are based on v7.3-rc1 and require no M3000 support. They also apply
+to the SPARC for-next snapshot a9e88d617a25 and compose with the separate
+ten-patch M3000 v4 series in either order. Patch 2 also affects the
+M3000 early console if firmware returns short writes.
+
+The PROM patch changes the old negative-return policy explicitly:
+negative returns were retried indefinitely; now they terminate the
+write along with zero progress or an impossible count. This can drop
+remaining text on a transient error. It bounds software retrying, not
+the duration of an individual firmware call.
+
+Testing
+-------
+Review builds of this exact four-patch order passed full vmlinux at all
+four commits with generic-SMP, including the sun4v cookie-IRQ path,
+using GCC 13.3, binutils 2.42 and W=1. Existing FusionMPT/input warnings
+remain; these are not warning-free builds.
+
+The standalone tip passed a GCC 13.3 W=1 SMP vmlinux build and UP builds
+of all affected objects. Existing FusionMPT warnings remain in the full
+build. Targeted before/after harnesses cover context cleanup on forced
+allocation failure, PROM short writes and return values, cookie IRQ
+allocation failure and interrupt-vector boundaries.
+
+The same code changes were present in the preceding combined M3000
+candidate, which booted on M3000 SMP, Ultra45 UP and a T5120 SMP LDOM.
+Each passed bounded COW, remap/protection and disk/network checksum
+checks with taint zero. These are regression tests of the combined
+candidate, not a boot test of this standalone series or hardware
+injection of its failure cases. Oberon uses context zero, and the LDOM
+has neither PCI passthrough nor cookie-only IRQ failure coverage.
+
+Codex assisted with debugging, test instrumentation, code drafting,
+review and commit-message preparation.
+
+Magnus Lindholm (4):
+  sparc64: release IOMMU context on scatterlist mapping failure
+  sparc64: advance PROM console output by the bytes written
+  sparc64: stop cookie IRQ setup after allocation failure
+  sparc64: validate sun4u interrupt vectors before table lookup
+
+ arch/sparc/kernel/iommu.c    | 1 +
+ arch/sparc/kernel/irq_64.c   | 6 ++++++
+ arch/sparc/prom/console_64.c | 6 +++---
+ 3 files changed, 10 insertions(+), 3 deletions(-)
+
+
+base-commit: cee9395acd8043be0644b25c34bfa86623f2b935
+-- 
+2.43.0
+

@@ -1,0 +1,28 @@
+From: Magnus Lindholm <linmag7@gmail.com>
+Subject: [RFC PATCH 0/1] Use the kernel log for IRQ allocation failure
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Use the runtime kernel log for IRQ descriptor exhaustion rather than
+entering firmware. This companion follows the M3000 support prerequisite
+which introduced the checked allocation failure. It is separate from the
+independent generic firmware series and the PRIMEPOWER platform patches.
+
+This is source-audited error handling; forced IRQ exhaustion has not been
+injected on hardware. Exact cleaned-tree boot qualification remains open.
+
+Magnus Lindholm:
+  sparc64: report IRQ descriptor exhaustion through the kernel log
+
+base-commit: cee9395acd8043be0644b25c34bfa86623f2b935
+prerequisite-patch-id: e868c0a73b769642f4fe50938cd974c60c4907e2
+prerequisite-patch-id: 17f393fb6426bab69d621f79e3563b1471f70fed
+prerequisite-patch-id: 9abd96184ec34339b5646784dfd673c2a0e935d1
+prerequisite-patch-id: 0929bd654419e3762ffa507ab4f3440d05fbd9fd
+prerequisite-patch-id: 87a05a76d782761957216d52606b6dae10e9fcde
+prerequisite-patch-id: 4860af18708e15d81a08c502ab89b118ca4b4383
+prerequisite-patch-id: ed4f55093237f83f4729cc996b61ee1fb532f36a
+prerequisite-patch-id: 4949a3142bf6da48df56cd7c1c83795ba390005f
+prerequisite-patch-id: 37e1bb1ce31633547e7d9b8b4af0e6c58e9ba08e
+prerequisite-patch-id: bba64c07c2b426d0cbef0a40d6373234e2fe2fd2

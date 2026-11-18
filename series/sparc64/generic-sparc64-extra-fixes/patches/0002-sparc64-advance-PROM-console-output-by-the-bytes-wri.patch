@@ -1,0 +1,42 @@
+From 32ce5ef62a376205eb0ce05cc50808644e55b9d7 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Wed, 14 Oct 2026 09:09:12 +0200
+Subject: [PATCH 2/4] sparc64: advance PROM console output by the bytes written
+
+A short firmware write advances buf by the remaining length rather
+than the number of bytes consumed. This can resend the wrong bytes or
+read beyond the caller's buffer. Advance by the returned count instead.
+
+The old loop retried negative returns indefinitely. Stop on errors,
+zero progress or an impossible count, dropping the remaining text
+instead of spinning indefinitely or walking beyond the buffer. This
+can lose output on a transient error; it deliberately bounds software
+retrying, not the duration of a firmware call itself.
+
+Fixes: 595a251c0740 ("sparc: Write to prom console using indirect buffer.")
+Assisted-by: LLM
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/prom/console_64.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/arch/sparc/prom/console_64.c b/arch/sparc/prom/console_64.c
+index 86dace787ae6..f3566e8f7083 100644
+--- a/arch/sparc/prom/console_64.c
++++ b/arch/sparc/prom/console_64.c
+@@ -38,9 +38,9 @@ void prom_console_write_buf(const char *buf, int len)
+ {
+ 	while (len) {
+ 		int n = __prom_console_write_buf(buf, len);
+-		if (n < 0)
+-			continue;
++		if (n <= 0 || n > len)
++			break;
+ 		len -= n;
+-		buf += len;
++		buf += n;
+ 	}
+ }
+-- 
+2.43.0
+

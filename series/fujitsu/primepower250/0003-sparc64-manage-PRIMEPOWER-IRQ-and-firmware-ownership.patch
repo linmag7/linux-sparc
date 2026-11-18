@@ -1,0 +1,3459 @@
+From e446cc7943f45e546b21ebedc77911523fb38a14 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Sat, 7 Nov 2026 00:31:11 +0100
+Subject: [RFC PATCH 3/3] sparc64: manage PRIMEPOWER IRQ and firmware
+ ownership
+
+Track each physical interrupt map across both Psycho PBMs. Preserve
+firmware routes and assign the qualified PCI#01 pin-A source an OS slot
+through normal IRQ resource acquisition. Drain pending delivery before
+retargeting and retain the assignment across device close and reopen.
+
+Exclude route changes during firmware entry. Closed routes are handed
+back and reacquired on return; the qualified root-name query retains an
+active route. Other active-device firmware requests are refused. Transfer
+the native UART explicitly for orderly monitor and terminal entry, defer
+BREAK to process context and require external reset after panic.
+
+Check controller mode and map readback at ownership transitions. An
+uncertain transition retains exclusion rather than reusing the slot.
+Shared pins remain on a common target; only PCI#01 has CPU1 routing.
+Other platforms retain their firmware policy and identity vector mask.
+
+SPARC64 V Supplement F.10.9 Tables F-8/F-10 defines the protected physical
+access fault checks. The bridge layout and slot policy are based on
+captured firmware and hardware tests; no U2U specification is available.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/irq_64.h    |   31 +
+ arch/sparc/include/asm/oplib_64.h  |    4 +-
+ arch/sparc/include/asm/setup.h     |    2 +
+ arch/sparc/kernel/Makefile         |    1 +
+ arch/sparc/kernel/helpers.S        |  126 ++
+ arch/sparc/kernel/irq_64.c         |  307 ++++-
+ arch/sparc/kernel/pci_primepower.c | 1981 ++++++++++++++++++++++++++++
+ arch/sparc/kernel/pp250_attach.h   |  106 ++
+ arch/sparc/kernel/prom.h           |  171 +++
+ arch/sparc/kernel/prom_irqtrans.c  |   55 +-
+ arch/sparc/kernel/reboot.c         |   12 +-
+ arch/sparc/kernel/setup_64.c       |   57 +-
+ arch/sparc/kernel/smp_64.c         |    6 +
+ arch/sparc/prom/misc_64.c          |  130 +-
+ arch/sparc/prom/p1275.c            |   67 +-
+ 15 files changed, 3010 insertions(+), 46 deletions(-)
+ create mode 100644 arch/sparc/kernel/pci_primepower.c
+ create mode 100644 arch/sparc/kernel/pp250_attach.h
+
+diff --git a/arch/sparc/include/asm/irq_64.h b/arch/sparc/include/asm/irq_64.h
+index da6dd95b6d0f..e761f18262b9 100644
+--- a/arch/sparc/include/asm/irq_64.h
++++ b/arch/sparc/include/asm/irq_64.h
+@@ -16,6 +16,37 @@
+ #include <asm/ptrace.h>
+ 
+ extern unsigned long primepower_irq_mask;
++extern unsigned int primepower_irq_boot_cpu;
++
++static inline bool primepower_irq_supported(void)
++{
++	return primepower_irq_mask != ~0UL;
++}
++
++#ifdef CONFIG_PCI
++#define PP250_CIF_RETAINED 3
++int primepower_cif_query_begin(unsigned long *args, unsigned long flags);
++int primepower_cif_begin(void);
++int primepower_cif_end(int admission);
++int primepower_cif_query_cancel(void);
++int primepower_prom_begin(void);
++void primepower_prom_end(void);
++int primepower_terminal_begin(void);
++int primepower_irq_handoff_begin(void);
++void primepower_irq_handoff_end(void);
++#else
++#define PP250_CIF_RETAINED 3
++static inline int primepower_cif_query_begin(unsigned long *args,
++					   unsigned long flags) { return 0; }
++static inline int primepower_cif_begin(void) { return 0; }
++static inline int primepower_cif_end(int admission) { return 0; }
++static inline int primepower_cif_query_cancel(void) { return 0; }
++static inline int primepower_prom_begin(void) { return 0; }
++static inline void primepower_prom_end(void) {}
++static inline int primepower_terminal_begin(void) { return 0; }
++static inline int primepower_irq_handoff_begin(void) { return 0; }
++static inline void primepower_irq_handoff_end(void) {}
++#endif
+ 
+ /* IMAP/ICLR register defines */
+ #define IMAP_VALID		0x80000000UL	/* IRQ Enabled		*/
+diff --git a/arch/sparc/include/asm/oplib_64.h b/arch/sparc/include/asm/oplib_64.h
+index 94a78bfb30bc..5e825e2cbca5 100644
+--- a/arch/sparc/include/asm/oplib_64.h
++++ b/arch/sparc/include/asm/oplib_64.h
+@@ -72,7 +72,7 @@ char *prom_getbootargs(void);
+ /* Miscellaneous routines, don't really fit in any category per se. */
+ 
+ /* Reboot the machine with the command line passed. */
+-void prom_reboot(const char *boot_command, bool capture);
++int prom_reboot(const char *boot_command, bool capture);
+ 
+ /* Evaluate the forth string passed. */
+ void prom_feval(const char *forth_string);
+@@ -249,5 +249,7 @@ int prom_ihandle2path(int handle, char *buffer, int bufsize);
+ /* Client interface level routines. */
+ void prom_cif_init(void *cif_handler);
+ int p1275_cmd_direct(unsigned long *);
++int p1275_cmd_try_direct(unsigned long *);
++bool primepower_uart_handoff_active(void);
+ 
+ #endif /* !(__SPARC64_OPLIB_H) */
+diff --git a/arch/sparc/include/asm/setup.h b/arch/sparc/include/asm/setup.h
+index c940e49d854a..3ee53454e951 100644
+--- a/arch/sparc/include/asm/setup.h
++++ b/arch/sparc/include/asm/setup.h
+@@ -49,6 +49,7 @@ unsigned long safe_compute_effective_address(struct pt_regs *, unsigned int);
+ #ifdef CONFIG_SPARC64
+ void __init start_early_boot(void);
+ void sparc_panic_exit(void);
++bool prom_console_retired(void);
+ 
+ extern unsigned int sparc64_ttable_tl0[], sparc64_ttable_tl1[];
+ void sparc64_vii_fatal_trap(void);
+@@ -57,6 +58,7 @@ extern unsigned long sparc64_vii_mmu_fault[4];
+ void sparc64_vii_ecc_trap(void);
+ void sparc64_vii_ecc_trap_tl1(void);
+ void sparc64_v_fatal_trap(void);
++void pp250_u2u_dae(void);
+ void sparc64_v_ecc_trap(void);
+ void sparc64_v_ecc_trap_tl1(void);
+ 
+diff --git a/arch/sparc/kernel/Makefile b/arch/sparc/kernel/Makefile
+index 497b5714fa8f..414556263455 100644
+--- a/arch/sparc/kernel/Makefile
++++ b/arch/sparc/kernel/Makefile
+@@ -98,6 +98,7 @@ obj-$(CONFIG_STACKTRACE)     += stacktrace.o
+ # sparc64 PCI
+ obj-$(CONFIG_SPARC64_PCI)    += pci.o pci_common.o psycho_common.o
+ obj-$(CONFIG_SPARC64_PCI)    += pci_psycho.o pci_sabre.o pci_schizo.o
++obj-$(CONFIG_SPARC64_PCI)    += pci_primepower.o
+ obj-$(CONFIG_SPARC64_PCI)    += pci_sun4v.o pci_sun4v_asm.o pci_fire.o
+ obj-$(CONFIG_SPARC64_PCI_MSI) += pci_msi.o
+ 
+diff --git a/arch/sparc/kernel/helpers.S b/arch/sparc/kernel/helpers.S
+index 1e620632a0ca..c6218389380e 100644
+--- a/arch/sparc/kernel/helpers.S
++++ b/arch/sparc/kernel/helpers.S
+@@ -367,3 +367,129 @@ sparc64_v_fatal_trap:
+ sparc64_v_fault_record:
+ 	.xword 0, 0, 0, 0, 0, 0, 0, 0
+ 	.previous
++
++#ifdef CONFIG_PCI
++	/* Aligned physical accesses in the PRIMEPOWER 250's 41-bit I/O aperture. */
++	.align 4
++	.globl pp250_phys_read32
++	.type pp250_phys_read32,#function
++pp250_phys_read32:
++	srlx	%o0, 41, %o2
++	brnz,pn	%o2, .Lpp250_invalid
++	 andcc	%o0, 3, %g0
++	bne,pn	%icc, .Lpp250_invalid
++	 nop
++	membar	#Sync
++.Lpp250_load:
++	lduwa	[%o0] ASI_PHYS_BYPASS_EC_E, %o2
++	membar	#Sync
++	st	%o2, [%o1]
++	retl
++	 clr	%o0
++	.size pp250_phys_read32,.-pp250_phys_read32
++
++	/* Use a single transaction for 64-bit bridge registers. */
++	.globl pp250_phys_read64
++	.type pp250_phys_read64,#function
++pp250_phys_read64:
++	srlx	%o0, 41, %o2
++	brnz,pn	%o2, .Lpp250_invalid
++	 andcc	%o0, 7, %g0
++	bne,pn	%icc, .Lpp250_invalid
++	 nop
++	membar	#Sync
++.Lpp250_load64:
++	ldxa	[%o0] ASI_PHYS_BYPASS_EC_E, %o2
++	membar	#Sync
++	stx	%o2, [%o1]
++	retl
++	 clr	%o0
++	.size pp250_phys_read64,.-pp250_phys_read64
++
++	.globl pp250_phys_write32
++	.type pp250_phys_write32,#function
++pp250_phys_write32:
++	srlx	%o0, 41, %o2
++	brnz,pn	%o2, .Lpp250_invalid
++	 andcc	%o0, 3, %g0
++	bne,pn	%icc, .Lpp250_invalid
++	 nop
++	membar	#Sync
++.Lpp250_store:
++	stwa	%o1, [%o0] ASI_PHYS_BYPASS_EC_E
++	membar	#Sync
++	retl
++	 clr	%o0
++	.size pp250_phys_write32,.-pp250_phys_write32
++
++.Lpp250_invalid:
++	retl
++	 mov	-EINVAL, %o0
++.Lpp250_io_error:
++	retl
++	 mov	-EIO, %o0
++
++	/* SPARC64 V F.10.9, Tables F-8 and F-10. */
++#define PP250_DSFSR_FV		(1 << 0)
++#define PP250_DSFSR_OW		(1 << 1)
++#define PP250_DSFSR_W		(1 << 2)
++#define PP250_DSFSR_PR		(1 << 3)
++#define PP250_DSFSR_E		(1 << 6)
++#define PP250_DSFSR_ASI		(0xff << 16)
++#define PP250_DSFSR_NF		(1 << 24)
++#define PP250_DSFSR_NC		(1 << 25)
++#define PP250_DSFSR_MDTLB	(3 << 26)
++#define PP250_DSFSR_UE		(1 << 31)
++#define PP250_DSFSR_REQUIRED	(PP250_DSFSR_NC | (ASI_PHYS_BYPASS_EC_E << 16) | \
++				 PP250_DSFSR_E | PP250_DSFSR_PR | PP250_DSFSR_FV)
++#define PP250_DSFSR_MASK	(PP250_DSFSR_REQUIRED | PP250_DSFSR_ASI | PP250_DSFSR_UE | \
++				 PP250_DSFSR_MDTLB | PP250_DSFSR_NF | \
++				 PP250_DSFSR_W | PP250_DSFSR_OW)
++
++	.globl pp250_u2u_dae
++	.type pp250_u2u_dae,#function
++pp250_u2u_dae:
++	rdpr	%tstate, %g1
++	btst	TSTATE_PRIV, %g1
++	bz,pn	%icc, sparc64_v_fatal_trap
++	 rdpr	%tpc, %g1
++	set	.Lpp250_load, %g2
++	cmp	%g1, %g2
++	be,pt	%xcc, 1f
++	 clr	%g3
++	set	.Lpp250_load64, %g2
++	cmp	%g1, %g2
++	be,pt	%xcc, 1f
++	 nop
++	set	.Lpp250_store, %g2
++	cmp	%g1, %g2
++	bne,pn	%xcc, sparc64_v_fatal_trap
++	 mov	PP250_DSFSR_W, %g3
++1:	mov	TLB_SFSR, %g1
++	ldxa	[%g1] ASI_DMMU, %g2
++	/* A UPA fault following a TLB miss retains TM (SPARC64 V, Table F-10). */
++	set	PP250_DSFSR_MASK, %g1
++	and	%g2, %g1, %g1
++	set	PP250_DSFSR_REQUIRED, %g4
++	or	%g4, %g3, %g4
++	cmp	%g1, %g4
++	bne,pn	%xcc, sparc64_v_fatal_trap
++	 srlx	%g2, 29, %g2
++	and	%g2, 3, %g2
++	cmp	%g2, 1
++	be,pt	%icc, 2f
++	 cmp	%g2, 2
++	bne,pn	%icc, sparc64_v_fatal_trap
++	 nop
++2:	mov	DMMU_SFAR, %g1
++	ldxa	[%g1] ASI_DMMU, %g2
++	cmp	%g2, %o0
++	bne,pn	%xcc, sparc64_v_fatal_trap
++	 mov	TLB_SFSR, %g1
++	stxa	%g0, [%g1] ASI_DMMU
++	membar	#Sync
++	set	.Lpp250_io_error, %g1
++	wrpr	%g1, 0, %tnpc
++	done
++	.size pp250_u2u_dae,.-pp250_u2u_dae
++#endif
+diff --git a/arch/sparc/kernel/irq_64.c b/arch/sparc/kernel/irq_64.c
+index a3235bc10d17..39513888e9d9 100644
+--- a/arch/sparc/kernel/irq_64.c
++++ b/arch/sparc/kernel/irq_64.c
+@@ -22,6 +22,7 @@
+ #include <linux/seq_file.h>
+ #include <linux/ftrace.h>
+ #include <linux/irq.h>
++#include <linux/irqdesc.h>
+ #include <linux/string_choices.h>
+ 
+ #include <asm/ptrace.h>
+@@ -46,6 +47,7 @@
+ #include <asm/softirq_stack.h>
+ 
+ #include "entry.h"
++#include "prom.h"
+ #include "cpumap.h"
+ #include "kstack.h"
+ 
+@@ -210,6 +212,7 @@ struct irq_handler_data {
+ 	unsigned long	iclr;
+ 	unsigned long	imap;
+ 	bool		oberon;
++	struct primepower_imap *pp_map;
+ };
+ 
+ static inline unsigned int irq_data_to_handle(struct irq_data *data)
+@@ -600,6 +603,262 @@ static void sun4v_virq_eoi(struct irq_data *data)
+ 		       dev_handle, dev_ino, err);
+ }
+ 
++unsigned int primepower_irq_boot_cpu __ro_after_init;
++
++/* A masked IMAP can still name a firmware destination. */
++unsigned long primepower_observe_imap(struct primepower_controller *c,
++				      unsigned long value)
++{
++	unsigned int slot = (value & IMAP_TID_UPA) >> IMAP_TID_SHIFT;
++
++	lockdep_assert_held(&c->lock);
++	c->reserved_selectors |= BIT(slot);
++	return value;
++}
++
++static int primepower_irq_pin(struct primepower_imap *map, unsigned int irq)
++{
++	unsigned int pin;
++
++	for (pin = 0; irq && pin < ARRAY_SIZE(map->irq); pin++)
++		if (map->irq[pin] == irq)
++			return pin;
++	return -EINVAL;
++}
++
++static void primepower_irq_enable(struct irq_data *data)
++{
++	struct irq_handler_data *hd = irq_data_get_irq_handler_data(data);
++	struct primepower_imap *map = hd->pp_map;
++	unsigned long flags, value;
++	int pin = primepower_irq_pin(map, data->irq);
++
++	if (pin < 0)
++		return;
++	raw_spin_lock_irqsave(&map->controller->lock, flags);
++	if (map->controller->handoff_depth || map->quarantined)
++		goto out;
++	if (map->leased_slot && map->phase == PP250_ROUTED) {
++		if (primepower_route_startup(map))
++			goto out;
++		goto enabled;
++	}
++	if (map->phase != PP250_HOME)
++		goto out;
++	value = primepower_observe_imap(map->controller, upa_readq(hd->imap));
++	if (map->programmed && (map->enabled_pins & ~BIT(pin))) {
++		if (value != map->last_programmed) {
++			map->quarantined = true;
++			goto out;
++		}
++		goto enabled;
++	}
++	if (WARN_ON_ONCE((value & IMAP_VALID) && (value & IMAP_TID_UPA)))
++		goto out;
++
++	/* Firmware programs U2U slot zero for the boot CPU. */
++	value = (value & ~IMAP_TID_UPA) | IMAP_VALID;
++	upa_writeq(value, map->addr);
++	if (upa_readq(map->addr) != value) {
++		map->quarantined = true;
++		goto out;
++	}
++	map->last_programmed = value;
++	map->programmed = true;
++	map->target_cpu = primepower_irq_boot_cpu;
++enabled:
++	upa_writeq(ICLR_IDLE, hd->iclr);
++	map->enabled_pins |= BIT(pin);
++	map->masked_pins &= ~BIT(pin);
++	irq_data_update_effective_affinity(data, cpumask_of(map->target_cpu));
++out:
++	raw_spin_unlock_irqrestore(&map->controller->lock, flags);
++}
++
++/* Leave the shared IMAP valid; a disabled pin may remain in the sent state. */
++static void primepower_irq_disable(struct irq_data *data)
++{
++	struct irq_handler_data *hd = irq_data_get_irq_handler_data(data);
++	struct primepower_imap *map = hd->pp_map;
++	unsigned long flags;
++	int pin = primepower_irq_pin(map, data->irq);
++
++	if (pin < 0)
++		return;
++	raw_spin_lock_irqsave(&map->controller->lock, flags);
++	map->enabled_pins &= ~BIT(pin);
++	map->masked_pins |= BIT(pin);
++	raw_spin_unlock_irqrestore(&map->controller->lock, flags);
++	sun4u_irq_disable(data);
++}
++
++/* The IRQ core delays EOI for oneshot threads; masking must not clear a sibling's IMAP. */
++static void primepower_pin_mask(struct irq_data *data)
++{
++	struct irq_handler_data *hd = irq_data_get_irq_handler_data(data);
++	struct primepower_imap *map = hd->pp_map;
++	unsigned long flags;
++	int pin = primepower_irq_pin(map, data->irq);
++
++	if (pin < 0)
++		return;
++	raw_spin_lock_irqsave(&map->controller->lock, flags);
++	map->masked_pins |= BIT(pin);
++	raw_spin_unlock_irqrestore(&map->controller->lock, flags);
++}
++
++static void primepower_pin_unmask(struct irq_data *data)
++{
++	struct irq_handler_data *hd = irq_data_get_irq_handler_data(data);
++	struct primepower_imap *map = hd->pp_map;
++	unsigned long flags;
++	int pin = primepower_irq_pin(map, data->irq);
++
++	if (pin < 0)
++		return;
++	raw_spin_lock_irqsave(&map->controller->lock, flags);
++	map->masked_pins &= ~BIT(pin);
++	raw_spin_unlock_irqrestore(&map->controller->lock, flags);
++}
++
++static void primepower_irq_eoi(struct irq_data *data)
++{
++	struct irq_handler_data *hd = irq_data_get_irq_handler_data(data);
++	unsigned long flags;
++
++	raw_spin_lock_irqsave(&hd->pp_map->controller->lock, flags);
++	upa_writeq(ICLR_IDLE, hd->iclr);
++	raw_spin_unlock_irqrestore(&hd->pp_map->controller->lock, flags);
++}
++
++/* Shared pins must retain the common target until group migration is supported. */
++static bool primepower_shared_target(struct primepower_imap *map, unsigned int pin,
++				    const struct cpumask *mask)
++{
++	unsigned int other;
++
++	if (!(map->active_pins & ~BIT(pin)))
++		return true;
++	if (!cpumask_test_cpu(map->target_cpu, mask))
++		return false;
++	for (other = 0; other < ARRAY_SIZE(map->irq); other++) {
++		if (other == pin || !(map->active_pins & BIT(other)))
++			continue;
++		if (!map->requested[other] ||
++		    !cpumask_test_cpu(map->target_cpu, map->requested[other]))
++			return false;
++	}
++	return true;
++}
++
++/* Resource hooks run outside desc->lock; keep the descriptor-to-controller order. */
++static int primepower_pin_user(struct irq_data *data, bool open)
++{
++	struct irq_handler_data *hd = irq_data_get_irq_handler_data(data);
++	struct primepower_imap *map = hd->pp_map;
++	struct primepower_controller *c = map->controller;
++	struct irq_desc *desc = irq_data_to_desc(data);
++	struct cpumask *requested = NULL;
++	unsigned long flags;
++	int pin = primepower_irq_pin(map, data->irq);
++	int ret = 0;
++
++	if (pin < 0)
++		return pin;
++	if (open) {
++		requested = kzalloc(cpumask_size(), GFP_KERNEL);
++		if (!requested)
++			return -ENOMEM;
++	}
++	raw_spin_lock_irqsave(&desc->lock, flags);
++	raw_spin_lock(&c->lock);
++	if (!open) {
++		requested = map->requested[pin];
++		map->requested[pin] = NULL;
++		map->active_pins &= ~BIT(pin);
++		map->enabled_pins &= ~BIT(pin);
++		map->masked_pins &= ~BIT(pin);
++		primepower_route_release(map);
++	} else if (map->quarantined || c->handoff_depth ||
++		   (map == pp250_route_map(c) &&
++		    (c->fw_pending || c->query_active ||
++		     (map->phase != PP250_HOME && (map->phase != PP250_ROUTED || pin))))) {
++		ret = -EBUSY;
++	} else if (map->requested[pin] ||
++		   !primepower_shared_target(map, pin, irq_data_get_affinity_mask(data))) {
++		ret = -EBUSY;
++	} else {
++		cpumask_copy(requested, irq_data_get_affinity_mask(data));
++		map->requested[pin] = requested;
++		requested = NULL;
++		map->active_pins |= BIT(pin);
++	}
++	raw_spin_unlock(&c->lock);
++	raw_spin_unlock_irqrestore(&desc->lock, flags);
++	kfree(requested);
++	return ret;
++}
++
++static int primepower_request_resources(struct irq_data *data)
++{
++	struct irq_handler_data *hd = irq_data_get_irq_handler_data(data);
++	int err = primepower_route_request(hd->pp_map, data->irq);
++
++	if (err)
++		return err;
++	err = primepower_pin_user(data, true);
++	if (err)
++		primepower_pin_user(data, false);
++	return err;
++}
++
++static void primepower_release_resources(struct irq_data *data)
++{
++	primepower_pin_user(data, false);
++}
++
++static int primepower_set_affinity(struct irq_data *data,
++				   const struct cpumask *mask, bool force)
++{
++	struct irq_handler_data *hd = irq_data_get_irq_handler_data(data);
++	struct primepower_imap *map = hd->pp_map;
++	unsigned long flags;
++	int pin = primepower_irq_pin(map, data->irq);
++	int ret;
++
++	if (pin < 0)
++		return pin;
++	raw_spin_lock_irqsave(&map->controller->lock, flags);
++	if (!primepower_shared_target(map, pin, mask))
++		ret = -EBUSY;
++	else if (map->active_pins && !cpumask_test_cpu(map->target_cpu, mask) &&
++	    (irqd_irq_inprogress(data) || (irqd_irq_disabled(data) && !map->startup_pending)))
++		ret = -EBUSY;
++	else
++		ret = primepower_affinity_target(map, data->irq, mask);
++	if (ret >= 0) {
++		if (map->requested[pin])
++			cpumask_copy(map->requested[pin], mask);
++		irq_data_update_effective_affinity(data, cpumask_of(ret));
++		ret = IRQ_SET_MASK_OK;
++	}
++	raw_spin_unlock_irqrestore(&map->controller->lock, flags);
++	return ret;
++}
++
++static struct irq_chip primepower_irq = {
++	.name			= "pp250",
++	.irq_request_resources	= primepower_request_resources,
++	.irq_release_resources	= primepower_release_resources,
++	.irq_enable		= primepower_irq_enable,
++	.irq_disable		= primepower_irq_disable,
++	.irq_mask		= primepower_pin_mask,
++	.irq_unmask		= primepower_pin_unmask,
++	.irq_eoi		= primepower_irq_eoi,
++	.irq_set_affinity	= primepower_set_affinity,
++	.flags			= IRQCHIP_EOI_IF_HANDLED | IRQCHIP_EOI_THREADED,
++};
++
+ static struct irq_chip sun4u_irq = {
+ 	.name			= "sun4u",
+ 	.irq_enable		= sun4u_irq_enable,
+@@ -627,7 +886,8 @@ static struct irq_chip sun4v_virq = {
+ 	.flags			= IRQCHIP_EOI_IF_HANDLED,
+ };
+ 
+-unsigned int build_irq(int inofixup, unsigned long iclr, unsigned long imap)
++static unsigned int build_sun4u_irq(int inofixup, unsigned long iclr,
++				    unsigned long imap, struct irq_chip *chip)
+ {
+ 	struct irq_handler_data *handler_data;
+ 	struct ino_bucket *bucket;
+@@ -646,7 +906,7 @@ unsigned int build_irq(int inofixup, unsigned long iclr, unsigned long imap)
+ 			prom_halt();
+ 		}
+ 		bucket_set_irq(__pa(bucket), irq);
+-		irq_set_chip_and_handler_name(irq, &sun4u_irq,
++		irq_set_chip_and_handler_name(irq, chip,
+ 					      handle_fasteoi_irq, "IVEC");
+ 	}
+ 
+@@ -668,6 +928,47 @@ unsigned int build_irq(int inofixup, unsigned long iclr, unsigned long imap)
+ 	return irq;
+ }
+ 
++unsigned int build_irq(int inofixup, unsigned long iclr, unsigned long imap)
++{
++	return build_sun4u_irq(inofixup, iclr, imap, &sun4u_irq);
++}
++
++unsigned int primepower_build_irq(struct primepower_imap *map, unsigned int pbm,
++				  int pin, unsigned long iclr)
++{
++	unsigned long value = upa_readq(map->addr);
++	struct irq_handler_data *hd;
++	unsigned long flags;
++	unsigned int irq;
++
++	if ((value & IMAP_VALID) && (value & IMAP_TID_UPA)) {
++		pr_emerg("PRIMEPOWER: unsupported firmware IRQ target at %lx\n", map->addr);
++		prom_halt();
++	}
++
++	irq = build_sun4u_irq(pin, iclr, map->addr, &primepower_irq);
++	if (!irq)
++		return 0;
++	hd = irq_get_handler_data(irq);
++	raw_spin_lock_irqsave(&map->controller->lock, flags);
++	if (irq_get_chip(irq) != &primepower_irq || hd->iclr != iclr ||
++	    hd->imap != map->addr || (hd->pp_map && hd->pp_map != map) ||
++	    (map->irq[pin] && map->irq[pin] != irq)) {
++		raw_spin_unlock_irqrestore(&map->controller->lock, flags);
++		pr_emerg("PRIMEPOWER: conflicting IRQ mapping %lx/%d\n", map->addr, pin);
++		prom_halt();
++	}
++	if (!map->observed) {
++		map->first = primepower_observe_imap(map->controller, value);
++		map->observed = true;
++	}
++	map->pins[pbm] |= BIT(pin);
++	map->irq[pin] = irq;
++	hd->pp_map = map;
++	raw_spin_unlock_irqrestore(&map->controller->lock, flags);
++	return irq;
++}
++
+ unsigned int oberon_build_irq(int inofixup, unsigned long iclr,
+ 			      unsigned long imap)
+ {
+@@ -841,6 +1142,8 @@ unsigned int sun4v_build_virq(u32 devhandle, unsigned int devino)
+ 	return irq;
+ }
+ 
++/* Read by the diagnostic hardware-vector hook before C IRQ dispatch. */
++
+ void *hardirq_stack[NR_CPUS];
+ void *softirq_stack[NR_CPUS];
+ 
+diff --git a/arch/sparc/kernel/pci_primepower.c b/arch/sparc/kernel/pci_primepower.c
+new file mode 100644
+index 000000000000..78d5cab00740
+--- /dev/null
++++ b/arch/sparc/kernel/pci_primepower.c
+@@ -0,0 +1,1981 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Copyright (C) 2026 Magnus Lindholm */
++#include <linux/kernel.h>
++#include <linux/irq.h>
++#include <linux/iopoll.h>
++#include <linux/pci.h>
++#include <linux/string.h>
++#include <linux/init.h>
++#include <linux/of.h>
++#include <linux/of_platform.h>
++#include <linux/platform_device.h>
++
++#include <asm/oplib.h>
++#include <asm/setup.h>
++#include <asm/prom.h>
++#include <asm/irq.h>
++#include <asm/spitfire.h>
++#include <asm/upa.h>
++
++#include "prom.h"
++
++/* PSYCHO interrupt mapping support. */
++#define PSYCHO_IMAP_A_SLOT0	0x0c00UL
++#define PSYCHO_IMAP_B_SLOT0	0x0c20UL
++static unsigned long psycho_pcislot_imap_offset(unsigned long ino)
++{
++	unsigned int bus =  (ino & 0x10) >> 4;
++	unsigned int slot = (ino & 0x0c) >> 2;
++
++	if (bus == 0)
++		return PSYCHO_IMAP_A_SLOT0 + (slot * 8);
++	else
++		return PSYCHO_IMAP_B_SLOT0 + (slot * 8);
++}
++
++#define PSYCHO_OBIO_IMAP_BASE	0x1000UL
++
++#define PSYCHO_ONBOARD_IRQ_BASE		0x20
++#define psycho_onboard_imap_offset(__ino) \
++	(PSYCHO_OBIO_IMAP_BASE + (((__ino) & 0x1f) << 3))
++
++#define PSYCHO_ICLR_A_SLOT0	0x1400UL
++#define PSYCHO_ICLR_SCSI	0x1800UL
++
++#define psycho_iclr_offset(ino)					      \
++	((ino & 0x20) ? (PSYCHO_ICLR_SCSI + (((ino) & 0x1f) << 3)) :  \
++			(PSYCHO_ICLR_A_SLOT0 + (((ino) & 0x1f)<<3)))
++
++struct primepower_pbm {
++	struct primepower_controller *controller;
++	unsigned int index;
++};
++
++static LIST_HEAD(primepower_controllers);
++static bool primepower_maps_ready __ro_after_init;
++
++static unsigned long psycho_imap_offset(unsigned int ino)
++{
++	if (ino < PSYCHO_ONBOARD_IRQ_BASE)
++		return psycho_pcislot_imap_offset(ino);
++	return psycho_onboard_imap_offset(ino);
++}
++
++
++
++static void __init pp250_identify_pbm(struct primepower_controller *c,
++				      struct device_node *dp,
++				      const struct linux_prom64_registers *regs)
++{
++	u32 portid = 0, u2u_id = 0;
++	const u8 *range;
++	int len;
++	bool valid;
++
++	range = of_get_property(dp, "u2u-tid-range", &len);
++	valid = range && len == 2 && !range[0] && range[1] == 15 &&
++		!of_property_read_u32(dp, "upa-portid", &portid) &&
++		!of_property_read_u32(dp, "u2u#", &u2u_id) &&
++		!(c->base & 7) && c->window >= c->base &&
++		c->window - c->base == 0x800000 &&
++		regs[0].phys_addr >= c->base && regs[0].reg_size >= 0x2000 &&
++		c->window_size == regs[3].reg_size && c->base_size == regs[2].reg_size &&
++		!pp250_ranges_overlap(c->base, c->base_size, c->window, c->window_size);
++	pp250_record_pbm(&c->attach, regs[0].phys_addr - c->base, dp->phandle,
++			 portid, u2u_id, valid);
++}
++
++static const struct pp250_u2u_io pp250_phys_io = {
++	.write32 = pp250_phys_write32,
++	.read32 = pp250_phys_read32,
++};
++
++struct primepower_pbm * __init
++primepower_attach_pbm(struct device_node *dp, const struct linux_prom64_registers *regs)
++{
++	struct primepower_controller *controller;
++	struct primepower_pbm *pbm;
++	bool overlap = false;
++	unsigned int i;
++
++	list_for_each_entry(controller, &primepower_controllers, list) {
++		if (controller->window == regs[3].phys_addr &&
++		    controller->base == regs[2].phys_addr)
++			goto attach;
++		if (controller->window == regs[3].phys_addr ||
++		    controller->base == regs[2].phys_addr)
++			goto conflict;
++		for (i = 2; i <= 3; i++) {
++			if (pp250_ranges_overlap(regs[i].phys_addr, regs[i].reg_size,
++						 controller->window, controller->window_size) ||
++			    pp250_ranges_overlap(regs[i].phys_addr, regs[i].reg_size,
++						 controller->base, controller->base_size)) {
++				controller->attach.invalid = true;
++				overlap = true;
++			}
++		}
++	}
++
++	controller = prom_early_alloc(sizeof(*controller));
++	controller->attach.invalid = overlap;
++	controller->io = &pp250_phys_io;
++	controller->window_size = regs[3].reg_size;
++	controller->base_size = regs[2].reg_size;
++	controller->window = regs[3].phys_addr;
++	controller->base = regs[2].phys_addr;
++	controller->reserved_selectors = BIT(0);
++	raw_spin_lock_init(&controller->lock);
++	for (i = 0; i < ARRAY_SIZE(controller->maps); i++) {
++		unsigned int ino = i < 8 ? i * 4 : 0x20 + i - 8;
++
++		controller->maps[i].target_cpu = primepower_irq_boot_cpu;
++		controller->maps[i].controller = controller;
++		controller->maps[i].addr = controller->base + psycho_imap_offset(ino);
++	}
++	list_add(&controller->list, &primepower_controllers);
++
++attach:
++	for (i = 0; i < ARRAY_SIZE(controller->pbms); i++)
++		if (!controller->pbms[i] || controller->pbms[i] == dp)
++			break;
++	if (i == ARRAY_SIZE(controller->pbms))
++		goto conflict;
++	pp250_identify_pbm(controller, dp, regs);
++	controller->pbms[i] = dp;
++	pbm = prom_early_alloc(sizeof(*pbm));
++	pbm->controller = controller;
++	pbm->index = i;
++	return pbm;
++
++conflict:
++	prom_printf("PRIMEPOWER: conflicting Psycho register windows\n");
++	prom_halt();
++	return NULL;
++}
++
++static unsigned int primepower_map_index(unsigned int ino)
++{
++	return ino < 0x20 ? ino / 4 : 8 + ino - 0x20;
++}
++
++/* Psycho has six PCI slot maps and nineteen onboard maps, including timers. */
++static bool pp250_catalog_index(unsigned int index)
++{
++	return index < 27 && index != 2 && index != 3;
++}
++
++static bool pp250_catalog_vector(struct primepower_controller *c, unsigned int vector)
++{
++	unsigned int group = vector & ~0x3fU;
++
++	return (!group || group == c->attach.portid << 6) &&
++	       pp250_catalog_index(primepower_map_index(vector & 0x3f));
++}
++
++#define PP250_TIMER0_INO	0x2c
++#define PP250_TIMER1_INO	0x2d
++
++static void __init primepower_describe(struct primepower_controller *c,
++				       unsigned int pbm, unsigned int ino)
++{
++	unsigned int pin;
++
++	if (!pp250_catalog_vector(c, ino)) {
++		c->inventory_complete = false;
++		return;
++	}
++	ino &= 0x3f;
++	/* A conflicting PCI description cannot authorize timer MMIO. */
++	if (ino == PP250_TIMER0_INO || ino == PP250_TIMER1_INO) {
++		c->inventory_complete = false;
++		return;
++	}
++	pin = ino < 0x20 ? ino & 3 : 0;
++	c->maps[primepower_map_index(ino)].described[pbm] |= BIT(pin);
++}
++
++/* Only the four root-slot entries may select the PCI#01 physical map. */
++static void __init pp250_record_pin(struct primepower_controller *c, unsigned int pbm,
++				    struct device_node *bus, unsigned int na,
++				    const __be32 *entry, unsigned int ino)
++{
++	const __be32 *mask;
++	unsigned int pin = be32_to_cpu(entry[na]);
++	bool root = bus == c->pbms[pbm];
++	bool slot3 = root && na == 3 &&
++		     (be32_to_cpu(entry[0]) & 0x00fff800) == (pp250_pci01_source.devfn << 8);
++	int len;
++
++	if (slot3)
++		c->pci01_rows[pbm]++;
++	if (primepower_map_index(ino & 0x3f) != pp250_pci01_source.map_index)
++		return;
++	mask = of_get_property(bus, "interrupt-map-mask", &len);
++	if (!slot3 || !mask || len != 4 * sizeof(*mask) ||
++	    be32_to_cpu(mask[0]) != 0x00fff800 || mask[1] || mask[2] ||
++	    be32_to_cpu(mask[3]) != 7 || be32_to_cpu(entry[na + 1]) != bus->phandle ||
++	    pin < 1 || pin > 4 || (ino & 0x3f) != 0x10 + pin - 1 ||
++	    (c->pci01_pins[pbm] & BIT(pin - 1))) {
++		c->pci01_alias = true;
++		return;
++	}
++	c->pci01_pins[pbm] |= BIT(pin - 1);
++}
++
++static unsigned int pp250_source_pins(struct primepower_controller *c)
++{
++	unsigned int i;
++
++	if (!c->inventory_complete || c->pci01_alias)
++		return 0;
++	for (i = 0; i < ARRAY_SIZE(c->pbms); i++)
++		if (c->pci01_pins[i] == 0xf && c->pci01_rows[i] == 4 &&
++		    !c->pci01_pins[i ^ 1])
++			return 0xf;
++	return 0;
++}
++
++/* Identify the SCF row itself; another description of its map is an alias. */
++static void __init pp250_describe_scf(struct primepower_controller *c,
++				      struct device_node *bus, unsigned int na,
++				      const __be32 *entry, unsigned int ino)
++{
++	struct primepower_imap *map = &c->maps[primepower_map_index(0x23)];
++	struct device_node *scf;
++	const __be32 *reg;
++	u32 pin;
++	int bytes;
++
++	if ((ino & 0x3f) != 0x23)
++		return;
++	scf = of_find_node_by_path("/pci@83,4000/ebus@1/FJSV,scfc@14,210000");
++	reg = scf ? of_get_property(scf, "reg", &bytes) : NULL;
++	if (!map->scf_source && reg && bytes >= 3 * sizeof(*reg) &&
++	    scf->parent == bus && bus->parent &&
++	    be32_to_cpu(entry[na + 1]) == bus->parent->phandle && na == 2 &&
++	    reg[0] == entry[0] && reg[1] == entry[1] &&
++	    of_property_count_u32_elems(scf, "interrupts") == 1 &&
++	    !of_property_read_u32(scf, "interrupts", &pin) &&
++	    pin == be32_to_cpu(entry[na]))
++		map->scf_source = true;
++	else
++		map->scf_alias = true;
++	of_node_put(scf);
++}
++
++/* SPARC firmware uses na address cells, a pin, a phandle and a target INO. */
++static bool __init primepower_describe_bus(struct primepower_controller *c,
++					   unsigned int pbm, struct device_node *bus)
++{
++	const __be32 *entry;
++	u32 na, ni;
++	int bytes;
++
++	entry = of_get_property(bus, "interrupt-map", &bytes);
++	if (!entry)
++		return !of_property_present(bus, "interrupt-map");
++	if (of_property_read_u32(bus, "#address-cells", &na) || na > 3 ||
++	    of_property_read_u32(bus, "#interrupt-cells", &ni) || ni != 1 ||
++	    bytes <= 0 || bytes % ((na + 3) * sizeof(*entry))) {
++		pr_warn("PRIMEPOWER: unsupported interrupt-map layout on %pOF\n", bus);
++		return false;
++	}
++	while (bytes) {
++		phandle parent = be32_to_cpu(entry[na + 1]);
++		unsigned int ino = be32_to_cpu(entry[na + 2]);
++		int j;
++
++		for (j = 0; j < ARRAY_SIZE(c->pbms); j++)
++			if (c->pbms[j] && c->pbms[j]->phandle == parent) {
++				pp250_record_pin(c, pbm, bus, na, entry, ino);
++				pp250_describe_scf(c, bus, na, entry, ino);
++				primepower_describe(c, pbm, ino);
++				break;
++			}
++		if (j == ARRAY_SIZE(c->pbms)) {
++			pr_warn("PRIMEPOWER: unknown interrupt parent %x on %pOF\n", parent, bus);
++			return false;
++		}
++		entry += na + 3;
++		bytes -= (na + 3) * sizeof(*entry);
++	}
++	return true;
++}
++
++static bool __init primepower_describe_subtree(struct primepower_controller *c,
++					       unsigned int pbm, struct device_node *bus)
++{
++	struct device_node *child;
++	bool complete = primepower_describe_bus(c, pbm, bus);
++
++	for_each_child_of_node(bus, child)
++		if (!primepower_describe_subtree(c, pbm, child))
++			complete = false;
++
++	return complete;
++}
++
++static bool __init pp250_describe_timers(struct primepower_controller *c)
++{
++	struct device_node *dp __free(device_node) =
++		of_get_child_by_name(of_root, "counter-timer");
++	const struct linux_prom64_registers *regs;
++	const __be32 *vectors;
++	u32 first = (c->attach.portid << 6) | PP250_TIMER0_INO;
++	int len;
++
++	if (!dp || !of_device_is_available(dp))
++		return false;
++	regs = of_get_property(dp, "reg", &len);
++	if (!regs || len != 3 * sizeof(*regs) || c->base_size < 0x1c20 ||
++	    regs[0].phys_addr != c->base + 0x1c00 || regs[0].reg_size != 0x20 ||
++	    regs[1].phys_addr != c->base + psycho_iclr_offset(PP250_TIMER0_INO) ||
++	    regs[1].reg_size != 0x10 ||
++	    regs[2].phys_addr != c->base + psycho_imap_offset(PP250_TIMER0_INO) ||
++	    regs[2].reg_size != 0x10)
++		return false;
++
++	vectors = of_get_property(dp, "interrupts", &len);
++	if (!vectors || len != 2 * sizeof(*vectors) ||
++	    be32_to_cpu(vectors[0]) != first || be32_to_cpu(vectors[1]) != first + 1)
++		return false;
++
++	c->maps[primepower_map_index(PP250_TIMER0_INO)].timer_source = true;
++	c->maps[primepower_map_index(PP250_TIMER1_INO)].timer_source = true;
++	return true;
++}
++
++static int __init primepower_describe_maps(void)
++{
++	struct primepower_controller *c;
++	int i;
++
++	list_for_each_entry(c, &primepower_controllers, list) {
++		c->inventory_complete = true;
++		for (i = 0; i < ARRAY_SIZE(c->pbms); i++) {
++			struct device_node *bus = c->pbms[i];
++			const __be32 *vec;
++			int bytes;
++
++			if (!bus) {
++				c->inventory_complete = false;
++				continue;
++			}
++			if (!of_property_present(bus, "interrupt-map"))
++				c->inventory_complete = false;
++			if (!primepower_describe_subtree(c, i, bus))
++				c->inventory_complete = false;
++			vec = of_get_property(bus, "interrupts", &bytes);
++			if (!vec || bytes <= 0 || bytes % sizeof(*vec))
++				c->inventory_complete = false;
++			while (vec && bytes >= (int)sizeof(*vec)) {
++				unsigned int ino = be32_to_cpup(vec++);
++
++				if (!pp250_catalog_vector(c, ino)) {
++					c->inventory_complete = false;
++					bytes -= sizeof(*vec);
++					continue;
++				}
++				ino &= 0x3f;
++				if (primepower_map_index(ino) == 4)
++					c->pci01_alias = true;
++				c->maps[primepower_map_index(ino)].bridge_pbms |= BIT(i);
++				primepower_describe(c, i, ino);
++				bytes -= sizeof(*vec);
++			}
++		}
++		if (!pp250_describe_timers(c)) {
++			c->inventory_complete = false;
++			pr_warn("PRIMEPOWER: incomplete root counter-timer description\n");
++		}
++		pp250_finish_inventory(&c->attach, c->inventory_complete);
++		for (i = 0; i < ARRAY_SIZE(c->maps); i++) {
++			struct primepower_imap *map = &c->maps[i];
++			unsigned long flags, value;
++			const char *reason;
++			bool programmed;
++
++			if (!c->inventory_complete)
++				reason = "incomplete-inventory";
++			else if (map->timer_source)
++				reason = "counter-timer-selector-unread";
++			else if (!map->described[0] && !map->described[1])
++				reason = "undescribed";
++			else
++				reason = NULL;
++			if (reason) {
++				pr_info("pp250 pre-enumeration imap=%lx unknown=%s\n",
++					map->addr, reason);
++				continue;
++			}
++			raw_spin_lock_irqsave(&c->lock, flags);
++			value = primepower_observe_imap(c, upa_readq(map->addr));
++			programmed = map->programmed;
++			raw_spin_unlock_irqrestore(&c->lock, flags);
++			pr_info("pp250 pre-enumeration imap=%lx value=%lx valid=%u selector=%lu programmed=%u\n",
++				map->addr, value, !!(value & IMAP_VALID),
++				(value & IMAP_TID_UPA) >> IMAP_TID_SHIFT,
++				programmed);
++		}
++	}
++	return 0;
++}
++early_initcall(primepower_describe_maps);
++
++static int __init primepower_enable_handoff(void)
++{
++	primepower_maps_ready = !list_empty(&primepower_controllers);
++	return 0;
++}
++subsys_initcall(primepower_enable_handoff);
++
++/* Reserve terminal entry before a route changes, or keep firmware out until handback. */
++enum pp250_gate_state {
++	PP250_GATE_IDLE = 0,
++	PP250_GATE_ROUTING = BIT(0),
++	PP250_GATE_TERMINAL = BIT(1),
++	PP250_GATE_HANDOFF = BIT(2),
++	PP250_GATE_PROM = BIT(3),
++};
++
++static atomic_t pp250_gate = ATOMIC_INIT(PP250_GATE_IDLE);
++static int pp250_fw_owner = -1;
++
++static bool pp250_routing_gate(void)
++{
++	int state = atomic_read_acquire(&pp250_gate);
++
++	return state == PP250_GATE_ROUTING ||
++	       (state == (PP250_GATE_ROUTING | PP250_GATE_HANDOFF) &&
++		READ_ONCE(pp250_fw_owner) == raw_smp_processor_id());
++}
++
++static bool pp250_route_start(void)
++{
++	return atomic_cmpxchg(&pp250_gate, PP250_GATE_IDLE,
++			      PP250_GATE_ROUTING) == PP250_GATE_IDLE;
++}
++
++static void pp250_route_done(void)
++{
++	atomic_fetch_andnot_release(PP250_GATE_ROUTING, &pp250_gate);
++}
++
++/* Count admitted calls, including those waiting for the PROM entry lock. */
++int primepower_prom_begin(void)
++{
++	int state;
++
++	if (!primepower_maps_ready)
++		return 0;
++	state = atomic_read_acquire(&pp250_gate);
++	do {
++		if (state & (PP250_GATE_ROUTING | PP250_GATE_TERMINAL))
++			return -EBUSY;
++		if ((state & PP250_GATE_HANDOFF) &&
++		    READ_ONCE(pp250_fw_owner) != raw_smp_processor_id())
++			return -EBUSY;
++	} while (!atomic_try_cmpxchg(&pp250_gate, &state, state + PP250_GATE_PROM));
++	return 1;
++}
++
++void primepower_prom_end(void)
++{
++	atomic_fetch_sub_release(PP250_GATE_PROM, &pp250_gate);
++}
++
++int primepower_terminal_begin(void)
++{
++	if (!primepower_maps_ready)
++		return 0;
++	if (atomic_fetch_or(PP250_GATE_TERMINAL, &pp250_gate) &
++	    ~PP250_GATE_TERMINAL)
++		return -EBUSY;
++	return 1;
++}
++
++static bool primepower_map_known(const struct primepower_imap *map)
++{
++	/* The firmware timer bank is inventory-only, including across PROM calls. */
++	return !map->timer_source && (map->observed || map->described[0] || map->described[1]);
++}
++
++static bool primepower_map_conflict(const struct primepower_imap *map)
++{
++	unsigned long mask = IMAP_VALID | IMAP_TID_UPA | IMAP_IGN | IMAP_INO;
++
++	/* OBP masks and reenables its slot-zero SCF route across enter/go. */
++	if (map->controller->inventory_complete && map->scf_source && !map->scf_alias &&
++	    !map->bridge_pbms && !map->programmed && !map->leased_slot &&
++	    (map->before_prom & IMAP_INO) == 0x23 &&
++	    !((map->before_prom | map->after_prom) & IMAP_TID_UPA))
++		mask &= ~IMAP_VALID;
++
++	return ((map->before_prom ^ map->after_prom) & mask) ||
++	       (map->programmed && ((map->after_prom ^ map->last_programmed) & mask)) ||
++	       ((map->after_prom & IMAP_VALID) && (map->after_prom & IMAP_TID_UPA));
++}
++
++/* PCI#01 has four shared pins; keep the post-capture path non-sleeping. */
++static bool pp250_pins_idle(struct primepower_controller *c)
++{
++	return !(upa_readq(c->base + pp250_pci01_source.pending_offset) &
++		 pp250_pci01_source.pending_mask);
++}
++
++/* PCI#01 shares one map across all four pin state fields. */
++
++static bool pp250_provider_valid(const struct pp250_u2u_ops *ops)
++{
++	return ops && ops->release && (!!ops->acquire != !!ops->assign);
++}
++
++/* The provider must establish slot authority and quiesce every listed pin before offering. */
++int primepower_offer_pci01_slot(struct primepower_controller *c,
++			       unsigned int slot, unsigned int generation,
++			       u8 quiesced_pins, const struct pp250_u2u_ops *ops)
++{
++	struct primepower_imap *map = pp250_route_map(c);
++	struct pp250_u2u_owner *owner = &c->u2u;
++	u8 required = map->described[0] | map->described[1] |
++		      map->pins[0] | map->pins[1];
++	unsigned int i;
++
++	lockdep_assert_held(&c->lock);
++	if (!slot || slot >= ARRAY_SIZE(owner->slots) || !pp250_provider_valid(ops) ||
++	    !c->io || !c->io->write32 || !c->io->read32)
++		return -EINVAL;
++	if (generation != c->returns)
++		return -ESTALE;
++	if (!c->inventory_complete || !c->pbms[0] || !c->pbms[1])
++		return -ENODATA;
++	if (map->phase != PP250_PREPARED || c->handoff_depth || map->quarantined ||
++	    owner->delegated || map->leased_slot || (c->reserved_selectors & BIT(slot)) ||
++	    !required || pp250_source_pins(c) != required || quiesced_pins != required ||
++	    !pp250_routing_gate())
++		return -EBUSY;
++	for (i = 0; i < ARRAY_SIZE(owner->slots); i++)
++		if (owner->slots[i].map)
++			return -EBUSY;
++	if (map->bridge_pbms || map->scf_source || map->scf_alias ||
++	    !pp250_authorized(&c->attach, ops, slot))
++		return -EOPNOTSUPP;
++	owner->authority_generation = c->attach.generation;
++	owner->ops = ops;
++	owner->epoch = generation;
++	owner->delegated = BIT(slot);
++	map->grant_epoch = generation;
++	map->quiesced_pins = quiesced_pins;
++	return 0;
++}
++
++/* Both PBMs use one canonical map per physical IMAP in this controller. */
++static int pp250_find_slot(struct primepower_imap *map, u16 eligible)
++{
++	struct primepower_controller *c = map->controller;
++	unsigned int slot;
++
++	lockdep_assert_held(&c->lock);
++	eligible &= ~(c->reserved_selectors | BIT(0));
++	for (slot = 1; slot < ARRAY_SIZE(c->u2u.slots); slot++) {
++		struct primepower_imap *used = c->u2u.slots[slot].map;
++
++		if (used == map)
++			return slot;
++		if (used)
++			eligible &= ~BIT(slot);
++	}
++	if (!eligible)
++		return -ENOSPC;
++	return __ffs(eligible);
++}
++
++static int pp250_assign_os_slot(struct primepower_imap *map, unsigned int slot)
++{
++	struct primepower_controller *c = map->controller;
++
++	if (map->active_pins || c->u2u.slots[slot].map ||
++	    pp250_find_slot(map, c->u2u.delegated) != slot)
++		return -EBUSY;
++	return 0;
++}
++
++static int pp250_release_os_slot(struct primepower_imap *map, unsigned int slot)
++{
++	if (map->active_pins || pp250_find_slot(map, 0) != slot)
++		return -EBUSY;
++	return 0;
++}
++
++static const struct pp250_u2u_ops pp250_os_provider = {
++	.assign = pp250_assign_os_slot,
++	.release = pp250_release_os_slot,
++};
++
++static int pp250_interval_release(struct primepower_imap *map, unsigned int slot)
++{
++	struct primepower_controller *c = map->controller;
++	int err = pp250_release_os_slot(map, slot);
++
++	if (err)
++		return err;
++	return c->interval_policy->handback(map, slot);
++}
++
++static const struct pp250_u2u_ops pp250_interval_provider = {
++	.assign = pp250_assign_os_slot,
++	.release = pp250_interval_release,
++};
++
++static int pp250_grant_slots(struct primepower_controller *c, u64 generation, u16 eligible,
++			     const struct pp250_u2u_ops *ops)
++{
++	int slot;
++
++	lockdep_assert_held(&c->lock);
++	if (!eligible || c->handoff_depth ||
++	    pp250_route_map(c)->quarantined || pp250_route_map(c)->leased_slot || c->u2u.delegated)
++		return -EBUSY;
++	slot = pp250_find_slot(pp250_route_map(c), eligible);
++	if (slot < 0)
++		return slot;
++	if (!(eligible & BIT(slot)) || c->u2u.slots[slot].map)
++		return -EBUSY;
++	if (!pp250_publish_authority(&c->attach, generation, ops,
++				     slot, c->reserved_selectors))
++		return -EACCES;
++	return 0;
++}
++
++/* The platform must guarantee exclusive first use and handback after drained release. */
++int primepower_grant_pci01_slots(struct primepower_controller *c, u64 generation,
++				u16 eligible)
++{
++	lockdep_assert_held(&c->lock);
++	if (pp250_route_map(c)->phase != PP250_HOME || c->interval_policy)
++		return -EBUSY;
++	return pp250_grant_slots(c, generation, eligible, &pp250_os_provider);
++}
++
++/* Called only after the closed endpoint's IMAP is masked and all pins have drained. */
++static int pp250_prepare_offer(struct primepower_controller *c)
++{
++	const struct pp250_interval_policy *policy = c->interval_policy;
++	struct primepower_imap *map = pp250_route_map(c);
++	int err;
++
++	lockdep_assert_held(&c->lock);
++	if (!policy) {
++		if (c->attach.provider != &pp250_os_provider)
++			return 0;
++	} else {
++		if (!policy->eligible || !policy->handback)
++			return -EINVAL;
++		if (map->phase != PP250_PREPARED || c->handoff_depth || map->active_pins ||
++		    map->quarantined || !c->attach.ready || c->attach.provider ||
++		    !pp250_routing_gate())
++			return -EBUSY;
++		if (map->saved_route != (IMAP_VALID | pp250_pci01_source.vector) ||
++		    upa_readq(map->addr) != (map->saved_route & ~IMAP_VALID) ||
++		    !pp250_pins_idle(c))
++			return -EBUSY;
++		err = pp250_grant_slots(c, c->attach.generation, policy->eligible(c),
++					&pp250_interval_provider);
++		if (err)
++			return err;
++	}
++	err = primepower_offer_pci01_slot(c, c->attach.slot, c->returns,
++					 pp250_source_pins(c), c->attach.provider);
++	if (err && policy)
++		pp250_revoke_authority(&c->attach);
++	return err;
++}
++
++#define PP250_U2U_STATUS	0x00
++#define PP250_U2U_DEST_BASE	0x10
++#define PP250_U2U_DEST_STRIDE	0x08
++#define PP250_U2U_MODE_BASE	0x40
++#define PP250_U2U_UE_CONV	0x80
++
++static bool pp250_mode_supported(u32 status)
++{
++	return (status & ~PP250_U2U_UE_CONV) == PP250_U2U_MODE_BASE;
++}
++
++static int pp250_verify_mode(struct primepower_controller *c, u32 expected)
++{
++	u32 status = ~0U;
++	int err;
++
++	err = c->io->read32(c->window + PP250_U2U_STATUS, &status);
++	if (err)
++		return err;
++	return status == expected ? 0 : -EIO;
++}
++
++static const struct pp250_interval_policy pp250_catalog_policy;
++static int pp250_catalog_check(struct primepower_controller *c, unsigned long source);
++static int pp250_catalog_check_active(struct primepower_imap *map);
++
++static int __pp250_set_slot_target(struct primepower_imap *map, unsigned int slot,
++				   u32 target, bool check_catalog)
++{
++	struct primepower_controller *c = map->controller;
++	const struct pp250_u2u_io *io = c->io;
++	unsigned long offset;
++	u32 expected;
++	int err;
++
++	lockdep_assert_held(&c->lock);
++	if (!slot || slot >= ARRAY_SIZE(c->u2u.slots) || target > U8_MAX ||
++	    map->leased_slot != slot || c->u2u.slots[slot].map != map)
++		return -EINVAL;
++	offset = PP250_U2U_DEST_BASE + slot * PP250_U2U_DEST_STRIDE;
++	if (offset + sizeof(u32) > c->window_size ||
++	    c->window > ~0UL - offset - (sizeof(u32) - 1))
++		return -ERANGE;
++
++	if (check_catalog && c->interval_policy == &pp250_catalog_policy) {
++		err = pp250_catalog_check(c, map->last_programmed & ~IMAP_VALID);
++		if (err)
++			return err;
++	}
++	expected = c->u2u.slots[slot].mode_status;
++	if (!pp250_mode_supported(expected))
++		return -EINVAL;
++	err = pp250_verify_mode(c, expected);
++	if (err)
++		return err;
++	err = io->write32(c->window + offset, target);
++	if (err)
++		return err;
++	return pp250_verify_mode(c, expected);
++}
++
++static int pp250_set_slot_target(struct primepower_imap *map, unsigned int slot,
++				 u32 target)
++{
++	return __pp250_set_slot_target(map, slot, target, true);
++}
++
++static int pp250_release_slot(struct primepower_imap *map)
++{
++	struct pp250_u2u_owner *owner = &map->controller->u2u;
++	unsigned int slot = map->leased_slot;
++
++	if (map->query_refs)
++		return -EBUSY;
++	if (owner->ops->release(map, slot))
++		return -EIO;
++	owner->slots[slot] = (struct pp250_u2u_slot){};
++	map->leased_slot = 0;
++	return 0;
++}
++
++static bool pp250_claim_unused(struct primepower_controller *c, unsigned int slot)
++{
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(c->maps); i++) {
++		struct primepower_imap *map = &c->maps[i];
++		unsigned long live;
++
++		if (!primepower_map_known(map))
++			continue;
++		live = primepower_observe_imap(c, upa_readq(map->addr));
++		if (map == pp250_route_map(c) &&
++		    live != (pp250_route_map(c)->saved_route & ~IMAP_VALID))
++			return false;
++	}
++	return !(c->reserved_selectors & BIT(slot));
++}
++
++/* Solaris pcipsy checks the shared mode and port ID at controller attach. */
++static int pp250_check_controller(struct primepower_controller *c, u32 *mode_status)
++{
++	u32 status = ~0U, portid = ~0U;
++	int err;
++
++	if (c->window_size < 0xc || c->window > ~0UL - 0xb)
++		return -ERANGE;
++	err = c->io->read32(c->window + 8, &portid);
++	if (err)
++		return err;
++	if (portid != c->attach.portid)
++		return -ENODEV;
++	err = c->io->read32(c->window + PP250_U2U_STATUS, &status);
++	if (err)
++		return err;
++	if (!pp250_mode_supported(status))
++		return -EOPNOTSUPP;
++	*mode_status = status;
++	return 0;
++}
++
++/* A verified mask prevents new delivery, but does not drain in-flight pins. */
++static int pp250_enable_route(struct primepower_imap *map, unsigned long route)
++{
++	struct primepower_controller *c = map->controller;
++	unsigned long live;
++
++	lockdep_assert_held(&c->lock);
++	map->containment = PP250_CONTAIN_NONE;
++	upa_writeq(route, map->addr);
++	live = upa_readq(map->addr);
++	if (live == route && pp250_pins_idle(c))
++		return 0;
++
++	map->quarantined = true;
++	pp250_route_map(c)->phase = PP250_UNCERTAIN;
++	map->containment = PP250_CONTAIN_MAP_CHANGED;
++	map->containment_readback = live;
++	/* Do not overwrite an unexpected route, including a late selector change. */
++	if (live != route)
++		return -EIO;
++	live = upa_readq(map->addr);
++	map->containment_readback = live;
++	if (live != route)
++		return -EIO;
++
++	map->containment = PP250_CONTAIN_MASK_UNCONFIRMED;
++	upa_writeq(route & ~IMAP_VALID, map->addr);
++	live = upa_readq(map->addr);
++	map->containment_readback = live;
++	if (live == (route & ~IMAP_VALID))
++		map->containment = PP250_CONTAIN_MASK_CONFIRMED;
++	return -EIO;
++}
++
++static int pp250_publish_route(struct primepower_imap *map, unsigned int slot,
++			       unsigned int cpu)
++{
++	unsigned long route = map->saved_route | ((unsigned long)slot << IMAP_TID_SHIFT);
++
++	if (map->startup_pending)
++		route &= ~IMAP_VALID;
++	if (pp250_enable_route(map, route))
++		return -EIO;
++	map->last_programmed = route;
++	map->programmed = true;
++	map->target_cpu = cpu;
++	map->phase = PP250_ROUTED;
++	return 0;
++}
++
++/* Resource setup leaves the route masked until IRQ-core startup owns the descriptor. */
++int primepower_route_startup(struct primepower_imap *map)
++{
++	struct primepower_controller *c = map->controller;
++	unsigned long route = map->last_programmed, live;
++
++	lockdep_assert_held(&c->lock);
++	if (upa_readq(map->addr) != route)
++		goto uncertain;
++	if (!map->startup_pending)
++		return 0;
++	if (!pp250_routing_gate() || c->query_active || c->fw_pending ||
++	    !map->leased_slot || c->u2u.slots[map->leased_slot].map != map ||
++	    c->u2u.epoch != c->returns || map->grant_epoch != c->returns)
++		goto uncertain;
++	route |= IMAP_VALID;
++	upa_writeq(route, map->addr);
++	live = upa_readq(map->addr);
++	if (live != route)
++		goto uncertain;
++	map->last_programmed = route;
++	map->startup_pending = false;
++	return 0;
++uncertain:
++	map->quarantined = true;
++	map->phase = PP250_UNCERTAIN;
++	return -EIO;
++}
++
++/* Called under the controller lock with PCI#01 closed and its four pins drained. */
++static int pp250_forward_route(struct primepower_controller *c, unsigned int cpu)
++{
++	struct primepower_imap *map = pp250_route_map(c);
++	struct pp250_u2u_owner *owner = &c->u2u;
++	unsigned int i, slot;
++	u16 available = owner->delegated & ~BIT(0);
++	u32 mode_status, previous = U8_MAX + 1;
++	int err;
++	u8 bound = map->pins[0] | map->pins[1];
++	u8 required = bound | map->described[0] | map->described[1];
++
++	if (!available || !pp250_provider_valid(owner->ops) ||
++	    !c->io || !c->io->write32 || !c->io->read32)
++		return -EOPNOTSUPP;
++	/* The Fujitsu dispatch-slot layout places the target in the low byte. */
++	if (cpu > U8_MAX)
++		return -ERANGE;
++	if (IS_ENABLED(CONFIG_HOTPLUG_CPU) ||
++	    (cpu == primepower_irq_boot_cpu && !c->fw_pending && !map->startup_pending))
++		return -EOPNOTSUPP;
++	if (!c->inventory_complete)
++		return -ENODATA;
++	available &= ~c->reserved_selectors;
++	if (!available)
++		return -EBUSY;
++	if (owner->epoch != c->returns || map->grant_epoch != c->returns)
++		return -ESTALE;
++	/* Only pin A is synchronized here. The owner must cover all advertised pins. */
++	if (!map->irq[0] || bound != BIT(0) || (required & ~map->quiesced_pins))
++		return -EBUSY;
++	if (!c->pbms[0] || !c->pbms[1] || cpu >= nr_cpu_ids || !cpu_online(cpu) ||
++	    map->phase != PP250_PREPARED || c->handoff_depth || map->leased_slot)
++		return -EBUSY;
++	if (map->saved_route != (IMAP_VALID | pp250_pci01_source.vector) ||
++	    upa_readq(map->addr) != (map->saved_route & ~IMAP_VALID) ||
++	    !pp250_pins_idle(c))
++		return -EBUSY;
++	for (i = 0; i < ARRAY_SIZE(c->maps); i++) {
++		unsigned long live;
++
++		if (c->maps[i].quarantined)
++			return -EBUSY;
++		if (!primepower_map_known(&c->maps[i]))
++			continue;
++		live = upa_readq(c->maps[i].addr);
++		primepower_observe_imap(c, live);
++	}
++	available &= ~c->reserved_selectors;
++	for (i = 1; i < ARRAY_SIZE(owner->slots); i++) {
++		if (owner->slots[i].map == map)
++			goto uncertain;
++		if (owner->slots[i].map)
++			available &= ~BIT(i);
++	}
++	if (!available)
++		return -EBUSY;
++	slot = __ffs(available);
++	if (owner->authority_generation != c->attach.generation)
++		return -ESTALE;
++	if (!pp250_authorized(&c->attach, owner->ops, slot))
++		return -EOPNOTSUPP;
++	if (!pp250_routing_gate())
++		return -EBUSY;
++	err = pp250_check_controller(c, &mode_status);
++	if (err)
++		return err;
++	if (owner->ops->assign)
++		err = owner->ops->assign(map, slot);
++	else
++		err = owner->ops->acquire(map, slot, &previous);
++	if (err)
++		return err;
++	/* Only reversible loans have an inherited target to restore. */
++	if (owner->ops->acquire)
++		owner->slots[slot].previous = previous;
++	owner->slots[slot].mode_status = mode_status;
++	owner->slots[slot].map = map;
++	map->leased_slot = slot;
++	/* Verify both PBMs again under the provider's exclusive claim. */
++	err = -ERANGE;
++	if (owner->ops->assign || previous <= U8_MAX)
++		err = pp250_claim_unused(c, slot) && pp250_pins_idle(c) &&
++		      pp250_routing_gate() ? 0 : -EBUSY;
++	if (err) {
++		if (pp250_release_slot(map))
++			goto uncertain;
++		if (owner->ops == &pp250_interval_provider) {
++			pp250_revoke_authority(&c->attach);
++			owner->delegated = 0;
++			owner->ops = NULL;
++		}
++		return err;
++	}
++	if (pp250_set_slot_target(map, slot, cpu))
++		goto uncertain;
++	/* Keep the source masked if quiescence was lost during programming. */
++	if (!pp250_pins_idle(c))
++		goto uncertain;
++	if (!pp250_routing_gate()) {
++		if (owner->ops->assign || pp250_set_slot_target(map, slot, previous) ||
++		    pp250_release_slot(map))
++			goto uncertain;
++		return -EBUSY;
++	}
++	return pp250_publish_route(map, slot, cpu);
++
++uncertain:
++	map->quarantined = true;
++	map->phase = PP250_UNCERTAIN;
++	return -EIO;
++}
++
++/* The map is masked and synchronize_irq() has completed before PREPARED. */
++static int pp250_route_target(struct primepower_controller *c, unsigned int cpu)
++{
++	struct primepower_imap *map = pp250_route_map(c);
++	struct pp250_u2u_owner *owner = &c->u2u;
++	unsigned int i, slot = map->leased_slot;
++	unsigned long route;
++
++	if (map->active_pins && !map->startup_pending)
++		return -EBUSY;
++	if (!slot || !owner->ops || !owner->ops->assign)
++		return pp250_forward_route(c, cpu);
++	if ((map->phase != PP250_PREPARED &&
++	     !(map->startup_pending && map->phase == PP250_ROUTED)) ||
++	    c->handoff_depth || map->quarantined ||
++	    !pp250_routing_gate())
++		return -EBUSY;
++	if (cpu >= nr_cpu_ids || cpu > U8_MAX || !cpu_online(cpu))
++		return -EINVAL;
++	if (owner->authority_generation != c->attach.generation ||
++	    owner->epoch != c->returns || map->grant_epoch != c->returns ||
++	    !pp250_authorized(&c->attach, owner->ops, slot))
++		goto uncertain;
++	if (slot >= ARRAY_SIZE(owner->slots) || owner->slots[slot].map != map ||
++	    ((owner->ops == &pp250_os_provider || owner->ops == &pp250_interval_provider) &&
++	     pp250_find_slot(map, 0) != slot))
++		goto uncertain;
++	route = map->saved_route | ((unsigned long)slot << IMAP_TID_SHIFT);
++	if ((map->startup_pending ? route & ~IMAP_VALID : route) != map->last_programmed ||
++	    upa_readq(map->addr) != (route & ~IMAP_VALID))
++		goto uncertain;
++	for (i = 0; i < ARRAY_SIZE(c->maps); i++) {
++		struct primepower_imap *other = &c->maps[i];
++
++		if (other->quarantined)
++			goto uncertain;
++		if (other == map || !primepower_map_known(other))
++			continue;
++		if (((upa_readq(other->addr) & IMAP_TID_UPA) >> IMAP_TID_SHIFT) == slot)
++			goto uncertain;
++	}
++	if (!pp250_pins_idle(c))
++		return -EBUSY;
++	if (pp250_set_slot_target(map, slot, cpu) || !pp250_pins_idle(c) ||
++	    !pp250_routing_gate())
++		goto uncertain;
++	return pp250_publish_route(map, slot, cpu);
++
++uncertain:
++	map->quarantined = true;
++	map->phase = PP250_UNCERTAIN;
++	return -EIO;
++}
++
++/* Keep an existing assignment; acquisition and release still require a closed source. */
++static bool pp250_active_assignment(struct primepower_imap *map)
++{
++	struct primepower_controller *c = map->controller;
++	struct pp250_u2u_owner *owner = &c->u2u;
++	unsigned int slot = map->leased_slot;
++
++	return !IS_ENABLED(CONFIG_HOTPLUG_CPU) && map == pp250_route_map(c) &&
++	       map->phase == PP250_ROUTED && !c->handoff_depth && !c->fw_pending &&
++	       !c->query_active && !map->startup_pending && !map->quarantined && map->programmed &&
++	       map->active_pins == BIT(0) && map->irq[0] &&
++	       !map->irq[1] && !map->irq[2] && !map->irq[3] &&
++	       (map->pins[0] | map->pins[1]) == BIT(0) &&
++	       pp250_source_pins(c) == 0xf && !map->bridge_pbms &&
++	       !map->scf_source && !map->scf_alias && !map->timer_source &&
++	       slot && slot < ARRAY_SIZE(owner->slots) &&
++	       owner->ops == &pp250_interval_provider &&
++	       c->interval_policy == &pp250_catalog_policy &&
++	       owner->slots[slot].map == map && pp250_find_slot(map, 0) == slot &&
++	       owner->authority_generation == c->attach.generation &&
++	       owner->epoch == c->returns && map->grant_epoch == c->returns &&
++	       pp250_authorized(&c->attach, owner->ops, slot) &&
++	       pp250_routing_gate();
++}
++
++/* The IRQ descriptor lock excludes EOI; never wait for a handler under that lock. */
++static int pp250_active_affinity(struct primepower_imap *map, unsigned int irq,
++				 unsigned int cpu)
++{
++	struct primepower_controller *c = map->controller;
++	unsigned long route = map->last_programmed, live;
++	int err;
++
++	if (irq != map->irq[0] || cpu >= nr_cpu_ids || cpu > U8_MAX || !cpu_online(cpu))
++		return -EINVAL;
++	if (!pp250_active_assignment(map))
++		return -EBUSY;
++	if (!(route & IMAP_VALID) ||
++	    route != (map->saved_route | ((unsigned long)map->leased_slot << IMAP_TID_SHIFT)))
++		goto uncertain;
++	if (upa_readq(map->addr) != route)
++		goto uncertain;
++	if (!pp250_pins_idle(c))
++		return -EBUSY;
++
++	upa_writeq(route & ~IMAP_VALID, map->addr);
++	if (upa_readq(map->addr) != (route & ~IMAP_VALID))
++		goto uncertain;
++	err = pp250_catalog_check_active(map);
++	if (err == -EAGAIN) {
++		err = -EBUSY;
++		goto restore;
++	}
++	if (err)
++		goto uncertain;
++	if (!pp250_pins_idle(c) || !pp250_routing_gate()) {
++		err = -EBUSY;
++		goto restore;
++	}
++	/* The masked, drained map retains its slot while the destination changes. */
++	if (__pp250_set_slot_target(map, map->leased_slot, cpu, false))
++		goto uncertain;
++	if (!pp250_routing_gate())
++		goto uncertain;
++	upa_writeq(route, map->addr);
++	if (upa_readq(map->addr) != route)
++		goto uncertain;
++	map->target_cpu = cpu;
++	return cpu;
++
++restore:
++	/* A refused transition before the destination write leaves the old route usable. */
++	if (upa_readq(map->addr) != (route & ~IMAP_VALID))
++		goto uncertain;
++	upa_writeq(route, map->addr);
++	if (upa_readq(map->addr) == route)
++		return err;
++uncertain:
++	map->quarantined = true;
++	map->phase = PP250_UNCERTAIN;
++	map->containment = PP250_CONTAIN_MAP_CHANGED;
++	live = upa_readq(map->addr);
++	map->containment_readback = live;
++	if (live == (route & ~IMAP_VALID)) {
++		map->containment = PP250_CONTAIN_MASK_CONFIRMED;
++	} else if (live == route) {
++		map->containment = PP250_CONTAIN_MASK_UNCONFIRMED;
++		upa_writeq(route & ~IMAP_VALID, map->addr);
++		live = upa_readq(map->addr);
++		map->containment_readback = live;
++		if (live == (route & ~IMAP_VALID))
++			map->containment = PP250_CONTAIN_MASK_CONFIRMED;
++	}
++	return -EIO;
++}
++
++int primepower_affinity_target(struct primepower_imap *map, unsigned int irq,
++			      const struct cpumask *mask)
++{
++	struct primepower_controller *c = map->controller;
++	int ret;
++
++	lockdep_assert_held(&c->lock);
++	if (c->handoff_depth || c->fw_pending || c->query_active)
++		return -EAGAIN;
++	if (map->quarantined)
++		return -EIO;
++	if (map->startup_pending && map->leased_slot &&
++	    !cpumask_test_cpu(map->target_cpu, mask)) {
++		unsigned int cpu = cpumask_first_and(mask, cpu_online_mask);
++		int err;
++
++		if (map->active_pins != BIT(0) || irq != map->irq[0])
++			return -EBUSY;
++		err = pp250_route_target(c, cpu);
++		return err ? err : cpu;
++	}
++	if (map->active_pins && map->leased_slot &&
++	    !cpumask_test_cpu(map->target_cpu, mask))
++		return pp250_active_affinity(map, irq, cpumask_first_and(mask, cpu_online_mask));
++	if (map == pp250_route_map(c) && map->phase == PP250_PREPARED) {
++		unsigned int cpu;
++
++		if (irq != map->irq[0])
++			return -EINVAL;
++		if (cpumask_test_cpu(map->target_cpu, mask) &&
++		    !(map->leased_slot && c->u2u.ops && c->u2u.ops->assign))
++			return -EAGAIN;
++		cpu = cpumask_first_and(mask, cpu_online_mask);
++		if (cpu >= nr_cpu_ids)
++			return -EINVAL;
++		ret = pp250_route_target(c, cpu);
++		if (ret)
++			return ret;
++	}
++	if (map == pp250_route_map(c) && map->phase != PP250_HOME &&
++	    map->phase != PP250_ROUTED)
++		return -EAGAIN;
++	return cpumask_test_cpu(map->target_cpu, mask) ? map->target_cpu : -EINVAL;
++}
++
++static int pp250_end_route(struct primepower_controller *c, bool explicit_release)
++{
++	struct primepower_imap *map = pp250_route_map(c);
++	unsigned long masked;
++	unsigned int i, slot = map->leased_slot;
++
++	if (map->query_refs || (slot && map->active_pins))
++		return -EBUSY;
++	if (slot && c->u2u.ops && c->u2u.ops->assign && !explicit_release)
++		return -EBUSY;
++	if (map->phase == PP250_HOME)
++		return slot ? -EIO : 0;
++	if (map->phase == PP250_HOLD || map->phase == PP250_ROUTED)
++		return -EAGAIN;
++	if (map->phase != PP250_PREPARED)
++		return -EIO;
++	if (!pp250_pins_idle(c))
++		return -EAGAIN;
++	if ((!(map->saved_route & IMAP_VALID) && !map->startup_pending) ||
++	    (map->saved_route & IMAP_TID_UPA))
++		goto uncertain;
++	if (slot && (slot >= ARRAY_SIZE(c->u2u.slots) ||
++		     c->u2u.slots[slot].map != map || !c->u2u.ops || !c->io ||
++		     !c->io->write32 || !c->io->read32 ||
++		     !c->u2u.ops->release))
++		goto uncertain;
++	masked = (map->saved_route & ~(IMAP_VALID | IMAP_TID_UPA)) |
++		 ((unsigned long)slot << IMAP_TID_SHIFT);
++	if (upa_readq(map->addr) != masked)
++		goto uncertain;
++	if (pp250_enable_route(map, map->saved_route))
++		return -EIO;
++	if (slot) {
++		for (i = 0; i < ARRAY_SIZE(c->maps); i++) {
++			unsigned long live;
++
++			if (!primepower_map_known(&c->maps[i]))
++				continue;
++			live = upa_readq(c->maps[i].addr);
++			if (((live & IMAP_TID_UPA) >> IMAP_TID_SHIFT) == slot)
++				goto uncertain;
++		}
++		/* An OS-owned slot has no inherited target to restore. */
++		if (!c->u2u.ops->assign &&
++		    pp250_set_slot_target(map, slot, c->u2u.slots[slot].previous))
++			goto uncertain;
++		if (pp250_release_slot(map))
++			goto uncertain;
++	}
++	if ((slot && c->u2u.ops->assign) || c->attach.provider == &pp250_interval_provider)
++		pp250_revoke_authority(&c->attach);
++	c->u2u.delegated = 0;
++	c->u2u.ops = NULL;
++	map->quiesced_pins = 0;
++	map->target_cpu = primepower_irq_boot_cpu;
++	map->last_programmed = map->saved_route;
++	map->programmed = true;
++	map->phase = PP250_HOME;
++	map->startup_pending = false;
++	map->auto_owned = false;
++	c->restored++;
++	pp250_route_done();
++	return 0;
++
++uncertain:
++	map->phase = PP250_UNCERTAIN;
++	map->quarantined = true;
++	return -EIO;
++}
++
++/* A request which never reached startup must restore its exact inherited valid bit. */
++static int pp250_abort_startup(struct primepower_imap *map)
++{
++	struct primepower_controller *c = map->controller;
++
++	if (map->active_pins || map->query_refs || map->quarantined ||
++	    c->query_active || c->handoff_depth ||
++	    !map->startup_pending || !pp250_routing_gate() || !pp250_pins_idle(c))
++		return -EBUSY;
++	map->saved_route = map->startup_original;
++	map->phase = PP250_PREPARED;
++	return pp250_end_route(c, true);
++}
++
++void primepower_route_release(struct primepower_imap *map)
++{
++	lockdep_assert_held(&map->controller->lock);
++	if (map->auto_owned && map->startup_pending && !map->active_pins &&
++	    pp250_abort_startup(map)) {
++		map->quarantined = true;
++		map->phase = PP250_UNCERTAIN;
++	}
++}
++
++/* Stable assignments survive close/open; only unpublished startup is unwound here. */
++static int pp250_request_owned(struct primepower_imap *map, unsigned int irq)
++{
++	struct primepower_controller *c = map->controller;
++	unsigned long original;
++	int err;
++
++	lockdep_assert_held(&c->lock);
++	if (irq != map->irq[0] || map->irq[1] || map->irq[2] || map->irq[3] ||
++	    map->active_pins || map->query_refs || map->quarantined || c->handoff_depth ||
++	    c->fw_pending || c->query_active || !c->attach.ready ||
++	    c->interval_policy != &pp250_catalog_policy)
++		return -EBUSY;
++	if (map->leased_slot) {
++		unsigned int slot = map->leased_slot;
++
++		if (map->phase != PP250_ROUTED || slot >= ARRAY_SIZE(c->u2u.slots) ||
++		    c->u2u.slots[slot].map != map || c->u2u.epoch != c->returns ||
++		    map->grant_epoch != c->returns ||
++		    c->u2u.authority_generation != c->attach.generation ||
++		    !pp250_authorized(&c->attach, c->u2u.ops, slot) ||
++		    !pp250_routing_gate() || upa_readq(map->addr) != map->last_programmed)
++			return -EIO;
++		return 0;
++	}
++	if (map->phase != PP250_HOME || !pp250_route_start())
++		return -EBUSY;
++	original = upa_readq(map->addr);
++	if ((original & ~IMAP_VALID) != pp250_pci01_source.vector || !pp250_pins_idle(c)) {
++		pp250_route_done();
++		return -EBUSY;
++	}
++	map->startup_original = original;
++	map->saved_route = original | IMAP_VALID;
++	map->startup_pending = true;
++	map->auto_owned = true;
++	map->phase = PP250_HOLD;
++	upa_writeq(original & ~IMAP_VALID, map->addr);
++	if (upa_readq(map->addr) != (original & ~IMAP_VALID))
++		goto uncertain;
++	map->last_programmed = original & ~IMAP_VALID;
++	map->programmed = true;
++	map->phase = PP250_PREPARED;
++	err = pp250_prepare_offer(c);
++	if (!err)
++		err = pp250_forward_route(c, primepower_irq_boot_cpu);
++	if (!err)
++		return 0;
++	if (!map->quarantined && !pp250_abort_startup(map))
++		return err;
++uncertain:
++	map->quarantined = true;
++	map->phase = PP250_UNCERTAIN;
++	return -EIO;
++}
++
++static int pp250_return_route(struct primepower_controller *c)
++{
++	return pp250_end_route(c, false);
++}
++
++static int pp250_owner_handoff(struct primepower_controller *c)
++{
++	unsigned int i;
++
++	lockdep_assert_held(&c->lock);
++	for (i = 0; i < ARRAY_SIZE(c->u2u.slots); i++)
++		if (c->u2u.slots[i].map)
++			return -EBUSY;
++	pp250_revoke_authority(&c->attach);
++	c->u2u.delegated = 0;
++	c->u2u.ops = NULL;
++	return 0;
++}
++
++
++/* No other CPU may enter CIF or acquire a route until this owner finishes. */
++static void pp250_fw_drop_token(void)
++{
++	WRITE_ONCE(pp250_fw_owner, -1);
++	atomic_fetch_andnot_release(PP250_GATE_HANDOFF, &pp250_gate);
++}
++
++static int pp250_fw_failed(struct primepower_controller *c, int err)
++{
++	pp250_route_map(c)->quarantined = true;
++	pp250_route_map(c)->phase = PP250_UNCERTAIN;
++	c->fw_pending = false;
++	c->fw_result = err;
++	atomic_fetch_or(PP250_GATE_ROUTING, &pp250_gate);
++	pp250_fw_drop_token();
++	return err;
++}
++
++/* IRQ resource release follows free_irq() synchronization; do not wait here. */
++static int pp250_mask_closed(struct primepower_controller *c)
++{
++	struct primepower_imap *map = pp250_route_map(c);
++	unsigned long route = map->last_programmed;
++
++	if (map->active_pins || map->query_refs || !pp250_pins_idle(c))
++		return -EBUSY;
++	if (!(route & IMAP_VALID) || upa_readq(map->addr) != route)
++		return -EUCLEAN;
++	upa_writeq(route & ~IMAP_VALID, map->addr);
++	if (upa_readq(map->addr) != (route & ~IMAP_VALID) || !pp250_pins_idle(c))
++		return -EIO;
++	map->phase = PP250_PREPARED;
++	return 0;
++}
++
++static int pp250_auto_handback(struct primepower_controller *c)
++{
++	struct primepower_imap *map = pp250_route_map(c);
++	int err;
++
++	if (c->fw_pending)
++		return -EBUSY;
++	if (!map->leased_slot)
++		return 0;
++	if (c->interval_policy != &pp250_catalog_policy ||
++	    c->u2u.ops != &pp250_interval_provider || c->handoff_depth ||
++	    c->fw_pending || map->phase != PP250_ROUTED || map->quarantined ||
++	    map->startup_pending || map->active_pins || map->query_refs || !pp250_pins_idle(c))
++		return -EBUSY;
++	if (atomic_cmpxchg(&pp250_gate, PP250_GATE_ROUTING,
++			   PP250_GATE_ROUTING | PP250_GATE_HANDOFF) != PP250_GATE_ROUTING)
++		return -EBUSY;
++	WRITE_ONCE(pp250_fw_owner, raw_smp_processor_id());
++	c->fw_target = map->target_cpu;
++	c->fw_pending = true;
++	err = pp250_mask_closed(c);
++	if (!err)
++		err = pp250_end_route(c, true);
++	if (err)
++		return pp250_fw_failed(c, err);
++	c->fw_handbacks++;
++	c->fw_result = 0;
++	return 0;
++}
++
++/* Firmware owns the interval just completed; obtain new authority before writing. */
++static void pp250_auto_restore(struct primepower_controller *c)
++{
++	struct primepower_imap *map = pp250_route_map(c);
++	int err = -EBUSY;
++
++	if (!c->fw_pending)
++		return;
++	if (READ_ONCE(pp250_fw_owner) != raw_smp_processor_id()) {
++		c->fw_result = -EACCES;
++		return;
++	}
++	if (c->handoff_depth || map->phase != PP250_HOME || map->active_pins ||
++	    map->leased_slot || map->quarantined || c->attach.provider ||
++	    c->u2u.delegated || atomic_cmpxchg(&pp250_gate, PP250_GATE_HANDOFF,
++			PP250_GATE_HANDOFF | PP250_GATE_ROUTING) != PP250_GATE_HANDOFF)
++		goto failed;
++	err = pp250_mask_closed(c);
++	if (!err)
++		err = pp250_prepare_offer(c);
++	if (!err)
++		err = pp250_route_target(c, c->fw_target);
++	if (err)
++		goto failed;
++	c->fw_pending = false;
++	c->fw_restores++;
++	c->fw_result = 0;
++	pp250_fw_drop_token();
++	return;
++failed:
++	pp250_fw_failed(c, err);
++}
++
++
++static unsigned long pp250_query_tba(void)
++{
++	unsigned long tba;
++
++	asm volatile("rdpr %%tba, %0" : "=r" (tba));
++	return tba;
++}
++
++static bool pp250_query_authority(struct primepower_controller *c)
++{
++	struct primepower_imap *map = pp250_route_map(c);
++
++	return map->phase == PP250_ROUTED && !map->quarantined &&
++	       map->programmed && !map->startup_pending &&
++	       !c->fw_pending && !c->handoff_depth && map->leased_slot == pp250_pci01_source.slot &&
++	       !(map->active_pins & ~BIT(0)) && map->irq[0] &&
++	       !map->irq[1] && !map->irq[2] && !map->irq[3] &&
++	       map->addr == pp250_pci01_source.imap &&
++	       map->last_programmed == (IMAP_VALID | ((unsigned long)pp250_pci01_source.slot <<
++			IMAP_TID_SHIFT) | pp250_pci01_source.vector) &&
++	       c->interval_policy == &pp250_catalog_policy &&
++	       c->u2u.ops == &pp250_interval_provider &&
++	       c->u2u.slots[pp250_pci01_source.slot].map == map &&
++	       c->u2u.epoch == c->returns && map->grant_epoch == c->returns &&
++	       c->u2u.authority_generation == c->attach.generation &&
++	       pp250_authorized(&c->attach, c->u2u.ops, 12);
++}
++
++/* Admit only the qualified service; the reference, not a caller lock, pins its route. */
++int primepower_cif_query_begin(unsigned long *args, unsigned long flags)
++{
++	struct primepower_controller *c;
++	struct primepower_imap *map;
++	int ret = -EBUSY;
++
++	if (!primepower_maps_ready ||
++	    !list_is_singular(&primepower_controllers) ||
++	    !(atomic_read_acquire(&pp250_gate) & PP250_GATE_ROUTING) ||
++	    (args[1] != 2 || args[2] != 1 ||
++	     strcmp((char *)args[0], "getproplen") ||
++	     args[3] != (unsigned int)prom_root_node ||
++	     strcmp((char *)args[4], "name")))
++		return 0;
++	c = list_first_entry(&primepower_controllers, struct primepower_controller, list);
++	if (!raw_spin_trylock(&c->lock))
++		return -EBUSY;
++	map = pp250_route_map(c);
++	if (!map->leased_slot || !map->active_pins) {
++		ret = 0;
++		goto out;
++	}
++	if (flags || preempt_count()) {
++		ret = -EOPNOTSUPP;
++		goto out;
++	}
++	if (pp250_query_tba() != (unsigned long)sparc64_ttable_tl0) {
++		ret = -EIO;
++		goto out;
++	}
++	if (c->query_active || map->query_refs || map->active_pins != BIT(0) ||
++	    !pp250_query_authority(c) ||
++	    upa_readq(map->addr) != map->last_programmed)
++		goto out;
++	if (atomic_cmpxchg(&pp250_gate, PP250_GATE_ROUTING,
++			   PP250_GATE_ROUTING | PP250_GATE_HANDOFF) != PP250_GATE_ROUTING)
++		goto out;
++	map->query_refs++;
++	c->query_map = map;
++	c->query_cpu = raw_smp_processor_id();
++	c->query_target = map->target_cpu;
++	c->query_epoch = c->u2u.epoch;
++	c->query_generation = c->attach.generation;
++	c->query_route = map->last_programmed;
++	c->query_active = true;
++	c->query_entries++;
++	c->query_result = 0;
++	ret = PP250_CIF_RETAINED;
++out:
++	raw_spin_unlock(&c->lock);
++	return ret;
++}
++
++/* Retention never releases or rewrites a destination, even when return validation fails. */
++static int pp250_query_end(bool executed)
++{
++	struct primepower_controller *c;
++	struct primepower_imap *map;
++	int ret = -EIO;
++
++	c = list_first_entry(&primepower_controllers, struct primepower_controller, list);
++	raw_spin_lock(&c->lock);
++	map = pp250_route_map(c);
++	if (!c->query_active || c->query_map != map || map->query_refs != 1 ||
++	    c->query_cpu != raw_smp_processor_id())
++		goto failed;
++	if (!pp250_query_authority(c) || c->query_epoch != c->u2u.epoch ||
++	    c->query_generation != c->attach.generation ||
++	    c->query_target != map->target_cpu || c->query_route != map->last_programmed ||
++	    upa_readq(map->addr) != c->query_route ||
++	    pp250_query_tba() != (unsigned long)sparc64_ttable_tl0)
++		goto failed;
++	if (atomic_cmpxchg(&pp250_gate, PP250_GATE_ROUTING | PP250_GATE_HANDOFF,
++			   PP250_GATE_ROUTING) != (PP250_GATE_ROUTING | PP250_GATE_HANDOFF))
++		goto failed;
++	if (executed && !map->active_pins)
++		c->query_closed++;
++	map->query_refs--;
++	c->query_map = NULL;
++	c->query_active = false;
++	if (executed)
++		c->query_returns++;
++	else
++		c->query_canceled++;
++	c->query_result = 0;
++	ret = 0;
++	goto out;
++failed:
++	map->quarantined = true;
++	pp250_route_map(c)->phase = PP250_UNCERTAIN;
++	c->query_result = ret;
++	/* Keep the exclusion token and assignment; an unknown route is not safe to rewrite. */
++out:
++	raw_spin_unlock(&c->lock);
++	return ret;
++}
++
++enum pp250_cif_admission {
++	PP250_CIF_READER = 1,
++	PP250_CIF_HANDBACK,
++};
++
++/* Called at PIL_NMI, before prom_entry_lock; never wait on an interrupted owner. */
++int primepower_cif_begin(void)
++{
++	struct primepower_controller *c;
++	struct primepower_imap *map;
++	int ret = primepower_prom_begin();
++
++	if (ret != -EBUSY ||
++	    !list_is_singular(&primepower_controllers))
++		return ret;
++	c = list_first_entry(&primepower_controllers, struct primepower_controller, list);
++	if (!raw_spin_trylock(&c->lock))
++		return -EBUSY;
++	map = pp250_route_map(c);
++	if (!map->leased_slot || c->fw_pending || c->query_active || c->handoff_depth)
++		goto out;
++	ret = pp250_auto_handback(c);
++	if (ret)
++		goto out;
++	ret = pp250_owner_handoff(c);
++	if (ret)
++		goto failed;
++	map->before_prom = upa_readq(map->addr);
++	ret = primepower_prom_begin();
++	if (ret < 0)
++		goto failed;
++	c->cif_entries++;
++	c->entries++;
++	ret = PP250_CIF_HANDBACK;
++	goto out;
++failed:
++	pp250_fw_failed(c, ret);
++out:
++	raw_spin_unlock(&c->lock);
++	return ret;
++}
++
++/* A failed PROM trylock cancels admission before the service has run. */
++int primepower_cif_query_cancel(void)
++{
++	return pp250_query_end(false);
++}
++
++/* HANDOFF excludes new routes and CIF callers until fresh authority is installed. */
++int primepower_cif_end(int admission)
++{
++	struct primepower_controller *c;
++	struct primepower_imap *map;
++	int ret;
++
++	if (admission == PP250_CIF_RETAINED)
++		return pp250_query_end(true);
++	primepower_prom_end();
++	if (admission == PP250_CIF_READER)
++		return 0;
++	c = list_first_entry(&primepower_controllers, struct primepower_controller, list);
++	raw_spin_lock(&c->lock);
++	map = pp250_route_map(c);
++	map->after_prom = upa_readq(map->addr);
++	if (primepower_map_conflict(map))
++		map->quarantined = true;
++	c->cif_returns++;
++	c->returns++;
++	pp250_auto_restore(c);
++	ret = c->fw_result;
++	raw_spin_unlock(&c->lock);
++	return ret;
++}
++
++int primepower_irq_handoff_begin(void)
++{
++	struct primepower_controller *c;
++	unsigned long flags;
++	unsigned int i;
++
++	int err;
++
++	if (!primepower_maps_ready)
++		return 0;
++	list_for_each_entry(c, &primepower_controllers, list) {
++		raw_spin_lock_irqsave(&c->lock, flags);
++		err = pp250_auto_handback(c);
++		if (!err)
++			err = pp250_return_route(c);
++		if (!err)
++			err = pp250_owner_handoff(c);
++		if (err) {
++			c->refused++;
++			raw_spin_unlock_irqrestore(&c->lock, flags);
++			list_for_each_entry_continue_reverse(c, &primepower_controllers, list) {
++				raw_spin_lock_irqsave(&c->lock, flags);
++				c->handoff_depth--;
++				raw_spin_unlock_irqrestore(&c->lock, flags);
++			}
++			return err;
++		}
++		if (!c->handoff_depth++)
++			for (i = 0; i < ARRAY_SIZE(c->maps); i++)
++				if (primepower_map_known(&c->maps[i]))
++					c->maps[i].before_prom = primepower_observe_imap(c,
++							upa_readq(c->maps[i].addr));
++		c->entries++;
++		raw_spin_unlock_irqrestore(&c->lock, flags);
++
++	}
++	return 0;
++}
++
++void primepower_irq_handoff_end(void)
++{
++	struct primepower_controller *c;
++	unsigned long flags;
++	unsigned int i;
++
++	if (!primepower_maps_ready)
++		return;
++	list_for_each_entry(c, &primepower_controllers, list) {
++		raw_spin_lock_irqsave(&c->lock, flags);
++		if (WARN_ON_ONCE(!c->handoff_depth) || --c->handoff_depth)
++			goto unlock;
++		for (i = 0; i < ARRAY_SIZE(c->maps); i++) {
++			struct primepower_imap *map = &c->maps[i];
++
++			if (!primepower_map_known(map))
++				continue;
++			map->after_prom = primepower_observe_imap(c, upa_readq(map->addr));
++			/* Preserve firmware changes until ownership can be re-established. */
++			if (!map->quarantined && primepower_map_conflict(map)) {
++				map->quarantined = true;
++				printk_deferred(KERN_WARNING "PRIMEPOWER: IMAP %lx quarantined across PROM (%lx -> %lx, programmed %lx)\n",
++						map->addr, map->before_prom, map->after_prom,
++						map->last_programmed);
++			}
++		}
++unlock:
++		c->returns++;
++		if (!c->handoff_depth)
++			pp250_auto_restore(c);
++		raw_spin_unlock_irqrestore(&c->lock, flags);
++	}
++}
++
++static int pp250_check_source(struct primepower_controller *c, struct pci_dev *pdev)
++{
++	struct device_node *node = pci_device_to_OF_node(pdev);
++	u8 header, pin;
++	unsigned int i;
++
++	if (!node || !pp250_source_pins(c))
++		return -ENODATA;
++	for (i = 0; i < ARRAY_SIZE(c->pbms); i++)
++		if (c->pci01_pins[i] && node->parent == c->pbms[i])
++			break;
++	if (i == ARRAY_SIZE(c->pbms))
++		return -ENODEV;
++	if (pci_read_config_byte(pdev, PCI_HEADER_TYPE, &header) ||
++	    pci_read_config_byte(pdev, PCI_INTERRUPT_PIN, &pin))
++		return -EIO;
++	if (header != PCI_HEADER_TYPE_NORMAL || pin != 1)
++		return -EOPNOTSUPP;
++	return 0;
++}
++
++/* Validate the registered endpoint rather than a Linux IRQ number or interface name. */
++int primepower_route_request(struct primepower_imap *map, unsigned int irq)
++{
++	struct primepower_controller *c = map->controller;
++	struct pci_dev *pdev = NULL, *other;
++	unsigned long flags;
++	unsigned int i;
++	int err = -ENODEV;
++
++	if (map != pp250_route_map(c))
++		return 0;
++	/* Keep early boot and a retained PROM console on the firmware-compatible CPU0 route. */
++	if (!prom_console_retired() || system_state < SYSTEM_RUNNING)
++		return 0;
++	if (IS_ENABLED(CONFIG_HOTPLUG_CPU) || IS_ENABLED(CONFIG_PM_SLEEP) ||
++	    map->addr != pp250_pci01_source.imap)
++		return -EOPNOTSUPP;
++	for_each_pci_dev(pdev) {
++		if (pdev->irq == irq && pdev->devfn == pp250_pci01_source.devfn &&
++		    !pp250_check_source(c, pdev))
++			break;
++	}
++	if (!pdev)
++		return err;
++	for (i = 1; i < 8; i++) {
++		other = pci_get_slot(pdev->bus, pp250_pci01_source.devfn | i);
++		if (other) {
++			pci_dev_put(other);
++			err = -EOPNOTSUPP;
++			goto out;
++		}
++	}
++	raw_spin_lock_irqsave(&c->lock, flags);
++	err = pp250_request_owned(map, irq);
++	raw_spin_unlock_irqrestore(&c->lock, flags);
++out:
++	pci_dev_put(pdev);
++	return err;
++}
++
++static bool pp250_platform_layout(struct primepower_controller *c)
++{
++	u32 proxies;
++	int i;
++
++	if (!c->attach.ready || !c->inventory_complete ||
++	    c->base != 0x10600000000UL || c->base_size != 0xd000 ||
++	    c->window != 0x10600800000UL || c->window_size != 0x90 ||
++	    !c->maps[primepower_map_index(PP250_TIMER0_INO)].timer_source ||
++	    !c->maps[primepower_map_index(PP250_TIMER1_INO)].timer_source)
++		return false;
++	for (i = 0; i < ARRAY_SIZE(c->pbms); i++) {
++		u32 version, impl;
++
++		if (!c->pbms[i] || !of_device_is_available(c->pbms[i]) ||
++		    !of_device_is_compatible(c->pbms[i], "pci108e,8000") ||
++		    of_property_read_u32(c->pbms[i], "version#", &version) || version != 4 ||
++		    of_property_read_u32(c->pbms[i], "implementation#", &impl) || impl)
++			return false;
++	}
++	for (i = 0; i < ARRAY_SIZE(c->pbms); i++)
++		if (!of_property_read_u32(c->pbms[i], "#upa-interrupt-proxies", &proxies) &&
++		    proxies == 2)
++			return true;
++	return false;
++}
++
++/* Every grant, destination write and release uses fresh reads under the CIF gate. */
++static int pp250_catalog_scan(struct primepower_controller *c, unsigned long source,
++			      bool active)
++{
++	unsigned long allowed = IMAP_VALID | IMAP_TID_UPA | IMAP_IGN | IMAP_INO;
++	unsigned int i;
++	u32 status;
++	int err = -EBUSY;
++
++	lockdep_assert_held(&c->lock);
++	if (!c->attach.ready || !c->inventory_complete || c->handoff_depth ||
++	    (pp250_route_map(c)->active_pins && !active &&
++	     !pp250_route_map(c)->startup_pending) || !pp250_routing_gate())
++		goto done;
++	err = pp250_check_controller(c, &status);
++	if (err)
++		goto done;
++	for (i = 0; i < ARRAY_SIZE(c->maps); i++) {
++		struct primepower_imap *map = &c->maps[i];
++		unsigned int ino = i < 8 ? i * 4 : 0x20 + i - 8;
++		unsigned long vector = ((c->attach.portid << 6) & IMAP_IGN) | ino;
++		unsigned int selector;
++		u64 value;
++
++		if (map->quarantined) {
++			err = -EBUSY;
++			goto done;
++		}
++		if (!pp250_catalog_index(i)) {
++			if (map->observed || map->described[0] || map->described[1]) {
++				err = -ENODATA;
++				goto done;
++			}
++			continue;
++		}
++		err = pp250_phys_read64(map->addr, &value);
++		if (err)
++			goto done;
++		if ((value & ~allowed) || (value & (IMAP_IGN | IMAP_INO)) != vector) {
++			err = -EUCLEAN;
++			goto done;
++		}
++		selector = (value & IMAP_TID_UPA) >> IMAP_TID_SHIFT;
++		if (map == pp250_route_map(c)) {
++			if (value != source) {
++				err = -EUCLEAN;
++				goto done;
++			}
++		} else {
++			c->reserved_selectors |= BIT(selector);
++			if (selector == pp250_pci01_source.slot) {
++				err = -EBUSY;
++				goto done;
++			}
++		}
++	}
++	/* Proxy target fields are direct CPU IDs, not U2U selectors. */
++	for (i = 0; i < 2; i++) {
++		u64 value;
++
++		err = pp250_phys_read64(c->base + 0x6000 + i * 0x2000, &value);
++		if (err)
++			goto done;
++		if (value & IMAP_VALID) {
++			err = -EBUSY;
++			goto done;
++		}
++	}
++	err = pp250_pins_idle(c) ? 0 : active ? -EAGAIN : -EBUSY;
++done:
++	return err;
++}
++
++static int pp250_catalog_check(struct primepower_controller *c, unsigned long source)
++{
++	return pp250_catalog_scan(c, source, false);
++}
++
++static int pp250_catalog_check_active(struct primepower_imap *map)
++{
++	if (!pp250_active_assignment(map))
++		return -EBUSY;
++	return pp250_catalog_scan(map->controller, map->last_programmed & ~IMAP_VALID, true);
++}
++
++static u16 pp250_catalog_eligible(struct primepower_controller *c)
++{
++	if (pp250_catalog_check(c, pp250_route_map(c)->saved_route & ~IMAP_VALID))
++		return 0;
++	return BIT(pp250_pci01_source.slot) & ~c->reserved_selectors;
++}
++
++static int pp250_catalog_handback(struct primepower_imap *map, unsigned int slot)
++{
++	struct primepower_controller *c = map->controller;
++	u64 source;
++	int err;
++
++	if (slot != pp250_pci01_source.slot ||
++	    (map->saved_route & ~IMAP_VALID) != pp250_pci01_source.vector ||
++	    (!(map->saved_route & IMAP_VALID) && !map->startup_pending))
++		return -EINVAL;
++	err = pp250_phys_read64(map->addr, &source);
++	if (err)
++		return err;
++	if (source != map->saved_route && source != (map->saved_route & ~IMAP_VALID))
++		return -EBUSY;
++	return pp250_catalog_check(c, source);
++}
++
++static const struct pp250_interval_policy pp250_catalog_policy = {
++	.eligible = pp250_catalog_eligible,
++	.handback = pp250_catalog_handback,
++};
++
++static int __init primepower_route_init(void)
++{
++	struct primepower_controller *c;
++
++	if (!list_is_singular(&primepower_controllers))
++		return 0;
++	c = list_first_entry(&primepower_controllers, struct primepower_controller, list);
++	if (pp250_platform_layout(c) && c->attach.portid == 0x83 &&
++	    primepower_irq_boot_cpu == 0 && !IS_ENABLED(CONFIG_HOTPLUG_CPU) &&
++	    !IS_ENABLED(CONFIG_PM_SLEEP))
++		c->interval_policy = &pp250_catalog_policy;
++	return 0;
++}
++late_initcall(primepower_route_init);
++
++unsigned int primepower_irq_build(struct device_node *dp, unsigned int ino,
++					 void *data)
++{
++	struct primepower_pbm *pbm = data;
++	struct primepower_controller *controller = pbm->controller;
++	unsigned int index;
++
++	if (!pp250_catalog_vector(controller, ino)) {
++		controller->attach.invalid = true;
++		pp250_finish_inventory(&controller->attach, false);
++		return 0;
++	}
++	ino &= 0x3f;
++	if (ino == PP250_TIMER0_INO || ino == PP250_TIMER1_INO)
++		return 0;
++	index = primepower_map_index(ino);
++	return primepower_build_irq(&controller->maps[index], pbm->index,
++				    ino < 0x20 ? ino & 3 : 0,
++				    controller->base + psycho_iclr_offset(ino));
++}
+diff --git a/arch/sparc/kernel/pp250_attach.h b/arch/sparc/kernel/pp250_attach.h
+new file mode 100644
+index 000000000000..6da8d57d012e
+--- /dev/null
++++ b/arch/sparc/kernel/pp250_attach.h
+@@ -0,0 +1,106 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _PP250_ATTACH_H
++#define _PP250_ATTACH_H
++
++struct pp250_u2u_ops;
++
++/* The PBM letters follow their control-bank offsets, independent of probe order. */
++struct pp250_attach {
++	u32 node[2], portid, u2u_id;
++	bool invalid, ready;
++	u8 suspended;
++	u64 generation;
++	const struct pp250_u2u_ops *provider;
++	unsigned int slot;
++};
++
++static inline void pp250_revoke_authority(struct pp250_attach *a)
++{
++	a->provider = NULL;
++	a->slot = 0;
++	a->generation++;
++}
++
++static inline bool pp250_ranges_overlap(unsigned long a, unsigned long an,
++					unsigned long b, unsigned long bn)
++{
++	return a <= b ? b - a < an : a - b < bn;
++}
++
++static inline void pp250_record_pbm(struct pp250_attach *a, unsigned long offset,
++				    u32 node, u32 portid, u32 u2u_id, bool valid)
++{
++	unsigned int bank = offset == 0x4000;
++
++	if (!valid || !node || (offset != 0x2000 && offset != 0x4000) ||
++	    (a->node[bank] && a->node[bank] != node) ||
++	    a->node[bank ^ 1] == node ||
++	    ((a->node[0] || a->node[1]) &&
++	     (a->portid != portid || a->u2u_id != u2u_id))) {
++		a->invalid = true;
++		a->ready = false;
++		pp250_revoke_authority(a);
++		return;
++	}
++	if (a->node[bank] == node)
++		return;
++	a->node[bank] = node;
++	a->portid = portid;
++	a->u2u_id = u2u_id;
++	a->ready = false;
++	pp250_revoke_authority(a);
++}
++
++static inline void pp250_finish_inventory(struct pp250_attach *a, bool complete)
++{
++	a->ready = complete && !a->invalid && !a->suspended && a->node[0] && a->node[1];
++	if (!a->ready)
++		pp250_revoke_authority(a);
++}
++
++/* A lifecycle transition may revoke an idle loan, never forget a held slot. */
++static inline bool pp250_offline_pbm(struct pp250_attach *a, unsigned int bank,
++				     bool detach, bool held)
++{
++	if (bank >= 2 || !a->node[bank] || held)
++		return false;
++	a->ready = false;
++	pp250_revoke_authority(a);
++	if (detach) {
++		a->node[bank] = 0;
++		a->suspended &= ~BIT(bank);
++	} else {
++		a->suspended |= BIT(bank);
++	}
++	return true;
++}
++
++static inline bool pp250_resume_pbm(struct pp250_attach *a, unsigned int bank)
++{
++	if (bank >= 2 || !(a->suspended & BIT(bank)))
++		return false;
++	a->suspended &= ~BIT(bank);
++	return true;
++}
++
++/* A trusted platform provider must establish authority outside this state machine. */
++static inline bool pp250_publish_authority(struct pp250_attach *a, u64 generation,
++				     const struct pp250_u2u_ops *ops,
++				     unsigned int slot, u32 reserved)
++{
++	if (!a->ready || a->provider || generation != a->generation || !ops ||
++	    !slot || slot >= 16 || (reserved & BIT(slot)))
++		return false;
++	a->slot = slot;
++	a->provider = ops;
++	return true;
++}
++
++static inline bool pp250_authorized(const struct pp250_attach *a,
++				    const struct pp250_u2u_ops *ops,
++				    unsigned int slot)
++{
++	return a->ready && ops && ops == a->provider && slot > 0 &&
++	       slot < 16 && slot == a->slot;
++}
++#endif
+diff --git a/arch/sparc/kernel/prom.h b/arch/sparc/kernel/prom.h
+index 26a1cca7c761..0470df976162 100644
+--- a/arch/sparc/kernel/prom.h
++++ b/arch/sparc/kernel/prom.h
+@@ -2,6 +2,7 @@
+ #ifndef __PROM_H
+ #define __PROM_H
+ 
++#include <linux/cpumask.h>
+ #include <linux/spinlock.h>
+ #include <asm/prom.h>
+ 
+@@ -9,4 +10,174 @@ void of_console_init(void);
+ 
+ extern unsigned int prom_early_allocated;
+ 
++#include "pp250_attach.h"
++
++struct primepower_controller;
++struct primepower_pbm;
++
++enum pp250_containment {
++	PP250_CONTAIN_NONE, PP250_CONTAIN_MAP_CHANGED,
++	PP250_CONTAIN_MASK_UNCONFIRMED, PP250_CONTAIN_MASK_CONFIRMED,
++};
++
++enum pp250_return_phase {
++	PP250_HOME, PP250_HOLD, PP250_PREPARED, PP250_UNCERTAIN, PP250_ROUTED,
++};
++
++/* This descriptor qualifies only the previously tested PCI#01 source. */
++struct pp250_route_source {
++	unsigned long imap, pending_offset, pending_mask;
++	unsigned int map_index, devfn, vector, slot;
++};
++
++static const struct pp250_route_source pp250_pci01_source = {
++	.imap = 0x10600000c20UL,
++	.pending_offset = 0xa800,
++	.pending_mask = 0xffUL << 32,
++	.map_index = 4,
++	.devfn = 3 << 3,
++	.vector = 0xd0,
++	.slot = 12,
++};
++
++struct primepower_imap {
++	struct primepower_controller *controller;
++	unsigned long addr, saved_route, startup_original;
++	enum pp250_return_phase phase;
++	unsigned long first, last_programmed;
++	unsigned long before_prom, after_prom;
++	unsigned long containment_readback;
++	enum pp250_containment containment;
++	unsigned int irq[4];
++	struct cpumask *requested[4];
++	unsigned int target_cpu, leased_slot, grant_epoch;
++	unsigned int query_refs;
++	u8 pins[2], described[2], quiesced_pins;
++	u8 bridge_pbms, active_pins, enabled_pins, masked_pins;
++	bool scf_source, scf_alias, timer_source;
++	bool observed, programmed, quarantined;
++	bool startup_pending, auto_owned;
++};
++
++struct pp250_u2u_slot {
++	struct primepower_imap *map;
++	u32 previous;
++	u32 mode_status;
++};
++
++/* Built-in providers run under the controller lock and must not sleep or enter PROM. */
++struct pp250_u2u_ops {
++	/* Acquire excludes other users and returns the old target. Failure leaves no claim. */
++	int (*acquire)(struct primepower_imap *map, unsigned int slot, u32 *target);
++	/* An OS-lifetime provider assigns an exclusive slot without a restore target. */
++	int (*assign)(struct primepower_imap *map, unsigned int slot);
++	/* Release must establish safe handback or keep the slot exclusively held. */
++	int (*release)(struct primepower_imap *map, unsigned int slot);
++};
++
++/* Both callbacks run under the controller lock with firmware entry excluded. */
++struct pp250_interval_policy {
++	/* Report independently authorized slots for this interval without claiming them. */
++	u16 (*eligible)(struct primepower_controller *c);
++	/* Confirm safe handback or fail with the slot still owned. */
++	int (*handback)(struct primepower_imap *map, unsigned int slot);
++};
++
++struct pp250_u2u_io {
++	/* Ordered 32-bit accesses must report bus faults to the caller. */
++	int (*write32)(unsigned long addr, u32 value);
++	int (*read32)(unsigned long addr, u32 *value);
++};
++
++int pp250_phys_write32(unsigned long addr, u32 value);
++int pp250_phys_read32(unsigned long addr, u32 *value);
++int pp250_phys_read64(unsigned long addr, u64 *value);
++
++struct pp250_u2u_owner {
++	u16 delegated;
++	u64 authority_generation;
++	unsigned int epoch;
++	struct pp250_u2u_slot slots[16];
++	const struct pp250_u2u_ops *ops;
++};
++
++struct primepower_controller {
++	struct pp250_attach attach;
++	const struct pp250_interval_policy *interval_policy;
++	const struct pp250_u2u_io *io;
++	bool fw_pending;
++	bool query_active;
++	struct primepower_imap *query_map;
++	unsigned int query_cpu, query_entries, query_returns, query_closed;
++	unsigned int query_canceled;
++	unsigned int query_target, query_epoch;
++	u64 query_generation;
++	unsigned long query_route;
++	int query_result;
++	unsigned int fw_target, fw_handbacks, fw_restores;
++	unsigned int cif_entries, cif_returns;
++	int fw_result;
++	struct list_head list;
++	unsigned long window, base, window_size, base_size;
++	raw_spinlock_t lock;
++	unsigned int handoff_depth;
++	u32 reserved_selectors;
++	bool inventory_complete;
++	bool pci01_alias;
++	u8 pci01_pins[2];
++	unsigned int pci01_rows[2];
++	struct pp250_u2u_owner u2u;
++	unsigned int refused, restored;
++	unsigned int entries, returns;
++	struct device_node *pbms[2];
++	struct primepower_imap maps[8 + 32];
++};
++
++static inline struct primepower_imap *pp250_route_map(struct primepower_controller *c)
++{
++	return &c->maps[pp250_pci01_source.map_index];
++}
++
++int primepower_grant_pci01_slots(struct primepower_controller *c, u64 generation,
++				u16 eligible);
++int primepower_offer_pci01_slot(struct primepower_controller *c,
++			       unsigned int slot, unsigned int generation,
++			       u8 quiesced_pins, const struct pp250_u2u_ops *ops);
++
++unsigned long primepower_observe_imap(struct primepower_controller *c,
++				      unsigned long value);
++
++#ifdef CONFIG_PCI
++int primepower_route_request(struct primepower_imap *map, unsigned int irq);
++void primepower_route_release(struct primepower_imap *map);
++int primepower_route_startup(struct primepower_imap *map);
++int primepower_affinity_target(struct primepower_imap *map, unsigned int irq,
++			      const struct cpumask *mask);
++#else
++static inline int primepower_route_request(struct primepower_imap *map, unsigned int irq)
++{
++	return 0;
++}
++
++static inline void primepower_route_release(struct primepower_imap *map) { }
++
++static inline int primepower_route_startup(struct primepower_imap *map)
++{
++	return -EOPNOTSUPP;
++}
++
++static inline int primepower_affinity_target(struct primepower_imap *map,
++					     unsigned int irq, const struct cpumask *mask)
++{
++	return -EINVAL;
++}
++#endif
++
++struct primepower_pbm *primepower_attach_pbm(struct device_node *dp,
++				 const struct linux_prom64_registers *regs);
++unsigned int primepower_irq_build(struct device_node *dp, unsigned int ino, void *data);
++
++unsigned int primepower_build_irq(struct primepower_imap *map, unsigned int pbm,
++				  int pin, unsigned long iclr);
++
+ #endif /* __PROM_H */
+diff --git a/arch/sparc/kernel/prom_irqtrans.c b/arch/sparc/kernel/prom_irqtrans.c
+index 58c505d75a3c..b765fab6fcf2 100644
+--- a/arch/sparc/kernel/prom_irqtrans.c
++++ b/arch/sparc/kernel/prom_irqtrans.c
+@@ -9,8 +9,8 @@
+ #include <asm/oplib.h>
+ #include <asm/prom.h>
+ #include <asm/irq.h>
+-#include <asm/upa.h>
+ #include <asm/spitfire.h>
++#include <asm/upa.h>
+ 
+ #include "prom.h"
+ 
+@@ -42,34 +42,21 @@ static unsigned long psycho_pcislot_imap_offset(unsigned long ino)
+ 	((ino & 0x20) ? (PSYCHO_ICLR_SCSI + (((ino) & 0x1f) << 3)) :  \
+ 			(PSYCHO_ICLR_A_SLOT0 + (((ino) & 0x1f)<<3)))
+ 
+-static unsigned int psycho_irq_build(struct device_node *dp,
+-				     unsigned int ino,
+-				     void *_data)
++static unsigned long psycho_imap_offset(unsigned int ino)
+ {
+-	unsigned long controller_regs = (unsigned long) _data;
+-	unsigned long imap, iclr;
+-	unsigned long imap_off, iclr_off;
+-	int inofixup = 0;
+-
+-	ino &= 0x3f;
+-	if (ino < PSYCHO_ONBOARD_IRQ_BASE) {
+-		/* PCI slot */
+-		imap_off = psycho_pcislot_imap_offset(ino);
+-	} else {
+-		/* Onboard device */
+-		imap_off = psycho_onboard_imap_offset(ino);
+-	}
+-
+-	/* Now build the IRQ bucket. */
+-	imap = controller_regs + imap_off;
+-
+-	iclr_off = psycho_iclr_offset(ino);
+-	iclr = controller_regs + iclr_off;
++	if (ino < PSYCHO_ONBOARD_IRQ_BASE)
++		return psycho_pcislot_imap_offset(ino);
++	return psycho_onboard_imap_offset(ino);
++}
+ 
+-	if ((ino & 0x20) == 0)
+-		inofixup = ino & 0x03;
++static unsigned int psycho_irq_build(struct device_node *dp, unsigned int ino,
++				     void *data)
++{
++	unsigned long base = (unsigned long)data;
+ 
+-	return build_irq(inofixup, iclr, imap);
++	ino &= 0x3f;
++	return build_irq(ino < 0x20 ? ino & 3 : 0, base + psycho_iclr_offset(ino),
++			 base + psycho_imap_offset(ino));
+ }
+ 
+ static void __init psycho_irq_trans_init(struct device_node *dp)
+@@ -81,9 +68,21 @@ static void __init psycho_irq_trans_init(struct device_node *dp)
+ 	if (tlb_type == sparc64_v &&
+ 	    of_property_match_string(of_root, "name", "FJSV,GPUZC-M") >= 0 &&
+ 	    of_property_match_string(of_root, "model", "250") >= 0 &&
+-	    of_property_present(dp, "interrupt-extension"))
++	    of_property_present(dp, "interrupt-extension")) {
++		int len;
++
++		regs = of_get_property(dp, "reg", &len);
++		if (!regs || len < 4 * sizeof(*regs) || regs[3].reg_size < 0x90 ||
++		    regs[2].reg_size < psycho_iclr_offset(0x3f) + sizeof(u64)) {
++			prom_printf("PRIMEPOWER: invalid Psycho register windows\n");
++			prom_halt();
++		}
++		primepower_irq_boot_cpu = raw_smp_processor_id();
++		dp->irq_trans->data = primepower_attach_pbm(dp, regs);
+ 		primepower_irq_mask = IMAP_IGN | IMAP_INO;
+-
++		dp->irq_trans->irq_build = primepower_irq_build;
++		return;
++	}
+ 
+ 	regs = of_get_property(dp, "reg", NULL);
+ 	dp->irq_trans->data = (void *) regs[2].phys_addr;
+diff --git a/arch/sparc/kernel/reboot.c b/arch/sparc/kernel/reboot.c
+index c41de768e617..b26e42ebcae7 100644
+--- a/arch/sparc/kernel/reboot.c
++++ b/arch/sparc/kernel/reboot.c
+@@ -46,11 +46,13 @@ static void sparc_restart(char *cmd, bool capture)
+ 	p = strchr(reboot_command, '\n');
+ 	if (p)
+ 		*p = 0;
+-	if (cmd)
+-		prom_reboot(cmd, capture);
+-	if (*reboot_command)
+-		prom_reboot(reboot_command, capture);
+-	prom_reboot("", capture);
++	if ((cmd && prom_reboot(cmd, capture)) ||
++	    (*reboot_command && prom_reboot(reboot_command, capture)) ||
++	    prom_reboot("", capture)) {
++		if (capture)
++			pr_emerg("Firmware reboot refused: interrupt handback incomplete\n");
++		return;
++	}
+ 	panic("Reboot failed!");
+ }
+ 
+diff --git a/arch/sparc/kernel/setup_64.c b/arch/sparc/kernel/setup_64.c
+index 7af592f76eb4..4d8f3759b2ba 100644
+--- a/arch/sparc/kernel/setup_64.c
++++ b/arch/sparc/kernel/setup_64.c
+@@ -31,6 +31,8 @@
+ #include <linux/initrd.h>
+ #include <linux/module.h>
+ #include <linux/start_kernel.h>
++#include <linux/workqueue.h>
++#include <linux/panic.h>
+ #include <linux/memblock.h>
+ #include <uapi/linux/mount.h>
+ 
+@@ -68,6 +70,21 @@
+ DEFINE_SPINLOCK(ns87303_lock);
+ EXPORT_SYMBOL(ns87303_lock);
+ 
++static bool prom_console_has_retired __read_mostly;
++
++bool prom_console_retired(void)
++{
++	/* Pair with exit after the console core has drained its writers. */
++	return smp_load_acquire(&prom_console_has_retired);
++}
++
++static int prom_console_exit(struct console *con)
++{
++	/* Console core has drained registered writers before calling exit. */
++	smp_store_release(&prom_console_has_retired, true);
++	return 0;
++}
++
+ static void
+ prom_console_write(struct console *con, const char *s, unsigned int n)
+ {
+@@ -80,6 +97,7 @@ unsigned long cmdline_memory_size = 0;
+ static struct console prom_early_console = {
+ 	.name =		"earlyprom",
+ 	.write =	prom_console_write,
++	.exit =		prom_console_exit,
+ 	.flags =	CON_PRINTBUFFER | CON_BOOT | CON_ANYTIME,
+ 	.index =	-1,
+ };
+@@ -375,6 +393,10 @@ static void __init fujitsu_patch_error_traps(void (*handler)(void))
+ 					     sparc64_vii_ecc_trap;
+ 			if (tlb_type == sparc64_v && traps[j] == 0x63)
+ 				target = i ? sparc64_v_ecc_trap_tl1 : sparc64_v_ecc_trap;
++#ifdef CONFIG_PCI
++			if (tlb_type == sparc64_v && traps[j] == 0x32 && !i)
++				target = pp250_u2u_dae;
++#endif
+ 			delta = (long)target - (long)slot;
+ 
+ 			/* ba (disp22), followed by nop. */
+@@ -803,12 +825,38 @@ void __init setup_arch(char **cmdline_p)
+ 
+ extern int stop_a_enabled;
+ 
++static atomic_t primepower_break_pending = ATOMIC_INIT(0);
++
++static void primepower_break_workfn(struct work_struct *work)
++{
++	int ret;
++
++	if (READ_ONCE(stop_a_enabled) && system_state == SYSTEM_RUNNING &&
++	    !oops_in_progress && !panic_in_progress()) {
++		flush_user_windows();
++		ret = prom_cmdline();
++		if (ret)
++			pr_warn_ratelimited("PRIMEPOWER: firmware BREAK refused (%d)\n", ret);
++	}
++	atomic_set(&primepower_break_pending, 0);
++}
++
++static DECLARE_WORK(primepower_break_work, primepower_break_workfn);
++
+ void sun_do_break(void)
+ {
+-	if (!stop_a_enabled)
++	if (!READ_ONCE(stop_a_enabled))
+ 		return;
++	if (primepower_irq_supported() && prom_console_retired()) {
++		if (in_nmi() || system_state != SYSTEM_RUNNING ||
++		    oops_in_progress || panic_in_progress())
++			return;
++		/* The serial interrupt still owns its port lock at this point. */
++		if (!atomic_cmpxchg(&primepower_break_pending, 0, 1))
++			schedule_work(&primepower_break_work);
++		return;
++	}
+ 
+-	prom_printf("\n");
+ 	flush_user_windows();
+ 
+ 	prom_cmdline();
+@@ -817,6 +865,11 @@ EXPORT_SYMBOL(sun_do_break);
+ 
+ void sparc_panic_exit(void)
+ {
++	if (primepower_irq_supported() && prom_console_retired()) {
++		WRITE_ONCE(stop_a_enabled, 0);
++		pr_emerg("PRIMEPOWER: firmware recovery unavailable; use an external reset\n");
++		return;
++	}
+ 	stop_a_enabled = 1;
+ 	pr_emerg("Press Stop-A (L1-A) from sun keyboard or send break\n"
+ 		 "twice on console to return to the boot prom\n");
+diff --git a/arch/sparc/kernel/smp_64.c b/arch/sparc/kernel/smp_64.c
+index 98f603fdb81c..7ab15b91120e 100644
+--- a/arch/sparc/kernel/smp_64.c
++++ b/arch/sparc/kernel/smp_64.c
+@@ -1663,6 +1663,12 @@ void __irq_entry smp_receive_signal_client(int irq, struct pt_regs *regs)
+ static void stop_this_cpu(void *dummy)
+ {
+ 	set_cpu_online(smp_processor_id(), false);
++	/* Terminal stop cannot transfer the native console from a stopped owner. */
++	if (primepower_irq_supported() && prom_console_retired()) {
++		local_irq_disable();
++		for (;;)
++			cpu_relax();
++	}
+ 	prom_stopself();
+ }
+ 
+diff --git a/arch/sparc/prom/misc_64.c b/arch/sparc/prom/misc_64.c
+index db43debcf825..43e5e5d5cbd0 100644
+--- a/arch/sparc/prom/misc_64.c
++++ b/arch/sparc/prom/misc_64.c
+@@ -13,9 +13,16 @@
+ #include <linux/interrupt.h>
+ #include <linux/delay.h>
+ #include <linux/module.h>
++#include <linux/cpu.h>
++#include <linux/mutex.h>
++#include <linux/panic.h>
++#include <linux/sunsu_prom.h>
++#include <asm/prom.h>
++#include <asm/setup.h>
+ 
+ #include <asm/openprom.h>
+ #include <asm/oplib.h>
++#include <asm/irq.h>
+ #include <asm/ldc.h>
+ 
+ static int prom_service_exists(const char *service_name)
+@@ -48,16 +55,104 @@ void prom_sun4v_guest_soft_state(void)
+ 	p1275_cmd_direct(args);
+ }
+ 
++static DEFINE_MUTEX(primepower_monitor_mutex);
++static int primepower_uart_owner = -1;
++
++bool primepower_uart_handoff_active(void)
++{
++	return !in_interrupt() &&
++	       READ_ONCE(primepower_uart_owner) == raw_smp_processor_id();
++}
++
++
++static int primepower_uart_call(struct sunsu_prom_handoff *state, void *arg)
++{
++	unsigned long flags;
++	int ret;
++
++	if (oops_in_progress || panic_in_progress())
++		return -EOPNOTSUPP;
++	local_irq_save(flags);
++#ifdef CONFIG_SMP
++	smp_capture();
++#endif
++	ret = sunsu_prom_begin(state);
++	if (!ret) {
++		ret = primepower_irq_handoff_begin();
++		if (!ret) {
++			WRITE_ONCE(primepower_uart_owner, raw_smp_processor_id());
++			ret = p1275_cmd_try_direct(arg);
++			WRITE_ONCE(primepower_uart_owner, -1);
++			primepower_irq_handoff_end();
++		}
++	}
++	/* Failed restoration must not resume CPUs against uncertain UART state. */
++	if (sunsu_prom_end(state))
++		for (;;)
++			cpu_relax();
++#ifdef CONFIG_SMP
++	smp_release();
++#endif
++	local_irq_restore(flags);
++	return ret;
++}
++
++static int primepower_monitor_call(unsigned long *args)
++{
++	int ret;
++
++	if (!in_task() || preempt_count() || softirq_count() || irqs_disabled() ||
++	    oops_in_progress || panic_in_progress())
++		return -EOPNOTSUPP;
++	if (!mutex_trylock(&primepower_monitor_mutex))
++		return -EBUSY;
++	if (!cpus_read_trylock()) {
++		ret = -EBUSY;
++		goto unlock;
++	}
++	ret = sunsu_prom_handoff(of_console_input_device, of_console_device,
++				 primepower_uart_call, args);
++	cpus_read_unlock();
++unlock:
++	mutex_unlock(&primepower_monitor_mutex);
++	return ret;
++}
++
++static int prom_terminal_call(unsigned long *args)
++{
++	int state;
++
++	if (primepower_irq_supported() && prom_console_retired())
++		return primepower_monitor_call(args);
++	state = primepower_terminal_begin();
++
++	if (state < 0)
++		return state;
++	if (state)
++		return p1275_cmd_try_direct(args);
++	return p1275_cmd_direct(args);
++}
++
+ /* Reset and reboot the machine with the command 'bcommand'. */
+-void prom_reboot(const char *bcommand, bool capture)
++int prom_reboot(const char *bcommand, bool capture)
+ {
+ 	unsigned long args[4];
+ 	unsigned long flags;
++	int err = 0;
+ 
+ #ifdef CONFIG_SUN_LDOMS
+ 	if (ldom_domaining_enabled)
+ 		ldom_reboot(bcommand);
+ #endif
++	if (primepower_irq_supported() && prom_console_retired()) {
++		if (!capture)
++			return -EOPNOTSUPP;
++		args[0] = (unsigned long)"boot";
++		args[1] = 1;
++		args[2] = 0;
++		args[3] = (unsigned long)bcommand;
++		return primepower_monitor_call(args);
++	}
+ 	local_irq_save(flags);
+ #ifdef CONFIG_SMP
+ 	if (capture)
+@@ -68,12 +163,21 @@ void prom_reboot(const char *bcommand, bool capture)
+ 	args[2] = 0;
+ 	args[3] = (unsigned long) bcommand;
+ 
+-	p1275_cmd_direct(args);
++	if (capture) {
++		err = primepower_irq_handoff_begin();
++		if (!err) {
++			err = p1275_cmd_direct(args);
++			primepower_irq_handoff_end();
++		}
++	} else {
++		err = prom_terminal_call(args);
++	}
+ #ifdef CONFIG_SMP
+ 	if (capture)
+ 		smp_release();
+ #endif
+ 	local_irq_restore(flags);
++	return err;
+ }
+ 
+ /* Forth evaluate the expression contained in 'fstring'. */
+@@ -102,6 +206,13 @@ int prom_cmdline(void)
+ 	unsigned long flags;
+ 	int ret;
+ 
++	if (primepower_irq_supported() && prom_console_retired()) {
++		args[0] = (unsigned long)"enter";
++		args[1] = 0;
++		args[2] = 0;
++		return primepower_monitor_call(args);
++	}
++
+ 	local_irq_save(flags);
+ 
+ #ifdef CONFIG_SMP
+@@ -112,7 +223,12 @@ int prom_cmdline(void)
+ 	args[1] = 0;
+ 	args[2] = 0;
+ 
+-	ret = p1275_cmd_direct(args);
++	ret = primepower_irq_handoff_begin();
++	if (!ret) {
++		prom_printf("\n");
++		ret = p1275_cmd_direct(args);
++		primepower_irq_handoff_end();
++	}
+ 
+ #ifdef CONFIG_SMP
+ 	smp_release();
+@@ -137,7 +253,11 @@ void notrace prom_halt(void)
+ 	args[0] = (unsigned long) "exit";
+ 	args[1] = 0;
+ 	args[2] = 0;
+-	p1275_cmd_direct(args);
++	if (prom_terminal_call(args)) {
++		local_irq_disable();
++		for (;;)
++			cpu_relax();
++	}
+ 	goto again; /* PROM is out to get me -DaveM */
+ }
+ 
+@@ -152,7 +272,7 @@ void prom_halt_power_off(void)
+ 	args[0] = (unsigned long) "SUNW,power-off";
+ 	args[1] = 0;
+ 	args[2] = 0;
+-	p1275_cmd_direct(args);
++	prom_terminal_call(args);
+ 
+ 	/* if nothing else helps, we just halt */
+ 	prom_halt();
+diff --git a/arch/sparc/prom/p1275.c b/arch/sparc/prom/p1275.c
+index 878e29f44004..013a7087bfcd 100644
+--- a/arch/sparc/prom/p1275.c
++++ b/arch/sparc/prom/p1275.c
+@@ -11,7 +11,11 @@
+ #include <linux/string.h>
+ #include <linux/spinlock.h>
+ #include <linux/irqflags.h>
++#include <linux/interrupt.h>
++#include <linux/panic.h>
+ 
++#include <asm/irq.h>
++#include <asm/setup.h>
+ #include <asm/openprom.h>
+ #include <asm/oplib.h>
+ #include <asm/spitfire.h>
+@@ -33,21 +37,78 @@ extern void prom_cif_callback(void);
+  */
+ DEFINE_RAW_SPINLOCK(prom_entry_lock);
+ 
+-int p1275_cmd_direct(unsigned long *args)
++static bool primepower_cif_allowed(unsigned long *args, unsigned long flags,
++				   bool terminal)
++{
++	if (!primepower_irq_supported() || !prom_console_retired() ||
++	    system_state < SYSTEM_RUNNING)
++		return true;
++	if (terminal)
++		return primepower_uart_handoff_active();
++	/* Only this returning read has been qualified with the native UART active. */
++	return !flags && !in_interrupt() && !preempt_count() &&
++	       args[1] == 2 && args[2] == 1 &&
++	       !strcmp((char *)args[0], "getproplen") &&
++	       args[3] == (unsigned int)prom_root_node &&
++	       !strcmp((char *)args[4], "name");
++}
++
++static int p1275_call(unsigned long *args, bool terminal)
+ {
+ 	unsigned long flags;
++	int admission = 0;
+ 
++	/* Exceptional entry cannot transfer the native UART or IRQ ownership. */
++	if (primepower_irq_supported() && prom_console_retired() &&
++	    (in_nmi() || READ_ONCE(oops_in_progress) || panic_in_progress()))
++		return -EOPNOTSUPP;
+ 	local_save_flags(flags);
++	if (!primepower_cif_allowed(args, flags, terminal))
++		return -EOPNOTSUPP;
+ 	local_irq_restore((unsigned long)PIL_NMI);
+-	raw_spin_lock(&prom_entry_lock);
++	if (terminal) {
++		if (!raw_spin_trylock(&prom_entry_lock)) {
++			admission = -EBUSY;
++			goto restore;
++		}
++	} else {
++		admission = primepower_cif_query_begin(args, flags);
++		if (!admission)
++			admission = primepower_cif_begin();
++		if (admission < 0)
++			goto restore;
++		if (admission == PP250_CIF_RETAINED) {
++			if (!raw_spin_trylock(&prom_entry_lock)) {
++				int err = primepower_cif_query_cancel();
++
++				admission = err ?: -EBUSY;
++				goto restore;
++			}
++		} else {
++			raw_spin_lock(&prom_entry_lock);
++		}
++	}
+ 
+ 	prom_world(1);
+ 	prom_cif_direct(args);
+ 	prom_world(0);
+ 
+ 	raw_spin_unlock(&prom_entry_lock);
++	if (admission)
++		admission = primepower_cif_end(admission);
++restore:
+ 	local_irq_restore(flags);
+-	return 0;
++	return admission < 0 ? admission : 0;
++}
++
++int p1275_cmd_direct(unsigned long *args)
++{
++	return p1275_call(args, false);
++}
++
++int p1275_cmd_try_direct(unsigned long *args)
++{
++	return p1275_call(args, true);
+ }
+ 
+ void prom_cif_init(void *cif_handler)

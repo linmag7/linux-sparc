@@ -1,0 +1,16 @@
+series/sparc64/generic-sparc64-msi/patches/0001-sparc64-disassociate-MSI-descriptors-after-IRQ-teard.patch
+series/sparc64/generic-sparc64-msi/patches/0002-sparc64-initialize-MSI-dispatch-before-requesting-qu.patch
+series/sparc64/generic-sparc64-msi/patches/0003-sparc64-retain-published-MSI-queues-on-initializatio.patch
+series/sparc64/generic-sparc64-msi/patches/0004-sparc64-synchronize-MSI-queue-dispatch-before-releas.patch
+series/sparc64/generic-sparc64-msi/patches/0005-sparc64-check-MSI-invalidation-before-completing-tea.patch
+series/sparc64/generic-sparc64-msi/patches/0006-sparc64-validate-and-order-MSI-queue-consumption.patch
+series/sparc64/generic-sparc64-msi/patches/0007-sparc64-quarantine-MSI-IDs-after-failed-hardware-tea.patch
+series/sparc64/generic-sparc64-msi/patches/0008-sparc64-stage-MSI-queue-enable-after-handler-registr.patch
+series/drivers/tg3-reset-fixes/patches/0001-tg3-defer-reset-work-when-RTNL-is-busy.patch
+series/drivers/tg3-reset-fixes/patches/0002-tg3-publish-TX-recovery-work-before-completing-NAPI.patch
+series/drivers/tg3-reset-fixes/patches/0003-tg3-gate-reset-work-across-device-teardown.patch
+series/drivers/tg3-reset-fixes/patches/0004-tg3-unregister-the-netdevice-before-releasing-its-re.patch
+series/drivers/tg3-bcm5718-byteorder/0001-tg3-normalize-inherited-BCM5718-register-byte-order.patch
+series/pci/pci-msi-loss-api/patches/0001-PCI-MSI-notify-drivers-of-permanent-interrupt-delive.patch
+series/drivers/tg3-msi-recovery/patches/0001-tg3-recover-permanent-MSI-loss-or-latch-the-interfac.patch
+series/fujitsu/m3000-oberon-msi/patches/0001-sparc64-support-shared-Oberon-MSI-queues-with-legacy.patch

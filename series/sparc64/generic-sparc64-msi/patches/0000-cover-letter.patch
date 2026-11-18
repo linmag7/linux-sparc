@@ -1,0 +1,102 @@
+From 41381b775f13fb10ad6d321d6cb498b026ce3c31 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 16 Oct 2026 23:02:10 +0200
+Subject: [PATCH 0/8] sparc64: fix MSI queue initialization and teardown
+
+These eight patches fix shared sparc64 MSI initialization, dispatch and
+teardown paths used by Fire and sun4v PCI. They apply to vanilla v7.3-rc1
+and do not depend on M3000 support or the separate ULi PCI quirk.
+
+Clear MSI descriptor associations before freeing software IRQs, publish
+dispatch state before registering queue handlers, retain hardware-published
+storage on failed initialization, and synchronize consumers on teardown.
+Check hardware invalidation, quarantine failed message IDs, and register
+handlers before enabling queues, preserving sun4v's activation order.
+
+Validate queue heads and MSI numbers before accessing arrays or hardware
+state. Consume out-of-range records without dispatch, retain progress
+after wrap/error, and keep the existing drain-until-empty behavior.
+
+On an Ultra45, the pre-follow-up kernel warned in msi_domain_free_descs()
+when closing the spare tg3 NIC. The combined follow-up did not warn over
+three teardown/reallocation cycles. Register, memory, internal loopback
+and interrupt tests passed; NVRAM/link failures were also present in the
+baseline and external loopback was not requested. Network transfers
+passed checksum comparisons. This is combined-series comparison evidence,
+not a bisection of the descriptor fix alone.
+
+The same machine exposed an invalid MSI record of 257 with only 256
+allocated entries. The old source uses the value as an unchecked table
+index and Fire register offset. This demonstrates a concrete invalid-
+access path; actual memory corruption or wrong-IRQ dispatch was not traced.
+A ULi EHCI function reads back programmed MSI1 as 0x0101. Its separate
+no-MSI quirk restored working USB control and bulk reads on this machine.
+That quirk is not a prerequisite for validating and discarding bad records.
+
+Testing and limits
+------------------
+On a T5120 primary domain with eight vCPUs and 8GB RAM, vanilla v7.3-rc1
+and vanilla plus these eight patches were booted from RAM-only network
+images. Both used the same configuration except LOCALVERSION, with block
+drivers and modules disabled. No M3000 patches or PCI quirks were included.
+The Intel 82571 NET0 device used e1000e and native pci_sun4v MSI at 1Gb/s;
+MSI mode and interrupt delivery were checked in sysfs and /proc/interrupts.
+
+Vanilla warned in msi_domain_free_descs() on the first interface open,
+through pci_disable_msi() and e1000e_reset_interrupt_capability(), and
+became tainted. With this series, the same sequence produced no warning
+and the kernel remained untainted. This compares the complete eight-patch
+series with vanilla; the warning was not bisected to an individual patch.
+
+Both kernels passed an 8MiB download and upload, three link down/up
+cycles, and three driver unbind/bind cycles. Each rebind was followed by
+another 8MiB download. All transfer hashes matched, MSI interrupts were
+delivered, and final NIC error/drop counters were zero. No throughput
+improvement is claimed.
+
+Ultra45 coverage uses the combined follow-up described above, whose final
+source is unchanged by the split into independent series. Its final kernel
+was untainted and networking used MSI. This is Fire UP coverage, not Fire
+SMP coverage or an independent eight-patch-only Ultra45 boot.
+
+The T5120 tests exercised MSI on one physical Ethernet function, not
+MSI-X. Allocation or hypervisor failures, queue overflow, pending-record
+races and all quarantine/reuse paths were not exercised on hardware.
+Mocks cover failure paths and queue handling, not hardware completion.
+Unknown record types retain the existing error path. Safe message-ID reuse
+still relies on existing hardware assumptions; these patches do not prove
+a hardware drain protocol or solve continuous-input handler fairness.
+
+Patch 1 is self-contained and can be applied ahead of patches 2-8. Its
+runtime evidence above compares the full series, not patch 1 alone.
+
+Patches 1 and 6 request stable consideration for the observed bugs.
+Patch 6 requires patch 2's dispatch initialization changes or an equivalent
+adaptation; that pair applies to v7.3-rc1 without the other patches.
+Patches 2-4 retain Fixes tags but no automatic stable request. Older stable
+targets still need backport review and testing; patch 6 combines bounds
+checks, ordering and progress handling.
+
+All eight commits passed full sparc64 UP and SMP W=1 vmlinux builds
+on the vanilla base. Independent git am reproduces the exported tree.
+
+Codex assisted with implementation, source review and test preparation.
+
+base-commit: cee9395acd8043be0644b25c34bfa86623f2b935
+
+Magnus Lindholm (8):
+  sparc64: disassociate MSI descriptors after IRQ teardown
+  sparc64: initialize MSI dispatch before requesting queue IRQs
+  sparc64: retain published MSI queues on initialization failure
+  sparc64: synchronize MSI queue dispatch before releasing IRQs
+  sparc64: check MSI invalidation before completing teardown
+  sparc64: validate and order MSI queue consumption
+  sparc64: quarantine MSI IDs after failed hardware teardown
+  sparc64: stage MSI queue enable after handler registration
+
+ arch/sparc/kernel/pci_fire.c  | 61 ++++++++++++++++--------
+ arch/sparc/kernel/pci_impl.h  | 10 +++-
+ arch/sparc/kernel/pci_msi.c   | 90 +++++++++++++++++++++++++----------
+ arch/sparc/kernel/pci_sun4v.c | 73 +++++++++++++++-------------
+ 4 files changed, 155 insertions(+), 79 deletions(-)
+

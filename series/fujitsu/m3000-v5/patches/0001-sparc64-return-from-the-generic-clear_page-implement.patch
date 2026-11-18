@@ -1,0 +1,38 @@
+From 7652bf9d9d09f17c1f1eb5c49441c7c61f2eb863 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Wed, 14 Oct 2026 09:09:09 +0200
+Subject: [PATCH v5 01/10] sparc64: return from the generic clear_page
+ implementation
+
+GENclear_page falls through into generic_patch_pageops after clearing
+its page. The patcher then rewrites kernel text on each invocation.
+This executes 45 extra instructions, including six stores and three
+FLUSH instructions, before returning.
+
+Return once the clear loop completes, as GENcopy_page does. This affects
+processors using the generic page-operation fallback.
+
+Fixes: 6c70b6fc7b6f ("[SPARC64]: Do not assume sun4v chips have load-twin/store-init support.")
+Cc: stable@vger.kernel.org
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/lib/GENpage.S | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/arch/sparc/lib/GENpage.S b/arch/sparc/lib/GENpage.S
+index c143c4d1de3f..6ce11108e143 100644
+--- a/arch/sparc/lib/GENpage.S
++++ b/arch/sparc/lib/GENpage.S
+@@ -48,6 +48,9 @@ GENclear_user_page:
+ 	bne,pt	%xcc, 1b
+ 	 add	%o0, 64, %o0
+ 
++	retl
++	 nop
++
+ #define BRANCH_ALWAYS	0x10680000
+ #define NOP		0x01000000
+ #define GEN_DO_PATCH(OLD, NEW)	\
+-- 
+2.43.0
+

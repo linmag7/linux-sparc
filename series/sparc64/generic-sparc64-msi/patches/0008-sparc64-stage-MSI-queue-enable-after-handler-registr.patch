@@ -1,0 +1,166 @@
+From 41381b775f13fb10ad6d321d6cb498b026ce3c31 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 16 Oct 2026 07:15:25 +0200
+Subject: [PATCH 8/8] sparc64: stage MSI queue enable after handler
+ registration
+
+Separate queue activation from IRQ construction so a failed request_irq()
+does not newly enable queue delivery without a handler. Publish the queue
+IRQ cookie before activation and keep sun4v's existing valid-then-idle
+activation order.
+
+On initialization failure, attempt to disable every registered queue and
+wait for active CPU handlers. Check Fire queue state and sun4v validity,
+but retain published memory and handlers: neither check proves DMA drain.
+The pci_msiq_setvalid() and pci_msiq_getvalid() interfaces are documented
+in arch/sparc/include/asm/hypervisor.h.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/pci_fire.c  | 20 +++++++++++++++++++-
+ arch/sparc/kernel/pci_impl.h  |  2 ++
+ arch/sparc/kernel/pci_msi.c   | 20 +++++++++++++++++++-
+ arch/sparc/kernel/pci_sun4v.c | 19 ++++++++++++++++++-
+ 4 files changed, 58 insertions(+), 3 deletions(-)
+
+diff --git a/arch/sparc/kernel/pci_fire.c b/arch/sparc/kernel/pci_fire.c
+index dc37d80909ab..dd39036626c3 100644
+--- a/arch/sparc/kernel/pci_fire.c
++++ b/arch/sparc/kernel/pci_fire.c
+@@ -303,10 +303,26 @@ static int pci_fire_msiq_build_irq(struct pci_pbm_info *pbm,
+ 	if (!irq)
+ 		return -ENOMEM;
+ 
++	return irq;
++}
++
++static int pci_fire_msiq_enable(struct pci_pbm_info *pbm, unsigned long msiqid)
++{
+ 	upa_writeq(EVENT_QUEUE_CONTROL_SET_EN,
+ 		   pbm->pbm_regs + EVENT_QUEUE_CONTROL_SET(msiqid));
++	return 0;
++}
+ 
+-	return irq;
++static int pci_fire_msiq_disable(struct pci_pbm_info *pbm, unsigned long msiqid)
++{
++	unsigned long state;
++
++	upa_writeq(EVENT_QUEUE_CONTROL_CLEAR_DIS,
++		   pbm->pbm_regs + EVENT_QUEUE_CONTROL_CLEAR(msiqid));
++	state = upa_readq(pbm->pbm_regs + EVENT_QUEUE_STATE(msiqid));
++	/* The state readback does not establish completion of queue DMA. */
++	return (state & EVENT_QUEUE_STATE_MASK) == EVENT_QUEUE_STATE_IDLE ?
++		0 : -EBUSY;
+ }
+ 
+ static const struct sparc64_msiq_ops pci_fire_msiq_ops = {
+@@ -316,6 +332,8 @@ static const struct sparc64_msiq_ops pci_fire_msiq_ops = {
+ 	.msi_setup	=	pci_fire_msi_setup,
+ 	.msi_teardown	=	pci_fire_msi_teardown,
+ 	.msiq_alloc	=	pci_fire_msiq_alloc,
++	.msiq_enable	=	pci_fire_msiq_enable,
++	.msiq_disable	=	pci_fire_msiq_disable,
+ 	.msiq_build_irq	=	pci_fire_msiq_build_irq,
+ };
+ 
+diff --git a/arch/sparc/kernel/pci_impl.h b/arch/sparc/kernel/pci_impl.h
+index 15add2a8021f..24d23ff17ede 100644
+--- a/arch/sparc/kernel/pci_impl.h
++++ b/arch/sparc/kernel/pci_impl.h
+@@ -49,6 +49,8 @@ struct sparc64_msiq_ops {
+ 			 unsigned long msi, int is_msi64);
+ 	int (*msi_teardown)(struct pci_pbm_info *pbm, unsigned long msi);
+ 	int (*msiq_alloc)(struct pci_pbm_info *pbm);
++	int (*msiq_enable)(struct pci_pbm_info *pbm, unsigned long msiqid);
++	int (*msiq_disable)(struct pci_pbm_info *pbm, unsigned long msiqid);
+ 	int (*msiq_build_irq)(struct pci_pbm_info *pbm, unsigned long msiqid,
+ 			      unsigned long devino);
+ };
+diff --git a/arch/sparc/kernel/pci_msi.c b/arch/sparc/kernel/pci_msi.c
+index 675ac060f624..06597593eff5 100644
+--- a/arch/sparc/kernel/pci_msi.c
++++ b/arch/sparc/kernel/pci_msi.c
+@@ -313,7 +313,7 @@ static int bringup_one_msi_queue(struct pci_pbm_info *pbm,
+ 		return err;
+ 
+ 	pbm->msiq_irq_cookies[msiqid - pbm->msiq_first].irq = irq;
+-	return 0;
++	return ops->msiq_enable(pbm, msiqid);
+ }
+ 
+ static int sparc64_bringup_msi_queues(struct pci_pbm_info *pbm,
+@@ -334,6 +334,23 @@ static int sparc64_bringup_msi_queues(struct pci_pbm_info *pbm,
+ 	return 0;
+ }
+ 
++static void sparc64_disable_msi_queues(struct pci_pbm_info *pbm,
++				     const struct sparc64_msiq_ops *ops)
++{
++	int i;
++
++	for (i = 0; i < pbm->msiq_num; i++) {
++		struct sparc64_msiq_cookie *cookie = &pbm->msiq_irq_cookies[i];
++
++		if (!cookie->irq)
++			continue;
++		if (ops->msiq_disable(pbm, cookie->msiqid))
++			pr_err("%s: MSI queue %lu disable not confirmed\n",
++			       pbm->name, cookie->msiqid);
++		synchronize_irq(cookie->irq);
++	}
++}
++
+ void sparc64_pbm_msi_init(struct pci_pbm_info *pbm,
+ 			  const struct sparc64_msiq_ops *ops)
+ {
+@@ -457,6 +474,7 @@ void sparc64_pbm_msi_init(struct pci_pbm_info *pbm,
+ 	return;
+ 
+ retain_queues:
++	sparc64_disable_msi_queues(pbm, ops);
+ 	/* Published queues may still receive writes or have registered handlers. */
+ 	pr_err("%s: MSI initialization failed; retaining published queues\n",
+ 	       pbm->name);
+diff --git a/arch/sparc/kernel/pci_sun4v.c b/arch/sparc/kernel/pci_sun4v.c
+index dbff44ce76c6..bba103d228fb 100644
+--- a/arch/sparc/kernel/pci_sun4v.c
++++ b/arch/sparc/kernel/pci_sun4v.c
+@@ -1137,12 +1137,27 @@ static int pci_sun4v_msiq_build_irq(struct pci_pbm_info *pbm,
+ 	if (!irq)
+ 		return -ENOMEM;
+ 
++	return irq;
++}
++
++static int pci_sun4v_msiq_enable(struct pci_pbm_info *pbm, unsigned long msiqid)
++{
+ 	if (pci_sun4v_msiq_setvalid(pbm->devhandle, msiqid, HV_MSIQ_VALID))
+ 		return -EINVAL;
+ 	if (pci_sun4v_msiq_setstate(pbm->devhandle, msiqid, HV_MSIQSTATE_IDLE))
+ 		return -EINVAL;
++	return 0;
++}
+ 
+-	return irq;
++static int pci_sun4v_msiq_disable(struct pci_pbm_info *pbm, unsigned long msiqid)
++{
++	unsigned long valid;
++
++	if (pci_sun4v_msiq_setvalid(pbm->devhandle, msiqid, HV_MSIQ_INVALID))
++		return -EIO;
++	if (pci_sun4v_msiq_getvalid(pbm->devhandle, msiqid, &valid))
++		return -EIO;
++	return valid == HV_MSIQ_INVALID ? 0 : -EBUSY;
+ }
+ 
+ static const struct sparc64_msiq_ops pci_sun4v_msiq_ops = {
+@@ -1152,6 +1167,8 @@ static const struct sparc64_msiq_ops pci_sun4v_msiq_ops = {
+ 	.msi_setup	=	pci_sun4v_msi_setup,
+ 	.msi_teardown	=	pci_sun4v_msi_teardown,
+ 	.msiq_alloc	=	pci_sun4v_msiq_alloc,
++	.msiq_enable	=	pci_sun4v_msiq_enable,
++	.msiq_disable	=	pci_sun4v_msiq_disable,
+ 	.msiq_build_irq	=	pci_sun4v_msiq_build_irq,
+ };
+ 

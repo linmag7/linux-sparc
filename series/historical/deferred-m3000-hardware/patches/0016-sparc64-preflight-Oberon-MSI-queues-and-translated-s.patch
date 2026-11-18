@@ -1,0 +1,335 @@
+From 311c34ed961d033b39da13187ab1c3c4ed718242 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 16 Oct 2026 00:27:29 +0200
+Subject: [RFC PATCH 16/17] sparc64: preflight Oberon MSI queues and translated
+ storage
+
+Validate firmware queue geometry and inventory inherited MSI state on
+request. Check a coherent DMA allocation with a 512 KiB-aligned window
+before publishing any queue address or enabling delivery.
+
+Use translated DVMA with relaxed ordering clear to exercise the existing
+Oberon IOMMU path. This avoids assuming that Fire's physical-bypass
+prefix has the required Oberon ordering semantics; it does not establish
+that physical bypass is unusable. Keep this check opt-in.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ .../admin-guide/kernel-parameters.txt         |   6 +
+ arch/sparc/kernel/pci_fire.c                  | 214 ++++++++++++++++++
+ arch/sparc/kernel/pci_oberon_msi.h            |  50 ++++
+ 3 files changed, 270 insertions(+)
+ create mode 100644 arch/sparc/kernel/pci_oberon_msi.h
+
+diff --git a/Documentation/admin-guide/kernel-parameters.txt b/Documentation/admin-guide/kernel-parameters.txt
+index 68647ff4bdd2..6fb300844134 100644
+--- a/Documentation/admin-guide/kernel-parameters.txt
++++ b/Documentation/admin-guide/kernel-parameters.txt
+@@ -4827,6 +4827,12 @@ Kernel parameters
+ 				   Once locked, the boundary cannot be changed.
+ 				   1 indicates lock status, 0 indicates unlock status.
+ 
++	oberon_msi_preflight= [SPARC,EARLY]
++			Format: <bool>
++			Validate Oberon MSI queue geometry, inventory inherited
++			register state and check an unpublished coherent DMA
++			allocation. Default off; does not enable MSI delivery.
++
+ 	oops=panic	[KNL,EARLY]
+ 			Always panic on oopses. Default is to just kill the
+ 			process, but there is a small probability of
+diff --git a/arch/sparc/kernel/pci_fire.c b/arch/sparc/kernel/pci_fire.c
+index c0dcf30146f0..a887758f0b68 100644
+--- a/arch/sparc/kernel/pci_fire.c
++++ b/arch/sparc/kernel/pci_fire.c
+@@ -17,13 +17,17 @@
+ #include <linux/platform_device.h>
+ #include <linux/numa.h>
+ #include <linux/mutex.h>
++#include <linux/dma-mapping.h>
++#include <linux/sizes.h>
+ 
+ #include <asm/prom.h>
+ #include <asm/irq.h>
+ #include <asm/upa.h>
+ #include <asm/trap_block.h>
+ 
++#include "iommu_common.h"
+ #include "pci_impl.h"
++#include "pci_oberon_msi.h"
+ 
+ #define DRIVER_NAME	"fire"
+ #define PFX		DRIVER_NAME ": "
+@@ -341,6 +345,216 @@ static void pci_fire_msi_init(struct pci_pbm_info *pbm)
+ {
+ 	sparc64_pbm_msi_init(pbm, &pci_fire_msiq_ops);
+ }
++static bool oberon_msi_preflight;
++
++static int __init oberon_msi_preflight_setup(char *str)
++{
++	return kstrtobool(str, &oberon_msi_preflight);
++}
++early_param("oberon_msi_preflight", oberon_msi_preflight_setup);
++
++static int __init oberon_msi_cells(struct device_node *dp, const char *name,
++				   u32 *cells, size_t count)
++{
++	if (of_property_count_u32_elems(dp, name) != count)
++		return -EINVAL;
++	return of_property_read_u32_array(dp, name, cells, count);
++}
++
++static int __init oberon_msi_geometry(struct pci_pbm_info *pbm,
++				     struct oberon_msi_geometry *g)
++{
++	struct device_node *dp = pbm->op->dev.of_node;
++	const struct linux_prom64_registers *regs;
++	const char *range = "msi-eq-to-devino";
++	int len;
++
++	regs = of_get_property(dp, "reg", &len);
++	if (!regs || len < sizeof(*regs) || regs[0].reg_size < 0x34010 ||
++	    pbm->pbm_regs > ~0UL - 0x34010)
++		return -EINVAL;
++	if (!of_find_property(dp, range, NULL))
++		range = "msi-eq-devino";
++	if (oberon_msi_cells(dp, "#msi-eqs", &g->queues, 1) ||
++	    oberon_msi_cells(dp, "msi-eq-size", &g->entries, 1) ||
++	    oberon_msi_cells(dp, range, g->queue_range, 3) ||
++	    oberon_msi_cells(dp, "#msi", &g->messages, 1) ||
++	    oberon_msi_cells(dp, "msi-ranges", g->message_range, 2) ||
++	    oberon_msi_cells(dp, "msi-data-mask", &g->data_mask, 1) ||
++	    oberon_msi_cells(dp, "msix-data-width", &g->msix_width, 1) ||
++	    oberon_msi_cells(dp, "msi-address-ranges", g->addresses, 6) ||
++	    oberon_msi_cells(dp, "ino-bitmap", g->ino_bitmap, 2))
++		return -EINVAL;
++	return oberon_msi_validate(g);
++}
++
++struct oberon_msi_snapshot {
++	u64 base;
++	u64 mondo[2];
++	u64 address[2];
++	u64 message[5];
++	u64 map[256];
++	struct {
++		u64 state;
++		u64 head;
++		u64 tail;
++		u64 imap;
++		u64 iclr;
++	} queue[36];
++};
++
++static void __init oberon_msi_inventory(struct pci_pbm_info *pbm,
++				       const struct oberon_msi_geometry *g)
++{
++	unsigned long base = pbm->pbm_regs;
++	struct oberon_msi_snapshot *s;
++	u64 routes = 0, nonidle = 0;
++	unsigned int i, valid = 0;
++
++	s = kzalloc_obj(*s);
++	if (!s) {
++		dev_warn(&pbm->op->dev, "MSI inventory: allocation failed\n");
++		return;
++	}
++	/* Read only status/configuration registers, never SET/CLEAR aliases. */
++	s->base = upa_readq(base + EVENT_QUEUE_BASE_ADDR_REG);
++	s->mondo[0] = upa_readq(base + IMONDO_DATA0);
++	s->mondo[1] = upa_readq(base + IMONDO_DATA1);
++	s->address[0] = upa_readq(base + MSI_32BIT_ADDR);
++	s->address[1] = upa_readq(base + MSI_64BIT_ADDR);
++	for (i = 0; i < ARRAY_SIZE(s->message); i++)
++		s->message[i] = upa_readq(base + 0x30000 + i * 8);
++	for (i = 0; i < ARRAY_SIZE(s->map); i++)
++		s->map[i] = upa_readq(base + MSI_MAP(i));
++	for (i = 0; i < g->queues; i++) {
++		unsigned long ino = g->queue_range[2] + i;
++
++		s->queue[i].state = upa_readq(base + EVENT_QUEUE_STATE(i));
++		s->queue[i].head = upa_readq(base + EVENT_QUEUE_HEAD(i));
++		s->queue[i].tail = upa_readq(base + EVENT_QUEUE_TAIL(i));
++		s->queue[i].imap = upa_readq(base + 0x1000 + ino * 8);
++		s->queue[i].iclr = upa_readq(base + 0x1400 + ino * 8);
++	}
++
++	/* Capture before printk can enter the firmware console. */
++	dev_info(&pbm->op->dev,
++		 "MSI inventory: base=%016llx mondo=%016llx:%016llx addr=%016llx:%016llx\n",
++		 s->base, s->mondo[0], s->mondo[1], s->address[0], s->address[1]);
++	for (i = 0; i < ARRAY_SIZE(s->message); i++)
++		dev_info(&pbm->op->dev, "MSI inventory: message reg=%x value=%016llx\n",
++			 0x30000 + i * 8, s->message[i]);
++	for (i = 0; i < ARRAY_SIZE(s->map); i++) {
++		if (s->map[i] & MSI_MAP_VALID) {
++			valid++;
++			dev_info(&pbm->op->dev, "MSI inventory: map=%u value=%016llx\n",
++				 i, s->map[i]);
++		}
++	}
++	for (i = 0; i < g->queues; i++) {
++		if (s->queue[i].imap & IMAP_VALID)
++			routes |= 1ULL << i;
++		if ((s->queue[i].state & EVENT_QUEUE_STATE_MASK) != EVENT_QUEUE_STATE_IDLE)
++			nonidle |= 1ULL << i;
++		dev_info(&pbm->op->dev,
++			 "MSI inventory: eq=%u state=%llx head=%llx tail=%llx imap=%016llx iclr=%llx\n",
++			 i, s->queue[i].state, s->queue[i].head, s->queue[i].tail,
++			 s->queue[i].imap, s->queue[i].iclr);
++	}
++	dev_info(&pbm->op->dev,
++		 "MSI inventory: valid_maps=%u routes=%llx nonidle=%llx; ownership unproven\n",
++		 valid, routes, nonidle);
++	kfree(s);
++}
++
++static int __init oberon_msi_memory(struct pci_pbm_info *pbm,
++				   const struct oberon_msi_geometry *g)
++{
++	struct iommu *iommu = pbm->iommu;
++	struct pci_dev *pdev = NULL;
++	dma_addr_t dma, aligned;
++	unsigned long slot, i;
++	size_t bytes = g->queues * OBERON_EQ_BYTES;
++	void *buffer;
++	int err = -ENODEV;
++
++	for_each_pci_dev(pdev) {
++		if (pdev->dev.archdata.host_controller == pbm &&
++		    pdev->dev.archdata.iommu == iommu)
++			break;
++	}
++	if (!pdev)
++		return err;
++	/* Keep the original allocation for freeing the aligned subwindow. */
++	buffer = dma_alloc_coherent(&pdev->dev, SZ_1M, &dma, GFP_KERNEL);
++	if (!buffer) {
++		err = -ENOMEM;
++		goto out_put;
++	}
++	err = -EINVAL;
++	if (dma < iommu->tbl.table_map_base ||
++	    dma > (u64)iommu->dma_addr_mask + 1 - SZ_1M ||
++	    !IS_ALIGNED(dma, IO_PAGE_SIZE))
++		goto out_free;
++	aligned = ALIGN(dma, OBERON_EQ_ALIGNMENT);
++	if (aligned - dma > SZ_1M - bytes)
++		goto out_free;
++
++	/* Verify writable translated mappings without Oberon relaxed ordering. */
++	slot = (dma - iommu->tbl.table_map_base) >> IO_PAGE_SHIFT;
++	for (i = 0; i < SZ_1M / IO_PAGE_SIZE; i++) {
++		u64 expected = IOPTE_VALID | IOPTE_CACHE | IOPTE_WRITE |
++			(__pa(buffer + (i << IO_PAGE_SHIFT)) & IOPTE_PAGE);
++
++		if (iopte_val(iommu->page_table[slot + i]) != expected)
++			goto out_free;
++	}
++	err = 0;
++	dev_info(&pbm->op->dev,
++		 "MSI preflight: translated window %pad size %zu verified, not published\n",
++		 &aligned, bytes);
++
++out_free:
++	/* No queue base or MSI map has ever pointed at this allocation. */
++	dma_free_coherent(&pdev->dev, SZ_1M, buffer, dma);
++out_put:
++	pci_dev_put(pdev);
++	return err;
++}
++
++static int __init oberon_msi_preflight_init(void)
++{
++	struct pci_pbm_info *pbm;
++
++	if (!oberon_msi_preflight)
++		return 0;
++	for (pbm = pci_pbm_root; pbm; pbm = pbm->next) {
++		struct oberon_msi_geometry g;
++		int err;
++
++		if (!pbm->is_oberon)
++			continue;
++		err = oberon_msi_geometry(pbm, &g);
++		if (err) {
++			dev_warn(&pbm->op->dev, "MSI preflight: invalid geometry (%d)\n",
++				 err);
++			continue;
++		}
++		oberon_msi_inventory(pbm, &g);
++		err = oberon_msi_memory(pbm, &g);
++		if (err) {
++			dev_warn(&pbm->op->dev, "MSI preflight: memory check failed (%d)\n",
++				 err);
++			continue;
++		}
++		dev_info(&pbm->op->dev,
++			 "MSI preflight: %u queues, %u messages; delivery disabled\n",
++			 g.queues, g.messages);
++	}
++	return 0;
++}
++late_initcall(oberon_msi_preflight_init);
++
++
+ #else /* CONFIG_PCI_MSI */
+ static void pci_fire_msi_init(struct pci_pbm_info *pbm)
+ {
+diff --git a/arch/sparc/kernel/pci_oberon_msi.h b/arch/sparc/kernel/pci_oberon_msi.h
+new file mode 100644
+index 000000000000..75f842c5c32f
+--- /dev/null
++++ b/arch/sparc/kernel/pci_oberon_msi.h
+@@ -0,0 +1,50 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef PCI_OBERON_MSI_H
++#define PCI_OBERON_MSI_H
++
++#include <linux/errno.h>
++#include <linux/types.h>
++
++#define OBERON_EQ_ALIGNMENT (512U * 1024)
++#define OBERON_EQ_BYTES (128U * 64)
++
++struct oberon_msi_geometry {
++	u32 queues;
++	u32 entries;
++	u32 queue_range[3];
++	u32 messages;
++	u32 message_range[2];
++	u32 data_mask;
++	u32 msix_width;
++	u32 addresses[6];
++	u32 ino_bitmap[2];
++};
++
++static inline int oberon_msi_validate(const struct oberon_msi_geometry *g)
++{
++	u64 bitmap = ((u64)g->ino_bitmap[1] << 32) | g->ino_bitmap[0];
++	u32 first = g->queue_range[2];
++	u32 i;
++
++	/* Initially support the zero-based queue layout observed on M3000. */
++	if (!g->queues || g->queues > 36 || g->entries != 128 ||
++	    g->queue_range[0] || g->queue_range[1] != g->queues ||
++	    first < 0x18 || first > 0x3b || g->queues > 0x3c - first)
++		return -EINVAL;
++	if (!g->messages || g->messages > 256 ||
++	    g->message_range[0] > 255 ||
++	    g->messages > 256 - g->message_range[0] ||
++	    g->message_range[1] != g->messages ||
++	    g->data_mask != 0xff || g->msix_width < 8 || g->msix_width > 32)
++		return -EINVAL;
++	if (g->addresses[0] || (g->addresses[1] & 0xffff) ||
++	    (g->addresses[4] & 0xffff) ||
++	    g->addresses[2] != 0x10000 || g->addresses[5] != 0x10000)
++		return -EINVAL;
++	for (i = 0; i < g->queues; i++)
++		if (!(bitmap & (1ULL << (first + i))))
++			return -EINVAL;
++	return 0;
++}
++
++#endif /* PCI_OBERON_MSI_H */

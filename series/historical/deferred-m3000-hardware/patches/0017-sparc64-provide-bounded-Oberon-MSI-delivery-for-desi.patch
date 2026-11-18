@@ -1,0 +1,437 @@
+From 79eda5e1f32827e57e18223bffaced959f2f7543 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 16 Oct 2026 00:27:44 +0200
+Subject: [RFC PATCH 17/17] sparc64: provide bounded Oberon MSI delivery for
+ design review
+
+Exercise one selected Ethernet function through a translated event
+queue. Refuse inherited queue use, retain published storage and retire
+message numbers until reboot so late records cannot alias a new IRQ.
+
+Expose mode selection and counters through debugfs. Keep allocation and
+teardown bounded while shared Fire initialization unwind, pending-record
+handling and safe message reuse remain unresolved. Neither error IRQ
+capture nor automatic MSI activation is included.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ .../admin-guide/kernel-parameters.txt         |  10 +
+ arch/sparc/kernel/pci_fire.c                  | 370 ++++++++++++++++++
+ 2 files changed, 380 insertions(+)
+
+diff --git a/Documentation/admin-guide/kernel-parameters.txt b/Documentation/admin-guide/kernel-parameters.txt
+index 6fb300844134..c6122366c235 100644
+--- a/Documentation/admin-guide/kernel-parameters.txt
++++ b/Documentation/admin-guide/kernel-parameters.txt
+@@ -4827,6 +4827,16 @@ Kernel parameters
+ 				   Once locked, the boundary cannot be changed.
+ 				   1 indicates lock status, 0 indicates unlock status.
+ 
++	oberon_msi_device= [SPARC,EARLY]
++			Format: <PCI domain:bus:slot.function>
++			Opt in one Oberon Ethernet function to bounded MSI tests.
++			Requires DEBUG_FS=y and HOTPLUG_CPU=n. Uses one queue,
++			retains its storage and retires message IDs for this boot.
++			Default off. Debug controls are under debugfs/oberon-msi:
++			mode selects 1 (MSI only) or 2 (MSI/MSI-X) while the
++			device has no vectors; status reports queue counters.
++			Firmware ownership and queue draining remain unproven.
++
+ 	oberon_msi_preflight= [SPARC,EARLY]
+ 			Format: <bool>
+ 			Validate Oberon MSI queue geometry, inventory inherited
+diff --git a/arch/sparc/kernel/pci_fire.c b/arch/sparc/kernel/pci_fire.c
+index a887758f0b68..1f954b389999 100644
+--- a/arch/sparc/kernel/pci_fire.c
++++ b/arch/sparc/kernel/pci_fire.c
+@@ -19,6 +19,8 @@
+ #include <linux/mutex.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/sizes.h>
++#include <linux/debugfs.h>
++#include <linux/seq_file.h>
+ 
+ #include <asm/prom.h>
+ #include <asm/irq.h>
+@@ -161,6 +163,8 @@ struct pci_msiq_entry {
+ #define MSI_CLEAR(MSI)			(0x028000UL + (MSI) * 0x8UL)
+ #define  MSI_CLEAR_EQWR_N		0x4000000000000000UL
+ 
++#define OBERON_MSI_IMAP_MONDO		BIT_ULL(63)
++
+ #define IMONDO_DATA0			0x02C000UL
+ #define  IMONDO_DATA0_DATA		0xffffffffffffffc0UL
+ 
+@@ -554,6 +558,372 @@ static int __init oberon_msi_preflight_init(void)
+ }
+ late_initcall(oberon_msi_preflight_init);
+ 
++/* The opt-in delivery experiment keeps published storage for this boot. */
++struct oberon_msi_test {
++	struct pci_pbm_info *pbm;
++	struct pci_dev *pdev;
++	void *allocation;
++	dma_addr_t dma;
++	struct pci_msiq_entry *queue;
++	unsigned long imap, iclr;
++	unsigned int irq, next, head;
++	unsigned int vectors[256];
++	unsigned int mode;
++	atomic64_t records;
++	bool failed;
++	struct mutex lock; /* Serialize vector allocation and mode changes. */
++};
++
++static char oberon_msi_device[32];
++static struct oberon_msi_test *oberon_msi_test;
++
++static int __init oberon_msi_device_setup(char *str)
++{
++	return strscpy(oberon_msi_device, str, sizeof(oberon_msi_device)) < 0 ?
++		-EINVAL : 0;
++}
++early_param("oberon_msi_device", oberon_msi_device_setup);
++
++static void oberon_msi_test_stop(struct oberon_msi_test *t)
++{
++	unsigned long regs = t->pbm->pbm_regs;
++	unsigned int i;
++
++	WRITE_ONCE(t->failed, true);
++	upa_writeq(upa_readq(t->imap) & ~IMAP_VALID, t->imap);
++	upa_readq(t->imap);
++	for (i = 0; i < 256; i++)
++		upa_writeq(0, regs + MSI_MAP(i));
++	upa_readq(regs + MSI_MAP(255));
++	upa_writeq(EVENT_QUEUE_CONTROL_CLEAR_DIS,
++		   regs + EVENT_QUEUE_CONTROL_CLEAR(0));
++	upa_readq(regs + EVENT_QUEUE_STATE(0));
++	/* No drain guarantee is assumed: storage and the handler remain pinned. */
++}
++
++static irqreturn_t oberon_msi_test_interrupt(int irq, void *cookie)
++{
++	struct oberon_msi_test *t = cookie;
++	unsigned long regs = t->pbm->pbm_regs;
++	unsigned int n;
++
++	if (READ_ONCE(t->failed))
++		return IRQ_HANDLED;
++	if (upa_readq(regs + EVENT_QUEUE_STATE(0)) != EVENT_QUEUE_STATE_ACTIVE ||
++	    upa_readq(regs + EVENT_QUEUE_TAIL(0)) & EVENT_QUEUE_TAIL_OFLOW)
++		goto fault;
++	for (n = 0; n < 128; n++) {
++		struct pci_msiq_entry *e = &t->queue[t->head];
++		u64 word = READ_ONCE(e->word0);
++		unsigned int msi, vector, type;
++
++		if (!(word & MSIQ_WORD0_FMT_TYPE))
++			break;
++		dma_rmb();
++		type = (word & MSIQ_WORD0_FMT_TYPE) >>
++			(MSIQ_WORD0_FMT_TYPE_SHIFT + 3);
++		msi = word & MSIQ_WORD0_DATA0;
++		if ((type != MSIQ_TYPE_MSI32 && type != MSIQ_TYPE_MSI64) ||
++		    msi >= 256)
++			goto fault;
++		upa_writeq(MSI_CLEAR_EQWR_N, regs + MSI_CLEAR(msi));
++		vector = READ_ONCE(t->vectors[msi]);
++		if (vector)
++			generic_handle_irq(vector);
++		WRITE_ONCE(e->word0, word & ~MSIQ_WORD0_FMT_TYPE);
++		t->head = (t->head + 1) & 127;
++		atomic64_inc(&t->records);
++	}
++	/* Publish consumed records before advancing the hardware head. */
++	dma_wmb();
++	upa_writeq(t->head, regs + EVENT_QUEUE_HEAD(0));
++	upa_readq(regs + EVENT_QUEUE_HEAD(0));
++	return IRQ_HANDLED;
++
++fault:
++	oberon_msi_test_stop(t);
++	dev_err(&t->pdev->dev, "Oberon MSI queue fault; delivery stopped, storage retained\n");
++	return IRQ_HANDLED;
++}
++
++static struct irq_chip oberon_msi_test_chip = {
++	.name = "Oberon-MSI-test",
++	.irq_mask = pci_msi_mask_irq,
++	.irq_unmask = pci_msi_unmask_irq,
++	.irq_enable = pci_msi_unmask_irq,
++	.irq_disable = pci_msi_mask_irq,
++};
++
++static int oberon_msi_test_setup(unsigned int *irq_p, struct pci_dev *pdev,
++				 struct msi_desc *desc)
++{
++	struct oberon_msi_test *t = oberon_msi_test;
++	struct msi_msg msg = {};
++	unsigned long regs;
++	unsigned int msi, irq;
++	int err = -ENOSPC;
++
++	if (!t || pdev != t->pdev)
++		return -ENOSPC;
++	mutex_lock(&t->lock);
++	if (READ_ONCE(t->failed) || t->next == 256 ||
++	    (desc->pci.msi_attrib.is_msix && t->mode != 2))
++		goto unlock;
++	irq = irq_alloc(0, 0);
++	if (!irq) {
++		err = -ENOMEM;
++		goto unlock;
++	}
++	/* Retire each message number permanently so late records cannot alias. */
++	msi = t->next++;
++	regs = t->pbm->pbm_regs;
++	irq_set_chip_and_handler_name(irq, &oberon_msi_test_chip,
++				      handle_simple_irq, "MSI");
++	WRITE_ONCE(t->vectors[msi], irq);
++	/* Publish dispatch state before making the hardware message map valid. */
++	wmb();
++	upa_writeq(MSI_CLEAR_EQWR_N, regs + MSI_CLEAR(msi));
++	upa_writeq(MSI_MAP_VALID, regs + MSI_MAP(msi));
++	if ((upa_readq(regs + MSI_MAP(msi)) &
++	     (MSI_MAP_VALID | MSI_MAP_EQNUM)) != MSI_MAP_VALID) {
++		oberon_msi_test_stop(t);
++		WRITE_ONCE(t->vectors[msi], 0);
++		synchronize_irq(t->irq);
++		irq_free(irq);
++		err = -EIO;
++		goto unlock;
++	}
++	if (desc->pci.msi_attrib.is_64) {
++		msg.address_hi = t->pbm->msi64_start >> 32;
++		msg.address_lo = t->pbm->msi64_start;
++	} else {
++		msg.address_lo = t->pbm->msi32_start;
++	}
++	msg.data = msi;
++	irq_set_msi_desc(irq, desc);
++	pci_write_msi_msg(irq, &msg);
++	*irq_p = irq;
++	err = 0;
++unlock:
++	mutex_unlock(&t->lock);
++	return err;
++}
++
++static void oberon_msi_test_teardown(unsigned int irq, struct pci_dev *pdev)
++{
++	struct oberon_msi_test *t = oberon_msi_test;
++	struct msi_desc *desc = irq_get_msi_desc(irq);
++	unsigned int i;
++
++	if (!t || t->pdev != pdev)
++		return;
++	mutex_lock(&t->lock);
++	for (i = 0; i < t->next; i++) {
++		if (READ_ONCE(t->vectors[i]) != irq)
++			continue;
++		upa_writeq(0, t->pbm->pbm_regs + MSI_MAP(i));
++		if (upa_readq(t->pbm->pbm_regs + MSI_MAP(i)) & MSI_MAP_VALID)
++			oberon_msi_test_stop(t);
++		WRITE_ONCE(t->vectors[i], 0);
++		synchronize_irq(t->irq);
++		irq_set_msi_desc(irq, NULL);
++		desc->irq = 0;
++		irq_set_chip(irq, NULL);
++		irq_free(irq);
++		break;
++	}
++	mutex_unlock(&t->lock);
++}
++
++static int oberon_msi_mode_get(void *arg, u64 *value)
++{
++	struct oberon_msi_test *t = arg;
++
++	*value = READ_ONCE(t->mode);
++	return 0;
++}
++
++static int oberon_msi_mode_set(void *arg, u64 value)
++{
++	struct oberon_msi_test *t = arg;
++	unsigned int i;
++
++	if (value != 1 && value != 2)
++		return -EINVAL;
++	guard(mutex)(&t->lock);
++	if (READ_ONCE(t->failed))
++		return -EIO;
++	for (i = 0; i < t->next; i++)
++		if (READ_ONCE(t->vectors[i]))
++			return -EBUSY;
++	if (t->pdev->msi_enabled || t->pdev->msix_enabled)
++		return -EBUSY;
++	WRITE_ONCE(t->mode, value);
++	return 0;
++}
++DEFINE_DEBUGFS_ATTRIBUTE(oberon_msi_mode_fops, oberon_msi_mode_get,
++			oberon_msi_mode_set, "%llu\n");
++
++static int oberon_msi_status_show(struct seq_file *seq, void *unused)
++{
++	struct oberon_msi_test *t = seq->private;
++
++	seq_printf(seq, "records=%lld retired=%u failed=%u queue_irq=%u\n",
++		   atomic64_read(&t->records), READ_ONCE(t->next),
++		   READ_ONCE(t->failed), t->irq);
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(oberon_msi_status);
++
++static int __init oberon_msi_test_init(void)
++{
++	struct oberon_msi_geometry g;
++	struct oberon_msi_test *t;
++	struct dentry *dir, *file;
++	struct pci_dev *pdev = NULL;
++	struct pci_pbm_info *pbm;
++	unsigned long regs, slot, i;
++	dma_addr_t aligned;
++	int err;
++
++	if (!oberon_msi_device[0])
++		return 0;
++	if (IS_ENABLED(CONFIG_HOTPLUG_CPU) || !IS_ENABLED(CONFIG_DEBUG_FS))
++		return -EOPNOTSUPP;
++	for_each_pci_dev(pdev)
++		if (!strcmp(pci_name(pdev), oberon_msi_device))
++			break;
++	if (!pdev)
++		return -ENODEV;
++	pbm = pdev->dev.archdata.host_controller;
++	err = -EINVAL;
++	if (!pbm || !pbm->is_oberon || pbm->setup_msi_irq ||
++	    (pdev->class >> 8) != PCI_CLASS_NETWORK_ETHERNET ||
++	    pdev->msi_enabled || pdev->msix_enabled)
++		goto put;
++	err = oberon_msi_geometry(pbm, &g);
++	if (err)
++		goto put;
++	if (g.message_range[0] || g.messages != 256)
++		goto invalid;
++	regs = pbm->pbm_regs;
++	if (upa_readq(regs + EVENT_QUEUE_BASE_ADDR_REG) ||
++	    upa_readq(regs + MSI_32BIT_ADDR) || upa_readq(regs + MSI_64BIT_ADDR))
++		goto busy;
++	for (i = 0; i < 5; i++)
++		if (upa_readq(regs + 0x30000 + i * 8))
++			goto busy;
++	for (i = 0; i < 256; i++)
++		if (upa_readq(regs + MSI_MAP(i)))
++			goto busy;
++	for (i = 0; i < g.queues; i++)
++		if (upa_readq(regs + EVENT_QUEUE_STATE(i)) != EVENT_QUEUE_STATE_IDLE ||
++		    upa_readq(regs + EVENT_QUEUE_HEAD(i)) ||
++		    upa_readq(regs + EVENT_QUEUE_TAIL(i)) ||
++		    upa_readq(regs + 0x1000 + (g.queue_range[2] + i) * 8) ||
++		    upa_readq(regs + 0x1400 + (g.queue_range[2] + i) * 8))
++			goto busy;
++	t = kzalloc_obj(*t);
++	if (!t) {
++		err = -ENOMEM;
++		goto put;
++	}
++	t->pbm = pbm;
++	t->pdev = pdev;
++	t->mode = 1;
++	mutex_init(&t->lock);
++	t->allocation = dma_alloc_coherent(&pdev->dev, SZ_1M, &t->dma, GFP_KERNEL);
++	if (!t->allocation) {
++		err = -ENOMEM;
++		goto free;
++	}
++	err = -EINVAL;
++	if (t->dma < pbm->iommu->tbl.table_map_base ||
++	    t->dma > (u64)pbm->iommu->dma_addr_mask + 1 - SZ_1M ||
++	    !IS_ALIGNED(t->dma, IO_PAGE_SIZE))
++		goto free_dma;
++	aligned = ALIGN(t->dma, OBERON_EQ_ALIGNMENT);
++	if (aligned - t->dma > SZ_1M - g.queues * OBERON_EQ_BYTES)
++		goto free_dma;
++	slot = (t->dma - pbm->iommu->tbl.table_map_base) >> IO_PAGE_SHIFT;
++	for (i = 0; i < SZ_1M / IO_PAGE_SIZE; i++) {
++		u64 expected = IOPTE_VALID | IOPTE_CACHE | IOPTE_WRITE |
++			(__pa(t->allocation + (i << IO_PAGE_SHIFT)) & IOPTE_PAGE);
++
++		if (iopte_val(pbm->iommu->page_table[slot + i]) != expected)
++			goto free_dma;
++	}
++	t->queue = t->allocation + aligned - t->dma;
++	t->imap = regs + 0x1000 + g.queue_range[2] * 8;
++	t->iclr = regs + 0x1400 + g.queue_range[2] * 8;
++	upa_writeq(OBERON_MSI_IMAP_MONDO | BIT_ULL(6), t->imap);
++	t->irq = oberon_build_irq((pbm->portid << 6) + g.queue_range[2] - BIT(6),
++				  t->iclr, t->imap);
++	err = request_irq(t->irq, oberon_msi_test_interrupt,
++			  IRQF_NO_AUTOEN | IRQF_NO_THREAD | IRQF_NOBALANCING,
++			  "Oberon-MSIQ-test", t);
++	if (err)
++		goto restore_imap;
++	/* From publication onward, neither the DMA mapping nor handler is freed. */
++	dma_wmb();
++	upa_writeq(aligned, regs + EVENT_QUEUE_BASE_ADDR_REG);
++	upa_writeq(pbm->portid << 6, regs + IMONDO_DATA0);
++	upa_writeq(0, regs + IMONDO_DATA1);
++	pbm->msi32_start = g.addresses[1];
++	pbm->msi64_start = (u64)g.addresses[3] << 32 | g.addresses[4];
++	upa_writeq(pbm->msi32_start, regs + MSI_32BIT_ADDR);
++	upa_writeq(pbm->msi64_start, regs + MSI_64BIT_ADDR);
++	if (upa_readq(regs + EVENT_QUEUE_BASE_ADDR_REG) != aligned ||
++	    upa_readq(regs + IMONDO_DATA0) != ((u64)pbm->portid << 6) ||
++	    upa_readq(regs + IMONDO_DATA1) ||
++	    upa_readq(regs + MSI_32BIT_ADDR) != pbm->msi32_start ||
++	    upa_readq(regs + MSI_64BIT_ADDR) != pbm->msi64_start)
++		goto retained;
++	upa_writeq(EVENT_QUEUE_CONTROL_SET_EN, regs + EVENT_QUEUE_CONTROL_SET(0));
++	if (upa_readq(regs + EVENT_QUEUE_STATE(0)) != EVENT_QUEUE_STATE_ACTIVE)
++		goto retained;
++	oberon_msi_test = t;
++	atomic64_set(&t->records, 0);
++	dir = debugfs_create_dir("oberon-msi", NULL);
++	if (IS_ERR(dir))
++		goto retained;
++	file = debugfs_create_file("mode", 0600, dir, t, &oberon_msi_mode_fops);
++	if (IS_ERR(file))
++		goto remove_debugfs;
++	file = debugfs_create_file("status", 0400, dir, t,
++				   &oberon_msi_status_fops);
++	if (IS_ERR(file))
++		goto remove_debugfs;
++	enable_irq(t->irq);
++	pbm->teardown_msi_irq = oberon_msi_test_teardown;
++	pbm->setup_msi_irq = oberon_msi_test_setup;
++	dev_info(&pdev->dev, "Oberon MSI experiment ready: queue 0, IRQ %u, DVMA %pad; storage pinned\n",
++		 t->irq, &aligned);
++	return 0;
++
++remove_debugfs:
++	debugfs_remove_recursive(dir);
++retained:
++	oberon_msi_test_stop(t);
++	dev_err(&pdev->dev, "Oberon MSI initialization failed; storage and handler retained\n");
++	return -EIO;
++restore_imap:
++	upa_writeq(0, t->imap);
++free_dma:
++	dma_free_coherent(&pdev->dev, SZ_1M, t->allocation, t->dma);
++free:
++	kfree(t);
++put:
++	pci_dev_put(pdev);
++	return err;
++busy:
++	err = -EBUSY;
++	goto put;
++invalid:
++	err = -EINVAL;
++	goto put;
++}
++late_initcall_sync(oberon_msi_test_init);
+ 
+ #else /* CONFIG_PCI_MSI */
+ static void pci_fire_msi_init(struct pci_pbm_info *pbm)

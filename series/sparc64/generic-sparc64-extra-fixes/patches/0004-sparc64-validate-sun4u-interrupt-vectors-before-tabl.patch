@@ -1,0 +1,41 @@
+From 55c9a95ec80b79ebe6efee85193374cc454d8137 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Wed, 14 Oct 2026 09:09:13 +0200
+Subject: [PATCH 4/4] sparc64: validate sun4u interrupt vectors before table
+ lookup
+
+build_irq() uses the hardware interrupt number plus inofixup to index
+ivector_table without checking its size. Reject an out-of-range result
+before forming the bucket pointer; an unsigned comparison also rejects
+negative values.
+
+Use nr_ivec rather than assuming a fixed encoding or increasing the
+table size. The default table has 0xfff entries, so vector 0xfff itself
+is already outside the allocation. The generic-IRQ conversion removed
+an earlier ino > NUM_IVECS check; reject equality as well.
+
+Fixes: e18e2a00efc8 ("[SPARC64]: Move over to GENERIC_HARDIRQS.")
+Assisted-by: LLM
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/irq_64.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/arch/sparc/kernel/irq_64.c b/arch/sparc/kernel/irq_64.c
+index 4f480a8cb66a..3f1a5b82a09f 100644
+--- a/arch/sparc/kernel/irq_64.c
++++ b/arch/sparc/kernel/irq_64.c
+@@ -615,6 +615,10 @@ unsigned int build_irq(int inofixup, unsigned long iclr, unsigned long imap)
+ 	BUG_ON(tlb_type == hypervisor);
+ 
+ 	ino = (upa_readq(imap) & (IMAP_IGN | IMAP_INO)) + inofixup;
++	if ((unsigned int)ino >= nr_ivec) {
++		prom_printf("IRQ: interrupt vector %d is out of range.\n", ino);
++		prom_halt();
++	}
+ 	bucket = &ivector_table[ino];
+ 	irq = bucket_get_irq(__pa(bucket));
+ 	if (!irq) {
+-- 
+2.43.0
+

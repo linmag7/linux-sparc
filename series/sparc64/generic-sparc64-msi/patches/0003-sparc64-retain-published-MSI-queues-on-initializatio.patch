@@ -1,0 +1,158 @@
+From a095f3fa16ce0b733dc27d8c23148bf6ed15797e Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 16 Oct 2026 00:39:57 +0200
+Subject: [PATCH 3/8] sparc64: retain published MSI queues on initialization
+ failure
+
+A later queue registration failure can leave earlier handlers active.
+Freeing their cookies and queue storage permits CPU and device accesses
+to released memory. A failed sun4v queue configuration can also follow
+successful registrations of part of the allocation.
+
+Retain published storage and handler metadata on these failures, while
+leaving device MSI callbacks unavailable. Keep geometry intact for any
+registered handlers. Allocation failure before publication still frees
+ordinary metadata. Remove the unsafe published-queue free callbacks.
+
+This bounds retention to failed initialization; it does not establish a
+hardware drain protocol or claim that retained queues are quiescent.
+
+Fixes: 35a17eb6a87c ("[SPARC64]: Add PCI MSI support on Niagara.")
+Fixes: 759f89e03c9e ("[SPARC64]: Consolidate MSI support code.")
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/pci_fire.c  | 13 -------------
+ arch/sparc/kernel/pci_impl.h  |  1 -
+ arch/sparc/kernel/pci_msi.c   | 16 ++++++++++------
+ arch/sparc/kernel/pci_sun4v.c | 25 +------------------------
+ 4 files changed, 11 insertions(+), 44 deletions(-)
+
+diff --git a/arch/sparc/kernel/pci_fire.c b/arch/sparc/kernel/pci_fire.c
+index c35a8e3c1eae..759d2cc78269 100644
+--- a/arch/sparc/kernel/pci_fire.c
++++ b/arch/sparc/kernel/pci_fire.c
+@@ -261,18 +261,6 @@ static int pci_fire_msiq_alloc(struct pci_pbm_info *pbm)
+ 	return 0;
+ }
+ 
+-static void pci_fire_msiq_free(struct pci_pbm_info *pbm)
+-{
+-	unsigned long pages, order;
+-
+-	order = get_order(512 * 1024);
+-	pages = (unsigned long) pbm->msi_queues;
+-
+-	free_pages(pages, order);
+-
+-	pbm->msi_queues = NULL;
+-}
+-
+ static int pci_fire_msiq_build_irq(struct pci_pbm_info *pbm,
+ 				   unsigned long msiqid,
+ 				   unsigned long devino)
+@@ -312,7 +300,6 @@ static const struct sparc64_msiq_ops pci_fire_msiq_ops = {
+ 	.msi_setup	=	pci_fire_msi_setup,
+ 	.msi_teardown	=	pci_fire_msi_teardown,
+ 	.msiq_alloc	=	pci_fire_msiq_alloc,
+-	.msiq_free	=	pci_fire_msiq_free,
+ 	.msiq_build_irq	=	pci_fire_msiq_build_irq,
+ };
+ 
+diff --git a/arch/sparc/kernel/pci_impl.h b/arch/sparc/kernel/pci_impl.h
+index 83718876f1d4..1f749989df1b 100644
+--- a/arch/sparc/kernel/pci_impl.h
++++ b/arch/sparc/kernel/pci_impl.h
+@@ -43,7 +43,6 @@ struct sparc64_msiq_ops {
+ 			 unsigned long msi, int is_msi64);
+ 	int (*msi_teardown)(struct pci_pbm_info *pbm, unsigned long msi);
+ 	int (*msiq_alloc)(struct pci_pbm_info *pbm);
+-	void (*msiq_free)(struct pci_pbm_info *pbm);
+ 	int (*msiq_build_irq)(struct pci_pbm_info *pbm, unsigned long msiqid,
+ 			      unsigned long devino);
+ };
+diff --git a/arch/sparc/kernel/pci_msi.c b/arch/sparc/kernel/pci_msi.c
+index 118c42349f11..81594d300dc0 100644
+--- a/arch/sparc/kernel/pci_msi.c
++++ b/arch/sparc/kernel/pci_msi.c
+@@ -409,18 +409,16 @@ void sparc64_pbm_msi_init(struct pci_pbm_info *pbm,
+ 		}
+ 
+ 		if (ops->msiq_alloc(pbm)) {
++			if (pbm->msi_queues)
++				goto retain_queues;
+ 			msi_table_free(pbm);
+ 			msi_bitmap_free(pbm);
+ 			goto no_msi;
+ 		}
+ 
+ 		pbm->msi_ops = ops;
+-		if (sparc64_bringup_msi_queues(pbm, ops)) {
+-			ops->msiq_free(pbm);
+-			msi_table_free(pbm);
+-			msi_bitmap_free(pbm);
+-			goto no_msi;
+-		}
++		if (sparc64_bringup_msi_queues(pbm, ops))
++			goto retain_queues;
+ 
+ 		printk(KERN_INFO "%s: MSI Queue first[%u] num[%u] count[%u] "
+ 		       "devino[0x%x]\n",
+@@ -447,6 +445,12 @@ void sparc64_pbm_msi_init(struct pci_pbm_info *pbm,
+ 	}
+ 	return;
+ 
++retain_queues:
++	/* Published queues may still receive writes or have registered handlers. */
++	pr_err("%s: MSI initialization failed; retaining published queues\n",
++	       pbm->name);
++	return;
++
+ no_msi:
+ 	pbm->msiq_num = 0;
+ 	printk(KERN_INFO "%s: No MSI support.\n", pbm->name);
+diff --git a/arch/sparc/kernel/pci_sun4v.c b/arch/sparc/kernel/pci_sun4v.c
+index 61f14b4c8f90..290557b1f6a0 100644
+--- a/arch/sparc/kernel/pci_sun4v.c
++++ b/arch/sparc/kernel/pci_sun4v.c
+@@ -1111,32 +1111,10 @@ static int pci_sun4v_msiq_alloc(struct pci_pbm_info *pbm)
+ 	return 0;
+ 
+ h_error:
+-	free_pages(pages, order);
++	/* A preceding configuration call may have published part of the storage. */
+ 	return -EINVAL;
+ }
+ 
+-static void pci_sun4v_msiq_free(struct pci_pbm_info *pbm)
+-{
+-	unsigned long q_size, alloc_size, pages, order;
+-	int i;
+-
+-	for (i = 0; i < pbm->msiq_num; i++) {
+-		unsigned long msiqid = pbm->msiq_first + i;
+-
+-		(void) pci_sun4v_msiq_conf(pbm->devhandle, msiqid, 0UL, 0);
+-	}
+-
+-	q_size = pbm->msiq_ent_count * sizeof(struct pci_sun4v_msiq_entry);
+-	alloc_size = (pbm->msiq_num * q_size);
+-	order = get_order(alloc_size);
+-
+-	pages = (unsigned long) pbm->msi_queues;
+-
+-	free_pages(pages, order);
+-
+-	pbm->msi_queues = NULL;
+-}
+-
+ static int pci_sun4v_msiq_build_irq(struct pci_pbm_info *pbm,
+ 				    unsigned long msiqid,
+ 				    unsigned long devino)
+@@ -1161,7 +1139,6 @@ static const struct sparc64_msiq_ops pci_sun4v_msiq_ops = {
+ 	.msi_setup	=	pci_sun4v_msi_setup,
+ 	.msi_teardown	=	pci_sun4v_msi_teardown,
+ 	.msiq_alloc	=	pci_sun4v_msiq_alloc,
+-	.msiq_free	=	pci_sun4v_msiq_free,
+ 	.msiq_build_irq	=	pci_sun4v_msiq_build_irq,
+ };
+ 

@@ -1,0 +1,10 @@
+series/fujitsu/m3000-v5/patches/0001-sparc64-return-from-the-generic-clear_page-implement.patch
+series/fujitsu/m3000-v5/patches/0002-sparc64-honor-queued-spinlock-layout-in-secondary-st.patch
+series/fujitsu/m3000-v5/patches/0003-sparc64-avoid-huge-kernel-PUD-mappings-with-small-ha.patch
+series/fujitsu/m3000-v5/patches/0004-sparc64-stop-IRQ-setup-when-descriptor-allocation-fa.patch
+series/fujitsu/m3000-v5/patches/0005-sparc64-validate-Fire-register-properties-before-ini.patch
+series/fujitsu/m3000-v5/patches/0006-sparc64-retain-the-DMA-segment-start-across-SG-entri.patch
+series/fujitsu/m3000-v5/patches/0007-sparc64-zero-newly-allocated-IOMMU-page-tables.patch
+series/fujitsu/m3000-v5/patches/0008-sparc64-add-SPARC64-VII-CPU-MMU-and-SMP-support.patch
+series/fujitsu/m3000-v5/patches/0009-sparc64-add-M3000-Oberon-PCIe-support.patch
+series/fujitsu/m3000-v5/patches/0010-hvc-add-an-M3000-firmware-console-backend.patch

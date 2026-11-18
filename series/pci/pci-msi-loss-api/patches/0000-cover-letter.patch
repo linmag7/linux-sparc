@@ -1,0 +1,53 @@
+From: Magnus Lindholm <linmag7@gmail.com>
+Subject: [RFC PATCH 0/1] PCI/MSI: notify drivers of permanent interrupt delivery loss
+
+Provide a sleepable notification for permanently contained MSI delivery
+loss and a separate software-only failure handoff. The generic API applies
+independently of SPARC; its tg3 consumer and Oberon caller are separate.
+
+The controller blocks new allocations across driver rebinding and retains
+resources that may still receive writes. The core holds the device lock
+for each callback, but not across the pair of calls. Drivers must inspect
+the current binding's state and preserve an already-legacy replacement.
+
+Recovery takes a runtime-PM reference; failure notification does not resume
+the device. That callback marks software unavailable without initiating
+hardware access. It does not prove that existing work or DMA has stopped.
+No helper imposes a callback timeout or retries a failed notification.
+
+PCI error recovery coordinates channel errors and reset/resume. Here the
+endpoint can remain usable while its host MSI service is permanently lost.
+The current tg3 error path restores saved PCI state and restarts the
+existing setup; it does not release vectors and select legacy interrupts.
+Allocation blocking alone cannot convert an already-open interface, and
+controller-driven vector freeing would bypass driver teardown ownership.
+
+We therefore propose explicit driver notification. Recovery may access
+hardware; the separate failure method cannot initiate hardware accesses
+when resume or recovery failed. The documentation compares allocation
+blocking, PCI error recovery, notifier and forced-unbind alternatives.
+PCI feedback on a dedicated API versus equivalent error-recovery extensions
+is requested before the dependent hardware support can be merged.
+
+The combined eight-CPU M3000 test allocated 12 MSI-X vectors across all
+four onboard BCM5718 ports. GLAN0 and GLAN2 passed concurrent hashed
+8 MiB transfers in both directions and reopen testing. Exhausting the
+256 lifetime IDs moved spare ports to legacy IRQs while management kept
+its MSI-X vectors; both paths passed further transfers with taint zero.
+
+A separate diagnostic image stopped the shared MSI queue. All four
+callbacks completed, all 12 vectors were released and the ports reopened
+on legacy IRQs. Both connected ports passed further transfers. This was
+a queue-stop test, not an actual PCIe error or queue-overflow injection.
+
+UP/SMP W=1 links passed; UP was not booted. Earlier x86-64 PM-enabled
+PCI/tg3 object builds and MSI-disabled tg3 builds also passed. Existing
+unrelated warnings in initial full builds remain. The API review changed
+only comments and documentation; no new full-kernel build or boot is
+claimed. Twenty-one extracted API cases passed with ASan/UBSan, checking
+outcomes, mock lock/PM accounting and dispatch to a replacement binding.
+These are sequential mocked services, not runtime-PM or lockdep tests.
+
+Actual runtime-PM, AER, hot removal and arbitrary drivers are not qualified.
+The callback API and permanent-retention policy require subsystem review.
+Codex assisted with implementation, source review and test preparation.

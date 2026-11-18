@@ -1,0 +1,47 @@
+From ccde618af4eb5c06a51406c3b39570fd528cee5b Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 6 Nov 2026 13:18:09 +0100
+Subject: [RFC PATCH 2/3] serial: sunsu: avoid waiting for a port lock
+ during panic
+
+The panic console flush can run after oops_in_progress is cleared and
+other CPUs have stopped. Try the port lock while panic is in progress
+instead of waiting for a stopped owner. If it is unavailable, drop that
+console chunk without touching registers whose configuration may be
+incomplete. Preserve the existing non-panic SysRq and oops paths.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ drivers/tty/serial/sunsu.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/tty/serial/sunsu.c b/drivers/tty/serial/sunsu.c
+index 7ca4b6a73c89..8744271d9604 100644
+--- a/drivers/tty/serial/sunsu.c
++++ b/drivers/tty/serial/sunsu.c
+@@ -18,6 +18,7 @@
+ 
+ #include <linux/module.h>
+ #include <linux/kernel.h>
++#include <linux/panic.h>
+ #include <linux/spinlock.h>
+ #include <linux/errno.h>
+ #include <linux/tty.h>
+@@ -1276,12 +1277,16 @@ static void sunsu_console_write(struct console *co, const char *s,
+ 	struct uart_sunsu_port *up = &sunsu_ports[co->index];
+ 	unsigned long flags;
+ 	unsigned int ier;
++	bool panic = panic_in_progress();
+ 	int locked = 1;
+ 
+-	if (up->port.sysrq || oops_in_progress)
++	if (up->port.sysrq || oops_in_progress || panic)
+ 		locked = uart_port_trylock_irqsave(&up->port, &flags);
+ 	else
+ 		uart_port_lock_irqsave(&up->port, &flags);
++	/* A stopped owner may have left DLAB set; do not access an unowned UART. */
++	if (panic && !locked)
++		return;
+ 
+ 	/*
+ 	 *	First save the UER then disable the interrupts

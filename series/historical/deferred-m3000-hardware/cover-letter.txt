@@ -1,0 +1,64 @@
+This M3000-specific development RFC applies after the ten-patch M3000
+v4 series. Generic sparc64 MSI fixes and the ULi PCI quirk are now separate
+series. Neither is a source-level prerequisite for these 17 patches;
+use all relevant fixes together for integration testing.
+
+Patches 1-15 provide passive Oberon snapshots and bounded capture,
+containment, captured RUC clear/acknowledgment and route-selection controls.
+Patches 16-17 provide MSI resource validation and restricted opt-in delivery.
+Review fixups have been folded into the original patches. This preserves
+the tested final integration tree without changing v4.
+
+This is not a merge-ready unrestricted hardware backend. The capture
+portion remains development work: its private controls, IRQ registration
+and lifetime management need further cleanup before posting. The bounded
+MSI allocator remains separate from the shared Fire implementation. The
+generic fixes can be reviewed independently without waiting for this work.
+
+Testing
+-------
+Earlier M3000 images exercised eight CPUs, one MSI and three MSI-X vectors,
+internal tg3 tests and checksum-verified network transfers. Error tests
+captured inherited RUC, cleared its source/summary and acknowledged a
+masked route. Fresh delivery to a newly selected CPU remains unproven.
+These are historical results, not an M3000 boot of this exact tip.
+
+The final integrated tree, including separate generic fixes and PCI quirk,
+is unchanged from the tested Ultra45 image. That boot validates coexistence
+on Fire, not Oberon functionality. The independent M3000-only series has
+not been booted. Build/application evidence is included with this bundle.
+
+Remaining implementation gates
+------------------------------
+Oberon MSI uses one selected Ethernet function and one fixed queue.
+Message numbers are retired until reboot, with a 256-message lifetime
+limit, and published storage and handlers remain pinned. Automatic
+activation, multiple devices/bridges, CPU hotplug and per-vector affinity
+remain unfinished.
+
+Queue disable, map readback and synchronize_irq() do not prove that earlier
+device writes and queue records have drained. Firmware ownership,
+inherited queue state and hardware rules for safe ID reuse/reclamation
+remain unresolved. The separate shared fixes do not answer those questions.
+
+Capture controls are not a stable ABI. Only captured RUC has a bounded
+clear/ack path. Arbitrary fault handling, overflow recovery, reboot/kexec
+handoff and full recovery remain open. Panic through firmware is not a
+recovery guarantee. The independently submitted tg3 fix remains separate.
+
+All 17 commits passed full sparc64 UP and SMP W=1 vmlinux builds
+on the v4 base. Independent git am reproduces the exported tree.
+
+Codex assisted with implementation, source review and test preparation.
+
+base-commit: cee9395acd8043be0644b25c34bfa86623f2b935
+prerequisite-patch-id: e868c0a73b769642f4fe50938cd974c60c4907e2
+prerequisite-patch-id: 17f393fb6426bab69d621f79e3563b1471f70fed
+prerequisite-patch-id: 9abd96184ec34339b5646784dfd673c2a0e935d1
+prerequisite-patch-id: 0929bd654419e3762ffa507ab4f3440d05fbd9fd
+prerequisite-patch-id: 87a05a76d782761957216d52606b6dae10e9fcde
+prerequisite-patch-id: 4860af18708e15d81a08c502ab89b118ca4b4383
+prerequisite-patch-id: ed4f55093237f83f4729cc996b61ee1fb532f36a
+prerequisite-patch-id: 00a02463420f5aab8883e7d9b58dad71a743d668
+prerequisite-patch-id: 37e1bb1ce31633547e7d9b8b4af0e6c58e9ba08e
+prerequisite-patch-id: bba64c07c2b426d0cbef0a40d6373234e2fe2fd2

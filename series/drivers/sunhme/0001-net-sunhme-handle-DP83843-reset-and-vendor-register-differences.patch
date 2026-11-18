@@ -1,0 +1,136 @@
+From be69c68be274a6e5e7a28e6df026201d4141447d Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Thu, 1 Oct 2026 19:12:24 +0200
+Subject: [RFC PATCH 1/1] net: sunhme: handle DP83843 reset and vendor
+ register differences
+
+HME's DP83840 setup writes bit 5 of register 0x17, which enables TWISTER
+loopback on DP83843. Identify DP83843 by PHY ID and exclude it from those
+vendor-register writes in initialization and link recovery.
+
+Allow the PHY's 500 us post-reset access delay and bounded reset polling.
+Use the existing autonegotiation timer when ANRESTART remains set beyond
+the short poll, avoiding premature forced-link fallback.
+
+DP83843 PHYTER datasheet SNLS021, section 5.3 (p.37), Table 6 (pp.46-47)
+and Table 21 (pp.58-59) define reset timing, ANRESTART and register 0x17.
+The changes are selected by PHY ID, independent of the host platform.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ drivers/net/ethernet/sun/sunhme.c | 37 ++++++++++++++++++++++++++-----
+ 1 file changed, 31 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/net/ethernet/sun/sunhme.c b/drivers/net/ethernet/sun/sunhme.c
+index a70f704eb9f3..c387acfb95a9 100644
+--- a/drivers/net/ethernet/sun/sunhme.c
++++ b/drivers/net/ethernet/sun/sunhme.c
+@@ -586,6 +586,12 @@ static int set_happy_link_modes(struct happy_meal *hp, void __iomem *tregs)
+ 	return 1;
+ }
+ 
++static bool is_dp83843_phy(struct happy_meal *hp)
++{
++	return hp->sw_physid1 == 0x2000 &&
++	       (hp->sw_physid2 & 0xfff0) == 0x5c10;
++}
++
+ static int is_lucent_phy(struct happy_meal *hp)
+ {
+ 	void __iomem *tregs = hp->tcvregs;
+@@ -659,6 +665,15 @@ happy_meal_begin_auto_negotiation(struct happy_meal *hp,
+ 		hp->sw_bmcr |= BMCR_ANRESTART;
+ 		happy_meal_tcvr_write(hp, tregs, MII_BMCR, hp->sw_bmcr);
+ 
++		/*
++		 * DP83843 may retain ANRESTART beyond the short busy poll.
++		 * Let the existing bounded link timer observe completion.
++		 */
++		if (is_dp83843_phy(hp)) {
++			hp->timer_state = arbwait;
++			goto start_timer;
++		}
++
+ 		/* BMCR_ANRESTART self clears when the process has begun. */
+ 
+ 		timeout = 64;  /* More than enough. */
+@@ -700,7 +715,7 @@ happy_meal_begin_auto_negotiation(struct happy_meal *hp,
+ 		}
+ 		happy_meal_tcvr_write(hp, tregs, MII_BMCR, hp->sw_bmcr);
+ 
+-		if (!is_lucent_phy(hp)) {
++		if (!is_dp83843_phy(hp) && !is_lucent_phy(hp)) {
+ 			/* OK, seems we need do disable the transceiver for the first
+ 			 * tick to make sure we get an accurate link state at the
+ 			 * second tick.
+@@ -714,6 +729,7 @@ happy_meal_begin_auto_negotiation(struct happy_meal *hp,
+ 		hp->timer_state = ltrywait;
+ 	}
+ 
++start_timer:
+ 	hp->timer_ticks = 0;
+ 	hp->happy_timer.expires = jiffies + (12 * HZ)/10;  /* 1.2 sec. */
+ 	add_timer(&hp->happy_timer);
+@@ -742,7 +758,7 @@ static void happy_meal_timer(struct timer_list *t)
+ 			hp->sw_bmcr = BMCR_SPEED100;
+ 			happy_meal_tcvr_write(hp, tregs, MII_BMCR, hp->sw_bmcr);
+ 
+-			if (!is_lucent_phy(hp)) {
++			if (!is_dp83843_phy(hp) && !is_lucent_phy(hp)) {
+ 				/* OK, seems we need do disable the transceiver for the first
+ 				 * tick to make sure we get an accurate link state at the
+ 				 * second tick.
+@@ -816,7 +832,7 @@ static void happy_meal_timer(struct timer_list *t)
+ 		hp->sw_bmsr = happy_meal_tcvr_read(hp, tregs, MII_BMSR);
+ 		hp->sw_csconfig = happy_meal_tcvr_read(hp, tregs, DP83840_CSCONFIG);
+ 		if (hp->timer_ticks == 1) {
+-			if (!is_lucent_phy(hp)) {
++			if (!is_dp83843_phy(hp) && !is_lucent_phy(hp)) {
+ 				/* Re-enable transceiver, we'll re-enable the transceiver next
+ 				 * tick, then check link state on the following tick.
+ 				 */
+@@ -828,7 +844,7 @@ static void happy_meal_timer(struct timer_list *t)
+ 			break;
+ 		}
+ 		if (hp->timer_ticks == 2) {
+-			if (!is_lucent_phy(hp)) {
++			if (!is_dp83843_phy(hp) && !is_lucent_phy(hp)) {
+ 				hp->sw_csconfig &= ~(CSCONFIG_TCVDISAB);
+ 				happy_meal_tcvr_write(hp, tregs,
+ 						      DP83840_CSCONFIG, hp->sw_csconfig);
+@@ -859,7 +875,7 @@ static void happy_meal_timer(struct timer_list *t)
+ 					happy_meal_begin_auto_negotiation(hp, tregs, NULL);
+ 					goto out;
+ 				}
+-				if (!is_lucent_phy(hp)) {
++				if (!is_dp83843_phy(hp) && !is_lucent_phy(hp)) {
+ 					hp->sw_csconfig = happy_meal_tcvr_read(hp, tregs,
+ 									       DP83840_CSCONFIG);
+ 					hp->sw_csconfig |= CSCONFIG_TCVDISAB;
+@@ -1028,8 +1044,17 @@ static int happy_meal_tcvr_reset(struct happy_meal *hp, void __iomem *tregs)
+ 		}
+ 	}
+ 
++	/* Identify the selected PHY before reset changes its register state. */
++	hp->sw_physid1 = happy_meal_tcvr_read(hp, tregs, MII_PHYSID1);
++	hp->sw_physid2 = happy_meal_tcvr_read(hp, tregs, MII_PHYSID2);
++	if (is_dp83843_phy(hp))
++		tries = 128;
++
+ 	ASD("BMCR_RESET...\n");
+ 	happy_meal_tcvr_write(hp, tregs, MII_BMCR, BMCR_RESET);
++	/* DP83843 SNLS021, section 5.3: no serial MII access for 500 us. */
++	if (is_dp83843_phy(hp))
++		udelay(500);
+ 
+ 	while (--tries) {
+ 		result = happy_meal_tcvr_read(hp, tregs, MII_BMCR);
+@@ -1070,7 +1095,7 @@ static int happy_meal_tcvr_reset(struct happy_meal *hp, void __iomem *tregs)
+ 		return -1;
+ 	}
+ 	ASD("SUCCESS and CSCONFIG_DFBYPASS\n");
+-	if (!is_lucent_phy(hp)) {
++	if (!is_dp83843_phy(hp) && !is_lucent_phy(hp)) {
+ 		result = happy_meal_tcvr_read(hp, tregs,
+ 					      DP83840_CSCONFIG);
+ 		happy_meal_tcvr_write(hp, tregs,

@@ -1,0 +1,59 @@
+From ff2f1394c20766c345e9c89988d3b0fa7483b6c2 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 16 Oct 2026 17:28:06 +0200
+Subject: [PATCH 1/1] PCI: Disable MSI for ULi 5239 revision 01 with subsystem
+ 5238
+
+On an Ultra45, the ULi 10b9:5239 EHCI controller (revision 01,
+subsystem 10b9:5238) duplicates the low MSI data byte into the high
+byte on word and dword writes. Word writes of 0001, 0002 and 1234
+read back as 0101, 0202 and 3434; a dword write of 00000001 reads
+back as 00000101. The adjacent OHCI function preserves these values.
+
+Programming MSI 1 therefore produces a value outside the bridge's
+allocated MSI range. Disable MSI so the USB PCI HCD selects INTx.
+Limit the match to the tested identity; this does not establish that
+the subsystem ID causes the fault or that other revisions are safe.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+
+Observed on Ultra45, with EHCI unbound and MSI disabled:
+  word 0000 -> 0000; 0001 -> 0101; 0002 -> 0202
+  word 0010 -> 1010; 00a5 -> a5a5; 1234 -> 3434
+  dword 00000001 -> 00000101
+Independent byte reads confirmed the high byte. Writing the high byte
+00 cleared it; writing 12 did not install 12. A subsequent low-byte
+write of 34 read back as 0034. Byte writes are not an established general
+workaround for arbitrary MSI data. Original data was restored afterward.
+The adjacent OHCI function preserved word writes 0001, 0002 and 1234.
+
+Boot testing: automatic INTx, three EHCI rebinds, hub control requests,
+and 640MiB of read-only direct storage I/O with matching SHA256 pairs.
+NIC MSI remained functional; taint stayed zero. Other architectures and
+revisions have not been tested. The scope is intentionally conservative.
+
+ drivers/pci/quirks.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/drivers/pci/quirks.c b/drivers/pci/quirks.c
+index de9bbccda21f..ed509775b2ef 100644
+--- a/drivers/pci/quirks.c
++++ b/drivers/pci/quirks.c
+@@ -1942,6 +1942,16 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4389, quirk_no_msi);
+ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x438a, quirk_no_msi);
+ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x438b, quirk_no_msi);
+ 
++/* This ULi EHCI revision duplicates the low MSI data byte on word writes. */
++static void quirk_uli_ehci_no_msi(struct pci_dev *dev)
++{
++	if (dev->revision == 0x01 &&
++	    dev->subsystem_vendor == PCI_VENDOR_ID_AL &&
++	    dev->subsystem_device == 0x5238)
++		quirk_no_msi(dev);
++}
++DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AL, 0x5239, quirk_uli_ehci_no_msi);
++
+ static void quirk_pcie_mch(struct pci_dev *pdev)
+ {
+ 	pdev->no_msi = 1;
