@@ -1,0 +1,9 @@
+2026-11-18: imported exact 15 original error commits and their v4 ancestry.
+All 25 original commits since vanilla and the new documentation commit have
+Magnus Lindholm sign-offs. All 15 stable patch IDs match the archived mail.
+Implementation tree: b921b2e987d73a672526c883ca70b0efeba162f5.
+New branch: archive/2026-11-18/fujitsu/m3000-error-interrupts-experimental
+Tip: 2a6c7fd5faf1e4a2f0d4c87f544f8a5b46fc4712
+No runtime changes, builds, boots or fault injections in this operation.
+The earlier catalog validation describes the preceding 18 kernel branches;
+this addition raises the count to 19 kernel branches plus patch-archive.

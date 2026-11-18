@@ -229,5 +229,34 @@
       "pci/msi-loss-api",
       "drivers/tg3-msi-recovery"
     ]
+  },
+  {
+    "branch": "archive/2026-11-18/fujitsu/m3000-error-interrupts-experimental",
+    "base": "0bce9f9cf842826de2dc674cca3008d2b38fd85b",
+    "tip": "2a6c7fd5faf1e4a2f0d4c87f544f8a5b46fc4712",
+    "patches": [
+      "series/historical/deferred-m3000-hardware/patches/0001-sparc64-add-opt-in-passive-Oberon-MMU-snapshots.patch",
+      "series/historical/deferred-m3000-hardware/patches/0002-sparc64-extend-passive-Oberon-snapshots-to-PEC-statu.patch",
+      "series/historical/deferred-m3000-hardware/patches/0003-sparc64-capture-candidate-Oberon-other-event-header-.patch",
+      "series/historical/deferred-m3000-hardware/patches/0004-sparc64-compare-early-and-runtime-passive-Oberon-sna.patch",
+      "series/historical/deferred-m3000-hardware/patches/0005-sparc64-prepare-a-disabled-Oberon-capture-once-IRQ-f.patch",
+      "series/historical/deferred-m3000-hardware/patches/0006-sparc64-preserve-bounded-Oberon-capture-fault-logs.patch",
+      "series/historical/deferred-m3000-hardware/patches/0007-sparc64-add-an-opt-in-Oberon-single-route-capture-ex.patch",
+      "series/historical/deferred-m3000-hardware/patches/0008-sparc64-check-captured-RUC-state-before-planning-rec.patch",
+      "series/historical/deferred-m3000-hardware/patches/0009-sparc64-add-a-one-shot-captured-RUC-clear-experiment.patch",
+      "series/historical/deferred-m3000-hardware/patches/0010-sparc64-add-a-masked-one-shot-Oberon-acknowledgment-.patch",
+      "series/historical/deferred-m3000-hardware/patches/0011-sparc64-add-one-bounded-Oberon-rearm-generation.patch",
+      "series/historical/deferred-m3000-hardware/patches/0012-sparc64-test-masked-Oberon-routing-to-another-CPU.patch",
+      "series/historical/deferred-m3000-hardware/patches/0013-sparc64-permit-Oberon-target-selection-after-acknowl.patch",
+      "series/historical/deferred-m3000-hardware/patches/0014-sparc64-panic-on-terminal-Oberon-capture-containment.patch",
+      "series/historical/deferred-m3000-hardware/patches/0015-sparc64-retain-Oberon-captures-delivered-after-maski.patch",
+      "series/fujitsu/m3000-error-interrupts/0016-sparc64-document-archived-Oberon-error-interrupt-experiments.patch"
+    ],
+    "status": "Experimental historical error-only subset; opt-in controls; not rebased onto v5",
+    "dependencies": [
+      "exact M3000 v4 tip 0bce9f9cf842826de2dc674cca3008d2b38fd85b"
+    ],
+    "implementation_tip": "6e75fedce50a17808e9737c629f8b630d0d7f4b8",
+    "implementation_tree": "b921b2e987d73a672526c883ca70b0efeba162f5"
   }
 ]

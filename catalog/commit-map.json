@@ -912,5 +912,165 @@
     "commit": "7c9d6f5241d03911a343cf8f95e4b260c0d4efbb",
     "tree": "c73224d6797ad8db902dd0c78992e0fc53173014",
     "subject": "sparc64: support shared Oberon MSI queues with legacy recovery"
+  },
+  {
+    "patch": "series/historical/deferred-m3000-hardware/patches/0001-sparc64-add-opt-in-passive-Oberon-MMU-snapshots.patch",
+    "sha256": "c3a95f41d7ec9a6f56cc9540a94634c69b17002f074d017bb88cd47d80091d50",
+    "original_export_commit": "029bdee9d0872f18e08b48ef00d098abb333ddb9",
+    "commit": "029bdee9d0872f18e08b48ef00d098abb333ddb9",
+    "parent": "0bce9f9cf842826de2dc674cca3008d2b38fd85b",
+    "tree": "22a489cfecec429c91cbbf8e28a60f3fe5b5285d",
+    "validation": "original commit imported and patch ID matched",
+    "subject": "sparc64: add opt-in passive Oberon MMU snapshots"
+  },
+  {
+    "patch": "series/historical/deferred-m3000-hardware/patches/0002-sparc64-extend-passive-Oberon-snapshots-to-PEC-statu.patch",
+    "sha256": "2fc7526af6a3bacd77cde9448b26affc7feadefb2fb195220051eb5f78a69bb2",
+    "original_export_commit": "22b9d2930197ca733dbcda578aed7a866b71e390",
+    "commit": "22b9d2930197ca733dbcda578aed7a866b71e390",
+    "parent": "029bdee9d0872f18e08b48ef00d098abb333ddb9",
+    "tree": "76fcac46497f9ff4694340b70ce237fb3493a2c3",
+    "validation": "original commit imported and patch ID matched",
+    "subject": "sparc64: extend passive Oberon snapshots to PEC status"
+  },
+  {
+    "patch": "series/historical/deferred-m3000-hardware/patches/0003-sparc64-capture-candidate-Oberon-other-event-header-.patch",
+    "sha256": "daac8c91077a6ef541ab54f002836e9610994ca52fa6d007b54e7a09025982a7",
+    "original_export_commit": "88a221935e498e6fe36746c86962608ab0942b14",
+    "commit": "88a221935e498e6fe36746c86962608ab0942b14",
+    "parent": "22b9d2930197ca733dbcda578aed7a866b71e390",
+    "tree": "f52acd49e94c9cf16d7c8cece49df805cf79c62f",
+    "validation": "original commit imported and patch ID matched",
+    "subject": "sparc64: capture candidate Oberon other-event header logs"
+  },
+  {
+    "patch": "series/historical/deferred-m3000-hardware/patches/0004-sparc64-compare-early-and-runtime-passive-Oberon-sna.patch",
+    "sha256": "980140913dc11d3cb9c03c08da73dc6803653efa2782885622a489d2b484e138",
+    "original_export_commit": "98cff5a46f75c27fc7f71ea4e8b4e262f0c34ec9",
+    "commit": "98cff5a46f75c27fc7f71ea4e8b4e262f0c34ec9",
+    "parent": "88a221935e498e6fe36746c86962608ab0942b14",
+    "tree": "e07947f41528d323536dcb1b98a4dd191885c55d",
+    "validation": "original commit imported and patch ID matched",
+    "subject": "sparc64: compare early and runtime passive Oberon snapshots"
+  },
+  {
+    "patch": "series/historical/deferred-m3000-hardware/patches/0005-sparc64-prepare-a-disabled-Oberon-capture-once-IRQ-f.patch",
+    "sha256": "0679fc30832f45f86ec90e3c2645442d93c01edf076feeed960e906d1aff92c5",
+    "original_export_commit": "1ed12b3ad58fcb2009d0c9a45f61def57aaade41",
+    "commit": "1ed12b3ad58fcb2009d0c9a45f61def57aaade41",
+    "parent": "98cff5a46f75c27fc7f71ea4e8b4e262f0c34ec9",
+    "tree": "6896b6cea1bf68519a4678f7ce105c56ccf2c519",
+    "validation": "original commit imported and patch ID matched",
+    "subject": "sparc64: prepare a disabled Oberon capture-once IRQ flow"
+  },
+  {
+    "patch": "series/historical/deferred-m3000-hardware/patches/0006-sparc64-preserve-bounded-Oberon-capture-fault-logs.patch",
+    "sha256": "fda2e397eadde09bb25f1be0bebdabfbba5ac93033d090d24331a2da8e417179",
+    "original_export_commit": "55cd3a54db24180fde09721565913d4d8bbc21a3",
+    "commit": "55cd3a54db24180fde09721565913d4d8bbc21a3",
+    "parent": "1ed12b3ad58fcb2009d0c9a45f61def57aaade41",
+    "tree": "5531233f6a450b0416d05ccbda113d245f346e5f",
+    "validation": "original commit imported and patch ID matched",
+    "subject": "sparc64: preserve bounded Oberon capture fault logs"
+  },
+  {
+    "patch": "series/historical/deferred-m3000-hardware/patches/0007-sparc64-add-an-opt-in-Oberon-single-route-capture-ex.patch",
+    "sha256": "53d88c2c6842d320c807554828ec903499d9e7107dc7835e18c0a382d648bda3",
+    "original_export_commit": "6f6114549bde2cd4c49092052609b85d1b2fa677",
+    "commit": "6f6114549bde2cd4c49092052609b85d1b2fa677",
+    "parent": "55cd3a54db24180fde09721565913d4d8bbc21a3",
+    "tree": "345ef07ec1b11be633da20039326741a50f172c5",
+    "validation": "original commit imported and patch ID matched",
+    "subject": "sparc64: add an opt-in Oberon single-route capture experiment"
+  },
+  {
+    "patch": "series/historical/deferred-m3000-hardware/patches/0008-sparc64-check-captured-RUC-state-before-planning-rec.patch",
+    "sha256": "5c7dac07662ff897023112d971cb6308c2299ac3eb5d035e212945b126ca3e6d",
+    "original_export_commit": "ebc704ee786eeeba4bd7a8b5bca0b15c8c82a57e",
+    "commit": "ebc704ee786eeeba4bd7a8b5bca0b15c8c82a57e",
+    "parent": "6f6114549bde2cd4c49092052609b85d1b2fa677",
+    "tree": "cb6d6c9721579db246fcadb203ba3b748019a6fa",
+    "validation": "original commit imported and patch ID matched",
+    "subject": "sparc64: check captured RUC state before planning recovery"
+  },
+  {
+    "patch": "series/historical/deferred-m3000-hardware/patches/0009-sparc64-add-a-one-shot-captured-RUC-clear-experiment.patch",
+    "sha256": "a30f5c3fbc588676e3a3e618d2c47595f7e82f6f10733a977e4e154138c7cee4",
+    "original_export_commit": "f753b1fb609c4e6901b799222b7d564c20b9d0ef",
+    "commit": "f753b1fb609c4e6901b799222b7d564c20b9d0ef",
+    "parent": "ebc704ee786eeeba4bd7a8b5bca0b15c8c82a57e",
+    "tree": "4f910c4848fc632e9ae4aa6bb693187c0c86ca00",
+    "validation": "original commit imported and patch ID matched",
+    "subject": "sparc64: add a one-shot captured RUC clear experiment"
+  },
+  {
+    "patch": "series/historical/deferred-m3000-hardware/patches/0010-sparc64-add-a-masked-one-shot-Oberon-acknowledgment-.patch",
+    "sha256": "6f93715d32c5152f44607076459a0f322dfc3a1e1bf95e0f47234074c0018f8d",
+    "original_export_commit": "0c517a98ef565d3490fd64b766bc4c5dbf9e06fc",
+    "commit": "0c517a98ef565d3490fd64b766bc4c5dbf9e06fc",
+    "parent": "f753b1fb609c4e6901b799222b7d564c20b9d0ef",
+    "tree": "d58d22ae92d0ad661d1b6c44c637c109b35770fe",
+    "validation": "original commit imported and patch ID matched",
+    "subject": "sparc64: add a masked one-shot Oberon acknowledgment experiment"
+  },
+  {
+    "patch": "series/historical/deferred-m3000-hardware/patches/0011-sparc64-add-one-bounded-Oberon-rearm-generation.patch",
+    "sha256": "8b6f7750d76bc9503f0d4fb21372f8e0e3ae17d75412ebc88dd755c08c444e3c",
+    "original_export_commit": "f08799b864d1b3a80bd7037d9fdd75e49911afdb",
+    "commit": "f08799b864d1b3a80bd7037d9fdd75e49911afdb",
+    "parent": "0c517a98ef565d3490fd64b766bc4c5dbf9e06fc",
+    "tree": "73dedbd5fbafbab8e614ed986fdc817576e06386",
+    "validation": "original commit imported and patch ID matched",
+    "subject": "sparc64: add one bounded Oberon rearm generation"
+  },
+  {
+    "patch": "series/historical/deferred-m3000-hardware/patches/0012-sparc64-test-masked-Oberon-routing-to-another-CPU.patch",
+    "sha256": "1b4032b784c4495a4ebea249d3ec3bb47920fe070b8481d03c209b0320296d22",
+    "original_export_commit": "e465457acaaafdf530acbbf0e150dc1a5a4c0d63",
+    "commit": "e465457acaaafdf530acbbf0e150dc1a5a4c0d63",
+    "parent": "f08799b864d1b3a80bd7037d9fdd75e49911afdb",
+    "tree": "f2eb73687e5db25693f0c5b39909b06c7b1b2156",
+    "validation": "original commit imported and patch ID matched",
+    "subject": "sparc64: test masked Oberon routing to another CPU"
+  },
+  {
+    "patch": "series/historical/deferred-m3000-hardware/patches/0013-sparc64-permit-Oberon-target-selection-after-acknowl.patch",
+    "sha256": "3869f22a8bbe4c75c29bed93e4a296bb0489e1a4d9a7ae0cd5e4da4efcbeb524",
+    "original_export_commit": "982711d6fa33a9253f999ee47187048df14ccffc",
+    "commit": "982711d6fa33a9253f999ee47187048df14ccffc",
+    "parent": "e465457acaaafdf530acbbf0e150dc1a5a4c0d63",
+    "tree": "ae1c678df5cd255cb601e6b3a0a7d8fc9e0ceea2",
+    "validation": "original commit imported and patch ID matched",
+    "subject": "sparc64: permit Oberon target selection after acknowledgment"
+  },
+  {
+    "patch": "series/historical/deferred-m3000-hardware/patches/0014-sparc64-panic-on-terminal-Oberon-capture-containment.patch",
+    "sha256": "117ae5f9133df4425567f64a32dc74f687fcee828c9ac39b93b6a9f851e76fc6",
+    "original_export_commit": "9663c938bcf75452170b16b82f56feeeba6ef416",
+    "commit": "9663c938bcf75452170b16b82f56feeeba6ef416",
+    "parent": "982711d6fa33a9253f999ee47187048df14ccffc",
+    "tree": "27ab471c34c02e892d1ab6a518b7cd9a15f6a58c",
+    "validation": "original commit imported and patch ID matched",
+    "subject": "sparc64: panic on terminal Oberon capture containment failure"
+  },
+  {
+    "patch": "series/historical/deferred-m3000-hardware/patches/0015-sparc64-retain-Oberon-captures-delivered-after-maski.patch",
+    "sha256": "c91360b6d5826dba7ae261a13bb873dba489bd1050d4a6a9f46e6e3f3c76acc4",
+    "original_export_commit": "6e75fedce50a17808e9737c629f8b630d0d7f4b8",
+    "commit": "6e75fedce50a17808e9737c629f8b630d0d7f4b8",
+    "parent": "9663c938bcf75452170b16b82f56feeeba6ef416",
+    "tree": "b921b2e987d73a672526c883ca70b0efeba162f5",
+    "validation": "original commit imported and patch ID matched",
+    "subject": "sparc64: retain Oberon captures delivered after masking"
+  },
+  {
+    "patch": "series/fujitsu/m3000-error-interrupts/0016-sparc64-document-archived-Oberon-error-interrupt-experiments.patch",
+    "sha256": "a10fb69d8e684cfa4e31d331747e27894e76326248bd9f3899d7ff9d9cd79449",
+    "original_export_commit": "2a6c7fd5faf1e4a2f0d4c87f544f8a5b46fc4712",
+    "commit": "2a6c7fd5faf1e4a2f0d4c87f544f8a5b46fc4712",
+    "parent": "6e75fedce50a17808e9737c629f8b630d0d7f4b8",
+    "tree": "7b0bdc18cd3ca0f15db6738d94b8cfb56fdf5350",
+    "validation": "new signed documentation-only commit",
+    "subject": "sparc64: document the archived Oberon error-interrupt experiments"
   }
 ]

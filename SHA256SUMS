@@ -102,3 +102,4 @@ a30f5c3fbc588676e3a3e618d2c47595f7e82f6f10733a977e4e154138c7cee4  series/histori
 c91360b6d5826dba7ae261a13bb873dba489bd1050d4a6a9f46e6e3f3c76acc4  series/historical/deferred-m3000-hardware/patches/0015-sparc64-retain-Oberon-captures-delivered-after-maski.patch
 0a7e8f0518933d39321a72734f99203eaaf95ecd3ae82a5fba9f2c3a401f8832  series/historical/deferred-m3000-hardware/patches/0016-sparc64-preflight-Oberon-MSI-queues-and-translated-s.patch
 f88ce4446fd6d8270174335fa656226ec8f0bcb218f760c46918316633494f20  series/historical/deferred-m3000-hardware/patches/0017-sparc64-provide-bounded-Oberon-MSI-delivery-for-desi.patch
+a10fb69d8e684cfa4e31d331747e27894e76326248bd9f3899d7ff9d9cd79449  series/fujitsu/m3000-error-interrupts/0016-sparc64-document-archived-Oberon-error-interrupt-experiments.patch

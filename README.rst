@@ -47,9 +47,11 @@ base and tip to identify each series' own commits independently of its stack.
 
 The original four-patch extra-fixes export is retained unchanged, but only
 patches 1, 3 and 4 are replayed. Patch 2 is superseded by consolidated generic
-patches 2 and 3. Do not apply both. The 17-patch historical hardware export
-mixes deferred error handling and superseded MSI; it is not replayed or
-stacked on the new Oberon series. Error interrupts remain deferred.
+patches 2 and 3. Do not apply both. The 17-patch historical hardware export mixes error handling and superseded
+MSI. Its first 15 original commits are now available on the separate
+m3000-error-interrupts-experimental branch, on their exact v4 base. Its MSI
+patches 16-17 remain superseded. Do not stack this branch on current Oberon
+MSI without integration work; general error-interrupt support remains deferred.
 
 The current MSI proposal has a finite 256-ID budget and retains published
 queue memory. It remains an RFC, requiring PCI API and retention-policy
@@ -137,3 +139,7 @@ hardware qualification are not prerequisites for personal publication.
 Keep Linux-maintainer submission readiness as a separate status. Do not
 change original patch files or overstate testing to make an archive appear
 release-ready. Retain old snapshots and publish later revisions separately.
+
+archive/2026-11-18/fujitsu/m3000-error-interrupts-experimental
+  Original 15 error-interrupt commits on exact M3000 v4, plus signed
+  dependency/limitations documentation. See series/fujitsu/m3000-error-interrupts/.
