@@ -22,6 +22,7 @@
 #include <linux/seq_file.h>
 #include <linux/ftrace.h>
 #include <linux/irq.h>
+#include <linux/irqdesc.h>
 #include <linux/string_choices.h>
 
 #include <asm/ptrace.h>
@@ -207,6 +208,17 @@ struct irq_handler_data {
 	unsigned long	iclr;
 	unsigned long	imap;
 	bool		oberon;
+	void (*capture)(void *arg, bool late);
+	void *capture_arg;
+	bool captured;
+	bool capture_live;
+	bool capture_armed;
+	bool capture_ack_attempted;
+	bool capture_rearm_attempted;
+	bool capture_target_failed;
+	bool capture_target_attempted;
+	unsigned int capture_target;
+	unsigned long capture_baseline;
 };
 
 static inline unsigned int irq_data_to_handle(struct irq_data *data)
@@ -674,6 +686,327 @@ unsigned int oberon_build_irq(int inofixup, unsigned long iclr,
 	if (data)
 		data->oberon = true;
 	return irq;
+}
+
+/* Preserve the failure reason before entering the system panic path. */
+static unsigned int oberon_capture_failure;
+
+static void __noreturn oberon_capture_stop(struct irq_desc *desc, unsigned int reason)
+{
+	WRITE_ONCE(oberon_capture_failure, reason);
+	/* Do not strand readers of this descriptor behind the failed experiment. */
+	raw_spin_unlock(&desc->lock);
+	panic("Oberon capture containment failed: reason=%u", reason);
+}
+
+static bool oberon_capture_mask(struct irq_handler_data *data)
+{
+	unsigned long val = upa_readq(data->imap);
+
+	upa_writeq(val & ~IMAP_VALID, data->imap);
+	return upa_readq(data->imap) == (val & ~IMAP_VALID);
+}
+
+/* The dedicated flow never clears source status or writes ICLR. */
+static void oberon_capture_irq(struct irq_desc *desc)
+{
+	struct irq_handler_data *data;
+	bool late = false;
+
+	guard(raw_spinlock)(&desc->lock);
+	data = irq_desc_get_handler_data(desc);
+	if (data->capture_live) {
+		/* Masking a route does not recall an interrupt already in flight. */
+		late = !data->capture_armed;
+		if (!oberon_capture_mask(data))
+			oberon_capture_stop(desc, 2);
+		data->capture_armed = false;
+	}
+	if (!data->captured) {
+		data->captured = true;
+		data->capture(data->capture_arg, late);
+	}
+}
+
+static void oberon_capture_noop(struct irq_data *data)
+{
+}
+
+static unsigned int oberon_capture_startup(struct irq_data *data)
+{
+	return 0;
+}
+
+static struct irq_chip oberon_capture_chip = {
+	.name = "oberon-capture",
+	.irq_startup = oberon_capture_startup,
+	.irq_shutdown = oberon_capture_noop,
+	.irq_enable = oberon_capture_noop,
+	.irq_disable = oberon_capture_noop,
+	.irq_mask = oberon_capture_noop,
+	.irq_unmask = oberon_capture_noop,
+	.irq_eoi = oberon_capture_noop,
+};
+
+int oberon_prepare_capture(unsigned int irq, unsigned long imap,
+			   void (*capture)(void *arg, bool late), void *arg)
+{
+	struct irq_desc *desc = irq_to_desc(irq);
+	struct irq_handler_data *data;
+	unsigned long flags;
+	int ret = -EINVAL;
+
+	if (!desc || !capture)
+		return ret;
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	data = irq_desc_get_handler_data(desc);
+	if (!data || !data->oberon || data->imap != imap ||
+	    desc->irq_data.chip != &sun4u_irq)
+		goto out;
+	ret = -EBUSY;
+	if (desc->action || !irqd_irq_disabled(&desc->irq_data) ||
+	    (upa_readq(imap) & IMAP_VALID))
+		goto out;
+	data->capture = capture;
+	data->capture_arg = arg;
+	data->captured = false;
+	data->capture_baseline = upa_readq(imap);
+	desc->status_use_accessors |= IRQ_NOREQUEST | IRQ_NOPROBE |
+		IRQ_NOAUTOEN | IRQ_NO_BALANCING;
+	desc->irq_data.chip = &oberon_capture_chip;
+	desc->handle_irq = oberon_capture_irq;
+	ret = 0;
+out:
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	return ret;
+}
+
+bool oberon_capture_quarantined(unsigned int irq)
+{
+	struct irq_desc *desc = irq_to_desc(irq);
+	struct irq_handler_data *data;
+	unsigned long flags;
+	bool ready = false;
+
+	if (!desc)
+		return false;
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	data = irq_desc_get_handler_data(desc);
+	if (desc->irq_data.chip == &oberon_capture_chip && data &&
+	    data->capture_live && data->captured && !data->capture_armed)
+		ready = upa_readq(data->imap) == data->capture_baseline;
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	return ready;
+}
+
+int oberon_ack_capture(unsigned int irq, int (*check)(void *), void *arg,
+		       struct oberon_ack_result *result)
+{
+	struct irq_desc *desc = irq_to_desc(irq);
+	struct irq_handler_data *data;
+	unsigned long flags;
+	int ret = -EBUSY;
+
+	if (!desc || !check || !result)
+		return -EINVAL;
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	data = irq_desc_get_handler_data(desc);
+	if (!data || desc->irq_data.chip != &oberon_capture_chip ||
+	    !data->capture_live || !data->captured || data->capture_armed ||
+	    data->capture_ack_attempted ||
+	    upa_readq(data->imap) != data->capture_baseline)
+		goto out;
+	result->before = upa_readq(data->iclr);
+	ret = check(arg);
+	if (ret)
+		goto out;
+	data->capture_ack_attempted = true;
+	result->written = true;
+	/* Change only the two-bit controller state; the route remains invalid. */
+	upa_writeq(result->before & ~3UL, data->iclr);
+	result->after = upa_readq(data->iclr);
+	ret = check(arg);
+	if (result->after != (result->before & ~3UL))
+		ret = -EIO;
+	if (upa_readq(data->imap) != data->capture_baseline)
+		ret = -EBUSY;
+out:
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	return ret;
+}
+
+int oberon_target_capture(unsigned int irq, unsigned int cpu)
+{
+	struct irq_desc *desc = irq_to_desc(irq);
+	struct irq_handler_data *data;
+	unsigned long flags, val, target;
+	int ret = -EBUSY;
+
+	if (!desc || IS_ENABLED(CONFIG_HOTPLUG_CPU) || cpu >= nr_cpu_ids ||
+	    cpu > 0x3ff || !cpu_online(cpu))
+		return -EINVAL;
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	data = irq_desc_get_handler_data(desc);
+	if (!data || desc->irq_data.chip != &oberon_capture_chip ||
+	    desc->action || data->capture_armed || data->capture_target_attempted ||
+	    data->capture_rearm_attempted)
+		goto out;
+	if (data->capture_live) {
+		if (!data->captured || !data->capture_ack_attempted)
+			goto out;
+	} else if (data->captured) {
+		goto out;
+	}
+	val = upa_readq(data->imap);
+	if (val != 0x40 || val != data->capture_baseline ||
+	    (upa_readq(data->iclr) & 3UL))
+		goto out;
+	/* CPU indices on sun4u use firmware physical IDs; preserve controller bits. */
+	target = oberon_imap_target(val, cpu);
+	data->capture_target_attempted = true;
+	upa_writeq(target, data->imap);
+	if (upa_readq(data->imap) != target) {
+		data->capture_target_failed = true;
+		upa_writeq(val, data->imap);
+		if (upa_readq(data->imap) != val)
+			oberon_capture_stop(desc, 5);
+		ret = -EIO;
+		goto out;
+	}
+	if (upa_readq(data->iclr) & 3UL)
+		oberon_capture_stop(desc, 5);
+	data->capture_baseline = target;
+	data->capture_target = cpu;
+	ret = 0;
+out:
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	return ret;
+}
+
+int oberon_arm_capture(unsigned int irq)
+{
+	struct irq_desc *desc = irq_to_desc(irq);
+	struct irq_handler_data *data;
+	unsigned long flags, val;
+	int ret = -EBUSY;
+
+	if (!desc || IS_ENABLED(CONFIG_HOTPLUG_CPU))
+		return -EINVAL;
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	data = irq_desc_get_handler_data(desc);
+	if (desc->irq_data.chip != &oberon_capture_chip || !data ||
+	    desc->action || data->captured || data->capture_live ||
+	    data->capture_target_failed)
+		goto out;
+	/* Keep the prepared controller selection and disabled route intact. */
+	val = upa_readq(data->imap);
+	if ((val & ~OBERON_IMAP_TID_MASK) != 0x40 ||
+	    val != data->capture_baseline || !cpu_online(data->capture_target))
+		goto out;
+	data->capture_live = true;
+	data->capture_armed = true;
+	upa_writeq(val | IMAP_VALID, data->imap);
+	if (upa_readq(data->imap) != (val | IMAP_VALID)) {
+		oberon_capture_mask(data);
+		oberon_capture_stop(desc, 1);
+	}
+	ret = 0;
+out:
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	return ret;
+}
+
+int oberon_rearm_capture(unsigned int irq, int (*check)(void *), void *arg)
+{
+	struct irq_desc *desc = irq_to_desc(irq);
+	struct irq_handler_data *data;
+	unsigned long flags, val;
+	int ret = -EBUSY;
+
+	if (!desc || !check || !arg || IS_ENABLED(CONFIG_HOTPLUG_CPU))
+		return -EINVAL;
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	data = irq_desc_get_handler_data(desc);
+	if (desc->irq_data.chip != &oberon_capture_chip || !data ||
+	    desc->action || !data->capture_live || !data->captured ||
+	    data->capture_armed || !data->capture_ack_attempted ||
+	    data->capture_rearm_attempted || data->capture_target_failed ||
+	    !cpu_online(data->capture_target))
+		goto out;
+	val = upa_readq(data->imap);
+	if ((val & ~OBERON_IMAP_TID_MASK) != 0x40 ||
+	    val != data->capture_baseline ||
+	    (upa_readq(data->iclr) & 3UL))
+		goto out;
+	data->capture_rearm_attempted = true;
+	ret = check(arg);
+	if (ret)
+		goto out;
+	if (upa_readq(data->imap) != val || (upa_readq(data->iclr) & 3UL)) {
+		ret = -EBUSY;
+		goto out;
+	}
+	/* The old record remains allocated; publish the fresh record before enabling. */
+	data->capture_arg = arg;
+	data->captured = false;
+	data->capture_armed = true;
+	upa_writeq(val | IMAP_VALID, data->imap);
+	if (upa_readq(data->imap) != (val | IMAP_VALID)) {
+		oberon_capture_mask(data);
+		oberon_capture_stop(desc, 1);
+	}
+	ret = 0;
+out:
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	return ret;
+}
+
+int oberon_capture_state(unsigned int irq, bool *armed, bool *captured,
+			 unsigned long *imap, unsigned long *iclr)
+{
+	struct irq_desc *desc = irq_to_desc(irq);
+	struct irq_handler_data *data;
+	unsigned long flags;
+	int ret = -EINVAL;
+
+	if (!desc)
+		return ret;
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	data = irq_desc_get_handler_data(desc);
+	if (data && desc->irq_data.chip == &oberon_capture_chip) {
+		*armed = data->capture_armed;
+		*captured = data->captured;
+		*imap = upa_readq(data->imap);
+		*iclr = upa_readq(data->iclr);
+		ret = 0;
+	}
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	return ret;
+}
+
+int oberon_disarm_capture(unsigned int irq)
+{
+	struct irq_desc *desc = irq_to_desc(irq);
+	struct irq_handler_data *data;
+	unsigned long flags;
+	int ret = -EINVAL;
+
+	if (!desc)
+		return ret;
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	data = irq_desc_get_handler_data(desc);
+	if (desc->irq_data.chip != &oberon_capture_chip || !data ||
+	    !data->capture_live)
+		goto out;
+	if (data->capture_armed) {
+		if (!oberon_capture_mask(data))
+			oberon_capture_stop(desc, 4);
+		data->capture_armed = false;
+	}
+	ret = data->captured;
+out:
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	return ret;
 }
 
 static unsigned int sun4v_build_common(u32 devhandle, unsigned int devino,

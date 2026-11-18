@@ -4,6 +4,8 @@
  * Copyright (C) 2007 David S. Miller (davem@davemloft.net)
  */
 #include <linux/workqueue.h>
+#include <linux/smp.h>
+#include <linux/timer.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
@@ -1064,6 +1066,26 @@ static void pci_fire_hw_init(struct pci_pbm_info *pbm)
 	upa_writeq(~(u64)0, pbm->pbm_regs + FIRE_PEC_IENAB);
 }
 
+static bool oberon_diag_enabled;
+static DEFINE_MUTEX(oberon_diag_lock);
+static void oberon_diag_snapshot(struct pci_pbm_info *pbm, const char *phase);
+
+static ssize_t oberon_snapshot_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	struct pci_pbm_info *pbm = dev_get_drvdata(dev);
+	bool trigger;
+
+	if (!oberon_diag_enabled || !pbm || !pbm->is_oberon)
+		return -ENODEV;
+	if (kstrtobool(buf, &trigger) || !trigger)
+		return -EINVAL;
+	oberon_diag_snapshot(pbm, "runtime");
+	return count;
+}
+static DEVICE_ATTR_WO(oberon_snapshot);
+
 static int pci_fire_pbm_init(struct pci_pbm_info *pbm,
 			     struct platform_device *op, u32 portid)
 {
@@ -1091,6 +1113,8 @@ static int pci_fire_pbm_init(struct pci_pbm_info *pbm,
 
 	pbm->pbm_regs = regs[0].phys_addr;
 	pbm->controller_regs = regs[1].phys_addr - 0x410000UL;
+	if (pbm->is_oberon && oberon_diag_enabled)
+		oberon_diag_snapshot(pbm, "pre-pbm");
 
 	printk("%s: SUN4U PCIE Bus Module\n", pbm->name);
 
@@ -1153,6 +1177,12 @@ static int fire_probe(struct platform_device *op)
 	if (err)
 		goto out_free_iommu;
 
+	dev_set_drvdata(&op->dev, pbm);
+	if (pbm->is_oberon && oberon_diag_enabled) {
+		err = device_create_file(&op->dev, &dev_attr_oberon_snapshot);
+		if (err)
+			dev_warn(&op->dev, "passive snapshot trigger unavailable: %d\n", err);
+	}
 
 	return 0;
 
@@ -1183,9 +1213,707 @@ static struct platform_driver fire_driver = {
 	.probe		= fire_probe,
 };
 
+/* This diagnostic is opt-in and never acknowledges or enables errors. */
+
+static int __init oberon_diag_setup(char *str)
+{
+	return kstrtobool(str, &oberon_diag_enabled);
+}
+early_param("oberon_diag", oberon_diag_setup);
+
+#define OBERON_DIAG_DMC_ENABLE	0x31800UL
+#define OBERON_DIAG_DMC_STATUS	0x31808UL
+#define OBERON_DIAG_MULTI_STATUS	0x31810UL
+#define OBERON_DIAG_MMU_LOG	0x41000UL
+#define OBERON_DIAG_MMU_ENABLE	0x41008UL
+#define OBERON_DIAG_MMU_STATUS	0x41010UL
+#define OBERON_DIAG_TFAR		0x41028UL
+#define OBERON_DIAG_TFSR		0x41030UL
+#define OBERON_DIAG_ILU_STATUS	0x51010UL
+#define OBERON_DIAG_PEC_STATUS	0x51808UL
+#define OBERON_DIAG_OE_STATUS	0x81010UL
+#define OBERON_DIAG_OE_RX1	0x81028UL
+#define OBERON_DIAG_OE_RX2	0x81030UL
+#define OBERON_DIAG_OE_TX1	0x81038UL
+#define OBERON_DIAG_OE_TX2	0x81040UL
+#define OBERON_DIAG_OE_RUC_WUC	(BIT_ULL(16) | BIT_ULL(17))
+#define OBERON_DIAG_UE_STATUS	0x91010UL
+#define OBERON_DIAG_CE_STATUS	0xa1010UL
+
+static void oberon_diag_snapshot(struct pci_pbm_info *pbm, const char *phase)
+{
+	struct device_node *dp = pbm->op->dev.of_node;
+	const struct linux_prom64_registers *regs;
+	const __be32 *intr;
+	unsigned long base = pbm->pbm_regs, imap_offset;
+	unsigned int ino;
+	u64 multi, dmc, status, tfar = 0, tfsr = 0;
+	u64 multi_after, dmc_after, status_after;
+	u64 pec = 0, pec_after = 0, ilu = 0, ilu_after = 0;
+	u64 oe = 0, oe_after = 0, ue = 0, ue_after = 0;
+	u64 ce = 0, ce_after = 0;
+	u64 rx1 = 0, rx2 = 0, tx1 = 0, tx2 = 0;
+	u64 rx1_after = 0, rx2_after = 0, tx1_after = 0, tx2_after = 0;
+	bool headers_read = false;
+	bool pec_read;
+	u64 dmc_enable, mmu_enable, log_enable, imap;
+	bool logs_read;
+	int len;
+
+	regs = of_get_property(dp, "reg", &len);
+	if (!regs || len < sizeof(*regs) || regs[0].phys_addr != base ||
+	    regs[0].reg_size < OBERON_DIAG_CE_STATUS + sizeof(u64) ||
+	    base > ~0UL - OBERON_DIAG_CE_STATUS - sizeof(u64)) {
+		pr_warn("Oberon diag %pOF: invalid CSR range; skipped\n", dp);
+		return;
+	}
+	intr = of_get_property(dp, "interrupts", &len);
+	if (!intr || len < 2 * sizeof(*intr)) {
+		pr_warn("Oberon diag %pOF: missing error IRQ property; skipped\n", dp);
+		return;
+	}
+	ino = be32_to_cpup(intr + 1);
+	if (ino > 0x3f) {
+		pr_warn("Oberon diag %pOF: invalid error INO; skipped\n", dp);
+		return;
+	}
+	imap_offset = 0x1000UL + 8 * ino;
+	mutex_lock(&oberon_diag_lock);
+	dmc_enable = upa_readq(base + OBERON_DIAG_DMC_ENABLE);
+	log_enable = upa_readq(base + OBERON_DIAG_MMU_LOG);
+	mmu_enable = upa_readq(base + OBERON_DIAG_MMU_ENABLE);
+	imap = upa_readq(base + imap_offset);
+	multi = upa_readq(base + OBERON_DIAG_MULTI_STATUS);
+	dmc = upa_readq(base + OBERON_DIAG_DMC_STATUS);
+	status = upa_readq(base + OBERON_DIAG_MMU_STATUS);
+	/* Fault logs are candidates only; status equality cannot prove coherence. */
+	logs_read = status != 0;
+	if (logs_read) {
+		tfar = upa_readq(base + OBERON_DIAG_TFAR);
+		tfsr = upa_readq(base + OBERON_DIAG_TFSR);
+	}
+	/* Preserve both samples; equal values do not establish an atomic snapshot. */
+	pec_read = !!(multi & BIT_ULL(1));
+	if (pec_read) {
+		pec = upa_readq(base + OBERON_DIAG_PEC_STATUS);
+		oe = upa_readq(base + OBERON_DIAG_OE_STATUS);
+		ce = upa_readq(base + OBERON_DIAG_CE_STATUS);
+		ue = upa_readq(base + OBERON_DIAG_UE_STATUS);
+		ilu = upa_readq(base + OBERON_DIAG_ILU_STATUS);
+		/* Primary RUC/WUC gates candidate logs; secondary events lack attribution. */
+		headers_read = !!(oe & OBERON_DIAG_OE_RUC_WUC);
+		if (headers_read) {
+			rx1 = upa_readq(base + OBERON_DIAG_OE_RX1);
+			rx2 = upa_readq(base + OBERON_DIAG_OE_RX2);
+			tx1 = upa_readq(base + OBERON_DIAG_OE_TX1);
+			tx2 = upa_readq(base + OBERON_DIAG_OE_TX2);
+			tx2_after = upa_readq(base + OBERON_DIAG_OE_TX2);
+			tx1_after = upa_readq(base + OBERON_DIAG_OE_TX1);
+			rx2_after = upa_readq(base + OBERON_DIAG_OE_RX2);
+			rx1_after = upa_readq(base + OBERON_DIAG_OE_RX1);
+		}
+		ilu_after = upa_readq(base + OBERON_DIAG_ILU_STATUS);
+		ue_after = upa_readq(base + OBERON_DIAG_UE_STATUS);
+		ce_after = upa_readq(base + OBERON_DIAG_CE_STATUS);
+		oe_after = upa_readq(base + OBERON_DIAG_OE_STATUS);
+		pec_after = upa_readq(base + OBERON_DIAG_PEC_STATUS);
+	}
+	status_after = upa_readq(base + OBERON_DIAG_MMU_STATUS);
+	dmc_after = upa_readq(base + OBERON_DIAG_DMC_STATUS);
+	multi_after = upa_readq(base + OBERON_DIAG_MULTI_STATUS);
+
+	/* Finish all register reads before printk can enter the firmware console. */
+	pr_info("Oberon diag %pOF: phase=%s\n", dp, phase);
+	pr_info("Oberon diag %pOF: portid=%u ino=%x imap=%016llx route_valid=%u\n",
+		dp, pbm->portid, ino, imap, !!(imap & BIT_ULL(31)));
+	pr_info("Oberon diag %pOF: dmc_enable=%016llx mmu_log=%016llx mmu_enable=%016llx\n",
+		dp, dmc_enable, log_enable, mmu_enable);
+	pr_info("Oberon diag %pOF: multi=%016llx dmc=%016llx mmu=%016llx\n",
+		dp, multi, dmc, status);
+	pr_info("Oberon diag %pOF: logs_read=%u tfar_raw=%016llx tfsr_raw=%016llx\n",
+		dp, logs_read, tfar, tfsr);
+	pr_info("Oberon diag %pOF: multi_after=%016llx dmc_after=%016llx mmu_after=%016llx changed=%u\n",
+		dp, multi_after, dmc_after, status_after,
+		multi != multi_after || dmc != dmc_after || status != status_after);
+	pr_info("Oberon diag %pOF: pec_read=%u pec=%016llx pec_after=%016llx\n",
+		dp, pec_read, pec, pec_after);
+	pr_info("Oberon diag %pOF: oe=%016llx ce=%016llx ue=%016llx ilu=%016llx\n",
+		dp, oe, ce, ue, ilu);
+	pr_info("Oberon diag %pOF: oe_after=%016llx ce_after=%016llx\n",
+		dp, oe_after, ce_after);
+	pr_info("Oberon diag %pOF: ue_after=%016llx ilu_after=%016llx pec_changed=%u\n",
+		dp, ue_after, ilu_after,
+		pec != pec_after || oe != oe_after || ce != ce_after ||
+		ue != ue_after || ilu != ilu_after);
+	pr_info("Oberon diag %pOF: headers_read=%u headers_changed=%u\n",
+		dp, headers_read, rx1 != rx1_after || rx2 != rx2_after ||
+		tx1 != tx1_after || tx2 != tx2_after);
+	pr_info("Oberon diag %pOF: rx1=%016llx rx2=%016llx\n", dp, rx1, rx2);
+	pr_info("Oberon diag %pOF: tx1=%016llx tx2=%016llx\n", dp, tx1, tx2);
+	pr_info("Oberon diag %pOF: rx1_after=%016llx rx2_after=%016llx\n",
+		dp, rx1_after, rx2_after);
+	pr_info("Oberon diag %pOF: tx1_after=%016llx tx2_after=%016llx\n",
+		dp, tx1_after, tx2_after);
+	mutex_unlock(&oberon_diag_lock);
+}
+
+static int __init oberon_diag_init(void)
+{
+	struct pci_pbm_info *pbm;
+
+	if (!oberon_diag_enabled)
+		return 0;
+	for (pbm = pci_pbm_root; pbm; pbm = pbm->next)
+		if (pbm->is_oberon)
+			oberon_diag_snapshot(pbm, "late");
+	return 0;
+}
+late_initcall(oberon_diag_init);
+
 static int __init fire_init(void)
 {
 	return platform_driver_register(&fire_driver);
 }
 
 subsys_initcall(fire_init);
+
+struct oberon_irq_capture {
+	struct work_struct report;
+	struct timer_list deadline;
+	unsigned int irq;
+	struct pci_pbm_info *pbm;
+	u64 status[8], status_after[8];
+	u64 fault[2], header[4], header_after[4];
+	bool fault_read, headers_read;
+	bool clear_attempted;
+	int clear_result;
+	u64 clear_after[2][8];
+	struct oberon_ack_result ack;
+	u64 ack_status[2][2][8];
+	int ack_result, ack_checks;
+	bool ack_requested;
+	bool rearm_requested;
+	int rearm_result;
+	unsigned int generation;
+	bool late;
+	unsigned int received_cpu;
+	unsigned long received_hard_id;
+	bool target_requested;
+	unsigned int target_cpu;
+	int target_result;
+	struct oberon_irq_capture *next;
+};
+
+static int oberon_capture_arm_port = -1;
+
+static int __init oberon_capture_arm_setup(char *str)
+{
+	int port, ret = kstrtoint(str, 0, &port);
+
+	if (ret || port < 0 || port > 1)
+		return -EINVAL;
+	oberon_capture_arm_port = port;
+	return 0;
+}
+early_param("oberon_capture_arm_port", oberon_capture_arm_setup);
+
+static void oberon_capture_deadline(struct timer_list *timer)
+{
+	struct oberon_irq_capture *cap = timer_container_of(cap, timer, deadline);
+
+	oberon_disarm_capture(cap->irq);
+}
+
+static struct oberon_irq_capture *oberon_live_capture;
+
+static ssize_t oberon_capture_arm_store(struct device *dev,
+				       struct device_attribute *attr,
+				       const char *buf, size_t count)
+{
+	struct oberon_irq_capture *cap = oberon_live_capture;
+	int ret;
+
+	if (!cap || dev != &cap->pbm->op->dev || !sysfs_streq(buf, "1"))
+		return -EINVAL;
+	guard(mutex)(&oberon_diag_lock);
+	ret = oberon_arm_capture(cap->irq);
+	if (ret)
+		return ret;
+	mod_timer(&cap->deadline, jiffies + 5 * HZ);
+	return count;
+}
+static DEVICE_ATTR_WO(oberon_capture_arm);
+
+static bool oberon_capture_prepare;
+
+static int __init oberon_capture_setup(char *str)
+{
+	return kstrtobool(str, &oberon_capture_prepare);
+}
+early_param("oberon_capture_prepare", oberon_capture_setup);
+
+static const unsigned long oberon_capture_status_regs[] = {
+	OBERON_DIAG_MULTI_STATUS, OBERON_DIAG_DMC_STATUS,
+	OBERON_DIAG_MMU_STATUS, OBERON_DIAG_PEC_STATUS,
+	OBERON_DIAG_OE_STATUS, OBERON_DIAG_UE_STATUS,
+	OBERON_DIAG_CE_STATUS, OBERON_DIAG_ILU_STATUS,
+};
+
+static const unsigned long oberon_capture_header_regs[] = {
+	OBERON_DIAG_OE_RX1, OBERON_DIAG_OE_RX2,
+	OBERON_DIAG_OE_TX1, OBERON_DIAG_OE_TX2,
+};
+
+/* A matching snapshot permits review of a clear, not automatic recovery. */
+static int oberon_capture_recovery_check(struct oberon_irq_capture *cap)
+{
+	const u64 expected[] = { 2, 0, 0, 1, BIT_ULL(16) | BIT_ULL(48), 0, 0, 0 };
+	unsigned long base = cap->pbm->pbm_regs;
+	int pass, i;
+
+	if (!oberon_capture_quarantined(cap->irq))
+		return -EBUSY;
+	for (i = 0; i < ARRAY_SIZE(expected); i++)
+		if (cap->status[i] != expected[i] ||
+		    cap->status_after[i] != expected[i])
+			return -EOPNOTSUPP;
+	if (!cap->headers_read)
+		return -EOPNOTSUPP;
+	for (i = 0; i < ARRAY_SIZE(cap->header); i++)
+		if (cap->header[i] != cap->header_after[i])
+			return -EAGAIN;
+	for (pass = 0; pass < 2; pass++) {
+		for (i = 0; i < ARRAY_SIZE(expected); i++)
+			if (upa_readq(base + oberon_capture_status_regs[i]) != expected[i])
+				return -EAGAIN;
+		for (i = 0; i < ARRAY_SIZE(cap->header); i++)
+			if (upa_readq(base + oberon_capture_header_regs[i]) != cap->header[i])
+				return -EAGAIN;
+	}
+	return oberon_capture_quarantined(cap->irq) ? 0 : -EBUSY;
+}
+
+static ssize_t oberon_capture_recovery_show(struct device *dev,
+					  struct device_attribute *attr,
+					  char *buf)
+{
+	struct oberon_irq_capture *cap = oberon_live_capture;
+	int ret;
+
+	if (!cap || dev != &cap->pbm->op->dev)
+		return -ENODEV;
+	guard(mutex)(&oberon_diag_lock);
+	ret = oberon_capture_recovery_check(cap);
+	return sysfs_emit(buf, "check=%d offset=0x81018 mask=0x0001000000010000 writes=0\n",
+			  ret);
+}
+static DEVICE_ATTR(oberon_capture_recovery, 0400, oberon_capture_recovery_show, NULL);
+
+static int oberon_capture_clear_ruc(struct oberon_irq_capture *cap)
+{
+	unsigned long base = cap->pbm->pbm_regs;
+	int pass, i, ret;
+
+	if (cap->clear_attempted)
+		return -EALREADY;
+	ret = oberon_capture_recovery_check(cap);
+	if (ret)
+		return ret;
+	cap->clear_attempted = true;
+	upa_writeq(BIT_ULL(16) | BIT_ULL(48), base + 0x81018);
+	ret = 0;
+	/* Preserve both samples even when a source remains set; never retry. */
+	for (pass = 0; pass < 2; pass++) {
+		for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++) {
+			cap->clear_after[pass][i] =
+				upa_readq(base + oberon_capture_status_regs[i]);
+			if (cap->clear_after[pass][i])
+				ret = -EAGAIN;
+		}
+	}
+	if (!oberon_capture_quarantined(cap->irq))
+		ret = -EBUSY;
+	cap->clear_result = ret;
+	return ret;
+}
+
+static ssize_t oberon_capture_clear_store(struct device *dev,
+					struct device_attribute *attr,
+					const char *buf, size_t count)
+{
+	struct oberon_irq_capture *cap = oberon_live_capture;
+	int ret;
+
+	if (!cap || dev != &cap->pbm->op->dev || !sysfs_streq(buf, "1"))
+		return -EINVAL;
+	if (!oberon_capture_quarantined(cap->irq))
+		return -EBUSY;
+	timer_delete_sync(&cap->deadline);
+	flush_work(&cap->report);
+	guard(mutex)(&oberon_diag_lock);
+	ret = oberon_capture_clear_ruc(cap);
+	return ret ? ret : count;
+}
+static DEVICE_ATTR_WO(oberon_capture_clear);
+
+static ssize_t oberon_capture_clear_result_show(struct device *dev,
+					       struct device_attribute *attr,
+					       char *buf)
+{
+	struct oberon_irq_capture *cap = oberon_live_capture;
+	int len, i;
+
+	if (!cap || dev != &cap->pbm->op->dev)
+		return -ENODEV;
+	guard(mutex)(&oberon_diag_lock);
+	len = sysfs_emit(buf, "attempted=%u result=%d ack=%u rearm=%u\n",
+			 cap->clear_attempted, cap->clear_result, cap->ack.written,
+			 cap->rearm_requested);
+	for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++)
+		len += sysfs_emit_at(buf, len, "reg=%lx first=%016llx second=%016llx\n",
+				     oberon_capture_status_regs[i],
+				     cap->clear_after[0][i], cap->clear_after[1][i]);
+	return len;
+}
+static DEVICE_ATTR(oberon_capture_clear_result, 0400,
+		   oberon_capture_clear_result_show, NULL);
+
+static int oberon_ack_sources(void *arg)
+{
+	struct oberon_irq_capture *cap = arg;
+	int stage = cap->ack_checks++, pass, i, ret = 0;
+
+	if (stage >= ARRAY_SIZE(cap->ack_status))
+		return -EINVAL;
+	for (pass = 0; pass < 2; pass++) {
+		for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++) {
+			u64 val = upa_readq(cap->pbm->pbm_regs +
+					    oberon_capture_status_regs[i]);
+
+			cap->ack_status[stage][pass][i] = val;
+			if (val)
+				ret = -EAGAIN;
+		}
+	}
+	return ret;
+}
+
+static ssize_t oberon_capture_ack_store(struct device *dev,
+				      struct device_attribute *attr,
+				      const char *buf, size_t count)
+{
+	struct oberon_irq_capture *cap = oberon_live_capture;
+
+	if (!cap || dev != &cap->pbm->op->dev || !sysfs_streq(buf, "1"))
+		return -EINVAL;
+	guard(mutex)(&oberon_diag_lock);
+	if (!cap->clear_attempted || cap->clear_result || cap->ack_requested)
+		return -EBUSY;
+	cap->ack_requested = true;
+	cap->ack_result = oberon_ack_capture(cap->irq, oberon_ack_sources,
+					     cap, &cap->ack);
+	return cap->ack_result ? cap->ack_result : count;
+}
+static DEVICE_ATTR_WO(oberon_capture_ack);
+
+static ssize_t oberon_capture_ack_result_show(struct device *dev,
+					     struct device_attribute *attr,
+					     char *buf)
+{
+	struct oberon_irq_capture *cap = oberon_live_capture;
+	int len, stage, i;
+
+	if (!cap || dev != &cap->pbm->op->dev)
+		return -ENODEV;
+	guard(mutex)(&oberon_diag_lock);
+	len = sysfs_emit(buf,
+		"requested=%u written=%u result=%d before=%lx after=%lx checks=%d rearm=%u\n",
+			 cap->ack_requested, cap->ack.written, cap->ack_result,
+			 cap->ack.before, cap->ack.after, cap->ack_checks,
+			 cap->rearm_requested);
+	for (stage = 0; stage < cap->ack_checks && stage < 2; stage++)
+		for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++)
+			len += sysfs_emit_at(buf, len,
+				"stage=%d reg=%lx first=%016llx second=%016llx\n",
+				stage, oberon_capture_status_regs[i],
+				cap->ack_status[stage][0][i], cap->ack_status[stage][1][i]);
+	return len;
+}
+static DEVICE_ATTR(oberon_capture_ack_result, 0400,
+		   oberon_capture_ack_result_show, NULL);
+
+static void oberon_capture_report(struct work_struct *work)
+{
+	struct oberon_irq_capture *cap = container_of(work,
+		struct oberon_irq_capture, report);
+	int i;
+
+	pr_warn("Oberon capture %s: generation=%u cpu=%u hard_id=%lu late=%u candidate samples\n",
+		cap->pbm->name, cap->generation, cap->received_cpu,
+		cap->received_hard_id, cap->late);
+	for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++)
+		pr_warn("Oberon capture %s: reg=%lx before=%016llx after=%016llx\n",
+			cap->pbm->name, oberon_capture_status_regs[i],
+			cap->status[i], cap->status_after[i]);
+	pr_warn("Oberon capture %s: fault_read=%u tfar=%016llx tfsr=%016llx headers_read=%u\n",
+		cap->pbm->name, cap->fault_read, cap->fault[0],
+		cap->fault[1], cap->headers_read);
+	if (cap->headers_read)
+		for (i = 0; i < ARRAY_SIZE(oberon_capture_header_regs); i++)
+			pr_warn("Oberon capture %s: header=%lx before=%016llx after=%016llx\n",
+				cap->pbm->name, oberon_capture_header_regs[i],
+				cap->header[i], cap->header_after[i]);
+}
+
+static void oberon_capture_event(void *arg, bool late)
+{
+	struct oberon_irq_capture *cap = arg;
+	unsigned long base = cap->pbm->pbm_regs;
+	int i;
+
+	cap->late = late;
+	cap->received_cpu = raw_smp_processor_id();
+	cap->received_hard_id = real_hard_smp_processor_id();
+	/* At most 26 CSR reads; equal samples do not prove an atomic snapshot. */
+	for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++)
+		cap->status[i] = upa_readq(base + oberon_capture_status_regs[i]);
+	cap->fault_read = cap->status[2] != 0;
+	if (cap->fault_read) {
+		cap->fault[0] = upa_readq(base + OBERON_DIAG_TFAR);
+		cap->fault[1] = upa_readq(base + OBERON_DIAG_TFSR);
+	}
+	/* Secondary-only events do not identify the candidate header logs. */
+	cap->headers_read = !!(cap->status[4] & OBERON_DIAG_OE_RUC_WUC);
+	if (cap->headers_read) {
+		for (i = 0; i < ARRAY_SIZE(oberon_capture_header_regs); i++)
+			cap->header[i] = upa_readq(base + oberon_capture_header_regs[i]);
+		for (i = ARRAY_SIZE(oberon_capture_header_regs) - 1; i >= 0; i--)
+			cap->header_after[i] = upa_readq(base + oberon_capture_header_regs[i]);
+	}
+	for (i = ARRAY_SIZE(oberon_capture_status_regs) - 1; i >= 0; i--)
+		cap->status_after[i] = upa_readq(base + oberon_capture_status_regs[i]);
+	schedule_work(&cap->report);
+}
+
+static int oberon_rearm_sources(void *arg)
+{
+	struct oberon_irq_capture *cap = arg;
+	int ret = oberon_ack_sources(cap);
+
+	/* Start the deadline under the descriptor lock before enabling delivery. */
+	if (!ret)
+		mod_timer(&cap->deadline, jiffies + 5 * HZ);
+	return ret;
+}
+
+static ssize_t oberon_capture_rearm_store(struct device *dev,
+					struct device_attribute *attr,
+					const char *buf, size_t count)
+{
+	struct oberon_irq_capture *cap = oberon_live_capture, *next;
+
+	if (!cap || dev != &cap->pbm->op->dev || !sysfs_streq(buf, "1"))
+		return -EINVAL;
+	guard(mutex)(&oberon_diag_lock);
+	if (cap->rearm_requested || !cap->clear_attempted || cap->clear_result ||
+	    !cap->ack_requested || !cap->ack.written || cap->ack_result ||
+	    !oberon_capture_quarantined(cap->irq))
+		return -EBUSY;
+	timer_delete_sync(&cap->deadline);
+	flush_work(&cap->report);
+	next = kzalloc_obj(*next, GFP_KERNEL);
+	if (!next)
+		return -ENOMEM;
+	next->pbm = cap->pbm;
+	next->irq = cap->irq;
+	next->generation = 2;
+	timer_setup(&next->deadline, oberon_capture_deadline, 0);
+	INIT_WORK(&next->report, oberon_capture_report);
+	cap->next = next;
+	cap->rearm_requested = true;
+	cap->rearm_result = oberon_rearm_capture(cap->irq, oberon_rearm_sources, next);
+	return cap->rearm_result ? cap->rearm_result : count;
+}
+static DEVICE_ATTR_WO(oberon_capture_rearm);
+
+static ssize_t oberon_capture_rearm_result_show(struct device *dev,
+					      struct device_attribute *attr,
+					      char *buf)
+{
+	struct oberon_irq_capture *cap = oberon_live_capture;
+	unsigned long imap, iclr;
+	bool armed, captured;
+	int ret;
+
+	if (!cap || dev != &cap->pbm->op->dev)
+		return -ENODEV;
+	guard(mutex)(&oberon_diag_lock);
+	ret = oberon_capture_state(cap->irq, &armed, &captured, &imap, &iclr);
+	if (ret)
+		return ret;
+	return sysfs_emit(buf,
+		"requested=%u result=%d generation=%u armed=%u captured=%u imap=%lx iclr=%lx\n",
+		cap->rearm_requested, cap->rearm_result,
+		cap->rearm_requested && !cap->rearm_result ? 2 : 1,
+		armed, captured, imap, iclr);
+}
+static DEVICE_ATTR(oberon_capture_rearm_result, 0400,
+		   oberon_capture_rearm_result_show, NULL);
+
+static ssize_t oberon_capture_target_store(struct device *dev,
+					 struct device_attribute *attr,
+					 const char *buf, size_t count)
+{
+	struct oberon_irq_capture *cap = oberon_live_capture;
+	unsigned int cpu;
+
+	if (!cap || dev != &cap->pbm->op->dev || kstrtouint(buf, 0, &cpu))
+		return -EINVAL;
+	guard(mutex)(&oberon_diag_lock);
+	if (cap->target_requested)
+		return -EBUSY;
+	if (cap->ack_requested && (!cap->clear_attempted || cap->clear_result ||
+				   !cap->ack.written || cap->ack_result))
+		return -EBUSY;
+	cap->target_requested = true;
+	cap->target_cpu = cpu;
+	cap->target_result = oberon_target_capture(cap->irq, cpu);
+	return cap->target_result ? cap->target_result : count;
+}
+static DEVICE_ATTR_WO(oberon_capture_target);
+
+static ssize_t oberon_capture_target_result_show(struct device *dev,
+					       struct device_attribute *attr,
+					       char *buf)
+{
+	struct oberon_irq_capture *cap = oberon_live_capture;
+	unsigned long imap, iclr;
+	bool armed, captured;
+	int ret;
+
+	if (!cap || dev != &cap->pbm->op->dev)
+		return -ENODEV;
+	guard(mutex)(&oberon_diag_lock);
+	ret = oberon_capture_state(cap->irq, &armed, &captured, &imap, &iclr);
+	if (ret)
+		return ret;
+	return sysfs_emit(buf,
+		"requested=%u cpu=%u result=%d armed=%u captured=%u imap=%lx iclr=%lx\n",
+		cap->target_requested, cap->target_cpu, cap->target_result,
+		armed, captured, imap, iclr);
+}
+static DEVICE_ATTR(oberon_capture_target_result, 0400,
+		   oberon_capture_target_result_show, NULL);
+
+static int __init oberon_capture_init(void)
+{
+	struct pci_pbm_info *pbm;
+	struct oberon_irq_capture *selected = NULL;
+	unsigned int matches = 0;
+
+	if (!oberon_capture_prepare)
+		return 0;
+	for (pbm = pci_pbm_root; pbm; pbm = pbm->next) {
+		const struct linux_prom64_registers *regs;
+		const __be32 *intr;
+		struct oberon_irq_capture *cap;
+		int len, irq, ret;
+
+		if (!pbm->is_oberon)
+			continue;
+		regs = of_get_property(pbm->op->dev.of_node, "reg", &len);
+		if (!regs || len < sizeof(*regs) ||
+		    regs[0].phys_addr != pbm->pbm_regs ||
+		    regs[0].reg_size < OBERON_DIAG_CE_STATUS + sizeof(u64) ||
+		    pbm->pbm_regs > ~0UL - OBERON_DIAG_CE_STATUS - sizeof(u64))
+			continue;
+		intr = of_get_property(pbm->op->dev.of_node, "interrupts", &len);
+		if (!intr || len < 2 * sizeof(*intr) ||
+		    be32_to_cpup(intr + 1) != 0x3e)
+			continue;
+		irq = platform_get_irq(pbm->op, 1);
+		if (irq <= 0)
+			continue;
+		cap = kzalloc_obj(*cap, GFP_KERNEL);
+		if (!cap)
+			return -ENOMEM;
+		cap->pbm = pbm;
+		cap->generation = 1;
+		cap->irq = irq;
+		timer_setup(&cap->deadline, oberon_capture_deadline, 0);
+		INIT_WORK(&cap->report, oberon_capture_report);
+		ret = oberon_prepare_capture(irq, pbm->pbm_regs + 0x11f0,
+					     oberon_capture_event, cap);
+		if (ret) {
+			kfree(cap);
+			pr_warn("Oberon capture %s: preparation rejected: %d\n",
+				pbm->name, ret);
+		} else {
+			if (pbm->portid == oberon_capture_arm_port) {
+				selected = cap;
+				matches++;
+			}
+			pr_info("Oberon capture %s: prepared only, IRQ remains unarmed\n",
+				pbm->name);
+		}
+	}
+	if (matches == 1) {
+		int ret;
+
+		oberon_live_capture = selected;
+		ret = device_create_file(&selected->pbm->op->dev,
+					 &dev_attr_oberon_capture_arm);
+		if (!ret)
+			ret = device_create_file(&selected->pbm->op->dev,
+						 &dev_attr_oberon_capture_recovery);
+		if (!ret)
+			ret = device_create_file(&selected->pbm->op->dev,
+						 &dev_attr_oberon_capture_clear);
+		if (!ret)
+			ret = device_create_file(&selected->pbm->op->dev,
+						 &dev_attr_oberon_capture_clear_result);
+		if (!ret)
+			ret = device_create_file(&selected->pbm->op->dev,
+						 &dev_attr_oberon_capture_ack);
+		if (!ret)
+			ret = device_create_file(&selected->pbm->op->dev,
+						 &dev_attr_oberon_capture_ack_result);
+		if (!ret)
+			ret = device_create_file(&selected->pbm->op->dev,
+						 &dev_attr_oberon_capture_rearm);
+		if (!ret)
+			ret = device_create_file(&selected->pbm->op->dev,
+						 &dev_attr_oberon_capture_rearm_result);
+		if (!ret)
+			ret = device_create_file(&selected->pbm->op->dev,
+						 &dev_attr_oberon_capture_target);
+		if (!ret)
+			ret = device_create_file(&selected->pbm->op->dev,
+						 &dev_attr_oberon_capture_target_result);
+		if (ret) {
+			device_remove_file(&selected->pbm->op->dev,
+					   &dev_attr_oberon_capture_target);
+			device_remove_file(&selected->pbm->op->dev,
+					   &dev_attr_oberon_capture_rearm_result);
+			device_remove_file(&selected->pbm->op->dev,
+					   &dev_attr_oberon_capture_rearm);
+			device_remove_file(&selected->pbm->op->dev,
+					   &dev_attr_oberon_capture_ack_result);
+			device_remove_file(&selected->pbm->op->dev,
+					   &dev_attr_oberon_capture_ack);
+			device_remove_file(&selected->pbm->op->dev,
+					   &dev_attr_oberon_capture_clear_result);
+			device_remove_file(&selected->pbm->op->dev,
+					   &dev_attr_oberon_capture_clear);
+			device_remove_file(&selected->pbm->op->dev,
+					   &dev_attr_oberon_capture_recovery);
+			device_remove_file(&selected->pbm->op->dev,
+					   &dev_attr_oberon_capture_arm);
+			oberon_live_capture = NULL;
+		}
+		pr_warn("Oberon capture %s: arm interface result=%d; ownership unverified, route unarmed\n",
+			selected->pbm->name, ret);
+	}
+	return 0;
+}
+late_initcall(oberon_capture_init);

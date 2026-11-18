@@ -46,6 +46,9 @@ void irq_install_pre_handler(int irq,
 #define irq_canonicalize(irq)	(irq)
 unsigned int build_irq(int inofixup, unsigned long iclr, unsigned long imap);
 unsigned int oberon_build_irq(int inofixup, unsigned long iclr, unsigned long imap);
+/* The callback and argument must remain valid for the life of the IRQ. */
+int oberon_prepare_capture(unsigned int irq, unsigned long imap,
+			   void (*capture)(void *arg, bool late), void *arg);
 unsigned int sun4v_build_irq(u32 devhandle, unsigned int devino);
 unsigned int sun4v_build_virq(u32 devhandle, unsigned int devino);
 unsigned int sun4v_build_msi(u32 devhandle, unsigned int *irq_p,
@@ -61,6 +64,20 @@ void sun4u_destroy_msi(unsigned int irq);
 
 unsigned int irq_alloc(unsigned int dev_handle, unsigned int dev_ino);
 void irq_free(unsigned int irq);
+
+struct oberon_ack_result {
+	unsigned long before, after;
+	bool written;
+};
+int oberon_ack_capture(unsigned int irq, int (*check)(void *), void *arg,
+		       struct oberon_ack_result *result);
+bool oberon_capture_quarantined(unsigned int irq);
+int oberon_arm_capture(unsigned int irq);
+int oberon_target_capture(unsigned int irq, unsigned int cpu);
+int oberon_rearm_capture(unsigned int irq, int (*check)(void *), void *arg);
+int oberon_capture_state(unsigned int irq, bool *armed, bool *captured,
+			 unsigned long *imap, unsigned long *iclr);
+int oberon_disarm_capture(unsigned int irq);
 
 void fixup_irqs(void);
 

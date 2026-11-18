@@ -7,6 +7,7 @@ Sparc Architecture
 
    console
    oberon-msi
+   oberon-error-interrupts
    adi
 
    oradax/oracle-dax
