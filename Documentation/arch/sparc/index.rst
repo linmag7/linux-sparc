@@ -6,6 +6,7 @@ Sparc Architecture
    :maxdepth: 1
 
    console
+   oberon-error-interrupts
    adi
 
    oradax/oracle-dax
