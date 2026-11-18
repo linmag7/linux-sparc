@@ -1,0 +1,22 @@
+From: Magnus Lindholm <linmag7@gmail.com>
+Subject: [RFC PATCH 00/16] sparc64: archive Oberon error experiments on M3000 v5
+
+Port the fifteen historical error-interrupt implementation commits onto
+M3000 v5 and document the dependency and remaining limitations. This is
+an experimental personal-repository branch, not a Linux-list submission.
+The original v4 branch remains intact. Old MSI patches are not included.
+
+The port applied without conflicts and retained all original patch IDs.
+The v5 foundation and error code touch disjoint files; the complete delta
+between old and new implementation trees equals the v4-to-v5 base delta.
+No new build or boot test was performed. Historical testing does not
+qualify this exact stack. See README.rst for the known recovery limits.
+
+This series contains 15 implementation commits and one documentation commit.
+All commits carry Magnus Lindholm's sign-off. The archived bounded MSI
+series is separate and has not been combined with this branch.
+
+Direct prerequisite: archive/2026-11-18/fujitsu/m3000-v5
+base-commit: 4542781ab46d822372ec5e3ce5a3ad680fcc6998
+
+Codex assisted with the mechanical port, verification and documentation.

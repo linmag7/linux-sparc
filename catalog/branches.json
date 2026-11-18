@@ -258,5 +258,34 @@
     ],
     "implementation_tip": "6e75fedce50a17808e9737c629f8b630d0d7f4b8",
     "implementation_tree": "b921b2e987d73a672526c883ca70b0efeba162f5"
+  },
+  {
+    "branch": "archive/2026-11-18/fujitsu/m3000-error-interrupts-v5",
+    "base": "4542781ab46d822372ec5e3ce5a3ad680fcc6998",
+    "tip": "e6d25a01d3a54f227ef177fb88bcf2991bc8c26f",
+    "patches": [
+      "series/fujitsu/m3000-error-interrupts-v5/0001-sparc64-add-opt-in-passive-Oberon-MMU-snapshots.patch",
+      "series/fujitsu/m3000-error-interrupts-v5/0002-sparc64-extend-passive-Oberon-snapshots-to-PEC-statu.patch",
+      "series/fujitsu/m3000-error-interrupts-v5/0003-sparc64-capture-candidate-Oberon-other-event-header-.patch",
+      "series/fujitsu/m3000-error-interrupts-v5/0004-sparc64-compare-early-and-runtime-passive-Oberon-sna.patch",
+      "series/fujitsu/m3000-error-interrupts-v5/0005-sparc64-prepare-a-disabled-Oberon-capture-once-IRQ-f.patch",
+      "series/fujitsu/m3000-error-interrupts-v5/0006-sparc64-preserve-bounded-Oberon-capture-fault-logs.patch",
+      "series/fujitsu/m3000-error-interrupts-v5/0007-sparc64-add-an-opt-in-Oberon-single-route-capture-ex.patch",
+      "series/fujitsu/m3000-error-interrupts-v5/0008-sparc64-check-captured-RUC-state-before-planning-rec.patch",
+      "series/fujitsu/m3000-error-interrupts-v5/0009-sparc64-add-a-one-shot-captured-RUC-clear-experiment.patch",
+      "series/fujitsu/m3000-error-interrupts-v5/0010-sparc64-add-a-masked-one-shot-Oberon-acknowledgment-.patch",
+      "series/fujitsu/m3000-error-interrupts-v5/0011-sparc64-add-one-bounded-Oberon-rearm-generation.patch",
+      "series/fujitsu/m3000-error-interrupts-v5/0012-sparc64-test-masked-Oberon-routing-to-another-CPU.patch",
+      "series/fujitsu/m3000-error-interrupts-v5/0013-sparc64-permit-Oberon-target-selection-after-acknowl.patch",
+      "series/fujitsu/m3000-error-interrupts-v5/0014-sparc64-panic-on-terminal-Oberon-capture-containment.patch",
+      "series/fujitsu/m3000-error-interrupts-v5/0015-sparc64-retain-Oberon-captures-delivered-after-maski.patch",
+      "series/fujitsu/m3000-error-interrupts-v5/0016-sparc64-document-the-M3000-v5-error-interrupt-port.patch"
+    ],
+    "status": "Experimental error-interrupt port onto M3000 v5; mechanically verified, not newly built/booted",
+    "dependencies": [
+      "archive/2026-11-18/fujitsu/m3000-v5"
+    ],
+    "implementation_tip": "7f306d3d46a546bba6c02f99dee33ab436704fa5",
+    "historical_implementation_tip": "6e75fedce50a17808e9737c629f8b630d0d7f4b8"
   }
 ]

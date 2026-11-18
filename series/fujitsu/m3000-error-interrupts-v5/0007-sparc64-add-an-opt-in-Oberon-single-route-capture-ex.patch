@@ -1,0 +1,274 @@
+From 5e52d54216ab80c7a9f140bc29be50a38d8b0de9 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Thu, 15 Oct 2026 12:35:04 +0200
+Subject: [RFC PATCH 07/16] sparc64: add an opt-in Oberon single-route capture
+ experiment
+
+Expose a runtime arm trigger for one prepared Oberon error route.
+Preserve its inherited CPU-0/controller-0 mapping, disable delivery
+before capturing, and expire the arm after five seconds without EOI.
+
+Reject changed routes and rearming. Stop the executing CPU without
+firmware calls on failed readback or unexpected delivery. This test
+path does not provide DMA containment or establish firmware ownership.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/irq_64.h |  3 ++
+ arch/sparc/kernel/irq_64.c      | 88 ++++++++++++++++++++++++++++++++-
+ arch/sparc/kernel/pci_fire.c    | 61 +++++++++++++++++++++++
+ 3 files changed, 151 insertions(+), 1 deletion(-)
+
+diff --git a/arch/sparc/include/asm/irq_64.h b/arch/sparc/include/asm/irq_64.h
+index 9f5cf9d2548f..f7448c40de5a 100644
+--- a/arch/sparc/include/asm/irq_64.h
++++ b/arch/sparc/include/asm/irq_64.h
+@@ -65,6 +65,9 @@ void sun4u_destroy_msi(unsigned int irq);
+ unsigned int irq_alloc(unsigned int dev_handle, unsigned int dev_ino);
+ void irq_free(unsigned int irq);
+ 
++int oberon_arm_capture(unsigned int irq);
++int oberon_disarm_capture(unsigned int irq);
++
+ void fixup_irqs(void);
+ 
+ static inline void set_softint(unsigned long bits)
+diff --git a/arch/sparc/kernel/irq_64.c b/arch/sparc/kernel/irq_64.c
+index 3fb63043e180..1501df3b1c8d 100644
+--- a/arch/sparc/kernel/irq_64.c
++++ b/arch/sparc/kernel/irq_64.c
+@@ -211,6 +211,9 @@ struct irq_handler_data {
+ 	void (*capture)(void *arg);
+ 	void *capture_arg;
+ 	bool captured;
++	bool capture_live;
++	bool capture_armed;
++	unsigned long capture_baseline;
+ };
+ 
+ static inline unsigned int irq_data_to_handle(struct irq_data *data)
+@@ -680,13 +683,39 @@ unsigned int oberon_build_irq(int inofixup, unsigned long iclr,
+ 	return irq;
+ }
+ 
+-/* This prepared-only flow never acknowledges or rearms the hardware. */
++/* A terminal experiment failure deliberately avoids firmware console entry. */
++static unsigned int oberon_capture_failure;
++
++static void __noreturn oberon_capture_stop(unsigned int reason)
++{
++	WRITE_ONCE(oberon_capture_failure, reason);
++	local_irq_disable();
++	for (;;)
++		cpu_relax();
++}
++
++static bool oberon_capture_mask(struct irq_handler_data *data)
++{
++	unsigned long val = upa_readq(data->imap);
++
++	upa_writeq(val & ~IMAP_VALID, data->imap);
++	return upa_readq(data->imap) == (val & ~IMAP_VALID);
++}
++
++/* The dedicated flow never clears source status or writes ICLR. */
+ static void oberon_capture_irq(struct irq_desc *desc)
+ {
+ 	struct irq_handler_data *data;
+ 
+ 	guard(raw_spinlock)(&desc->lock);
+ 	data = irq_desc_get_handler_data(desc);
++	if (data->capture_live) {
++		if (!data->capture_armed || data->captured)
++			oberon_capture_stop(3);
++		if (!oberon_capture_mask(data))
++			oberon_capture_stop(2);
++		data->capture_armed = false;
++	}
+ 	if (!data->captured) {
+ 		data->captured = true;
+ 		data->capture(data->capture_arg);
+@@ -735,6 +764,7 @@ int oberon_prepare_capture(unsigned int irq, unsigned long imap,
+ 	data->capture = capture;
+ 	data->capture_arg = arg;
+ 	data->captured = false;
++	data->capture_baseline = upa_readq(imap);
+ 	desc->status_use_accessors |= IRQ_NOREQUEST | IRQ_NOPROBE |
+ 		IRQ_NOAUTOEN | IRQ_NO_BALANCING;
+ 	desc->irq_data.chip = &oberon_capture_chip;
+@@ -745,6 +775,62 @@ int oberon_prepare_capture(unsigned int irq, unsigned long imap,
+ 	return ret;
+ }
+ 
++int oberon_arm_capture(unsigned int irq)
++{
++	struct irq_desc *desc = irq_to_desc(irq);
++	struct irq_handler_data *data;
++	unsigned long flags, val;
++	int ret = -EBUSY;
++
++	if (!desc || IS_ENABLED(CONFIG_HOTPLUG_CPU))
++		return -EINVAL;
++	raw_spin_lock_irqsave(&desc->lock, flags);
++	data = irq_desc_get_handler_data(desc);
++	if (desc->irq_data.chip != &oberon_capture_chip || !data ||
++	    desc->action || data->captured || data->capture_live)
++		goto out;
++	/* This first experiment accepts only the observed CPU-0/controller-0 route. */
++	val = upa_readq(data->imap);
++	if (val != 0x40 || val != data->capture_baseline || !cpu_online(0))
++		goto out;
++	data->capture_live = true;
++	data->capture_armed = true;
++	upa_writeq(val | IMAP_VALID, data->imap);
++	if (upa_readq(data->imap) != (val | IMAP_VALID)) {
++		oberon_capture_mask(data);
++		oberon_capture_stop(1);
++	}
++	ret = 0;
++out:
++	raw_spin_unlock_irqrestore(&desc->lock, flags);
++	return ret;
++}
++
++int oberon_disarm_capture(unsigned int irq)
++{
++	struct irq_desc *desc = irq_to_desc(irq);
++	struct irq_handler_data *data;
++	unsigned long flags;
++	int ret = -EINVAL;
++
++	if (!desc)
++		return ret;
++	raw_spin_lock_irqsave(&desc->lock, flags);
++	data = irq_desc_get_handler_data(desc);
++	if (desc->irq_data.chip != &oberon_capture_chip || !data ||
++	    !data->capture_live)
++		goto out;
++	if (data->capture_armed) {
++		if (!oberon_capture_mask(data))
++			oberon_capture_stop(4);
++		data->capture_armed = false;
++	}
++	ret = data->captured;
++out:
++	raw_spin_unlock_irqrestore(&desc->lock, flags);
++	return ret;
++}
++
+ static unsigned int sun4v_build_common(u32 devhandle, unsigned int devino,
+ 		void (*handler_data_init)(struct irq_handler_data *data,
+ 		u32 devhandle, unsigned int devino),
+diff --git a/arch/sparc/kernel/pci_fire.c b/arch/sparc/kernel/pci_fire.c
+index 30d27b537c9f..12f220b8e8bf 100644
+--- a/arch/sparc/kernel/pci_fire.c
++++ b/arch/sparc/kernel/pci_fire.c
+@@ -4,6 +4,7 @@
+  * Copyright (C) 2007 David S. Miller (davem@davemloft.net)
+  */
+ #include <linux/workqueue.h>
++#include <linux/timer.h>
+ #include <linux/kernel.h>
+ #include <linux/pci.h>
+ #include <linux/slab.h>
+@@ -736,12 +737,53 @@ subsys_initcall(fire_init);
+ 
+ struct oberon_irq_capture {
+ 	struct work_struct report;
++	struct timer_list deadline;
++	unsigned int irq;
+ 	struct pci_pbm_info *pbm;
+ 	u64 status[8], status_after[8];
+ 	u64 fault[2], header[4], header_after[4];
+ 	bool fault_read, headers_read;
+ };
+ 
++static int oberon_capture_arm_port = -1;
++
++static int __init oberon_capture_arm_setup(char *str)
++{
++	int port, ret = kstrtoint(str, 0, &port);
++
++	if (ret || port < 0 || port > 1)
++		return -EINVAL;
++	oberon_capture_arm_port = port;
++	return 0;
++}
++early_param("oberon_capture_arm_port", oberon_capture_arm_setup);
++
++static void oberon_capture_deadline(struct timer_list *timer)
++{
++	struct oberon_irq_capture *cap = timer_container_of(cap, timer, deadline);
++
++	oberon_disarm_capture(cap->irq);
++}
++
++static struct oberon_irq_capture *oberon_live_capture;
++
++static ssize_t oberon_capture_arm_store(struct device *dev,
++				       struct device_attribute *attr,
++				       const char *buf, size_t count)
++{
++	struct oberon_irq_capture *cap = oberon_live_capture;
++	int ret;
++
++	if (!cap || dev != &cap->pbm->op->dev || !sysfs_streq(buf, "1"))
++		return -EINVAL;
++	ret = oberon_arm_capture(cap->irq);
++	if (ret)
++		return ret;
++	mod_timer(&cap->deadline, jiffies + 5 * HZ);
++	return count;
++}
++static DEVICE_ATTR_WO(oberon_capture_arm);
++
+ static bool oberon_capture_prepare;
+ 
+ static int __init oberon_capture_setup(char *str)
+@@ -814,6 +856,8 @@ static void oberon_capture_event(void *arg)
+ static int __init oberon_capture_init(void)
+ {
+ 	struct pci_pbm_info *pbm;
++	struct oberon_irq_capture *selected = NULL;
++	unsigned int matches = 0;
+ 
+ 	if (!oberon_capture_prepare)
+ 		return 0;
+@@ -842,6 +886,8 @@ static int __init oberon_capture_init(void)
+ 		if (!cap)
+ 			return -ENOMEM;
+ 		cap->pbm = pbm;
++		cap->irq = irq;
++		timer_setup(&cap->deadline, oberon_capture_deadline, 0);
+ 		INIT_WORK(&cap->report, oberon_capture_report);
+ 		ret = oberon_prepare_capture(irq, pbm->pbm_regs + 0x11f0,
+ 					     oberon_capture_event, cap);
+@@ -850,10 +896,25 @@ static int __init oberon_capture_init(void)
+ 			pr_warn("Oberon capture %s: preparation rejected: %d\n",
+ 				pbm->name, ret);
+ 		} else {
++			if (pbm->portid == oberon_capture_arm_port) {
++				selected = cap;
++				matches++;
++			}
+ 			pr_info("Oberon capture %s: prepared only, IRQ remains unarmed\n",
+ 				pbm->name);
+ 		}
+ 	}
++	if (matches == 1) {
++		int ret;
++
++		oberon_live_capture = selected;
++		ret = device_create_file(&selected->pbm->op->dev,
++					 &dev_attr_oberon_capture_arm);
++		if (ret)
++			oberon_live_capture = NULL;
++		pr_warn("Oberon capture %s: arm interface result=%d; ownership unverified, route unarmed\n",
++			selected->pbm->name, ret);
++	}
+ 	return 0;
+ }
+ late_initcall(oberon_capture_init);
+-- 
+2.43.0
+

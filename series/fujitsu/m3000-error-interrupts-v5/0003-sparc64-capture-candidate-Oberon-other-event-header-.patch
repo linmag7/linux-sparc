@@ -1,0 +1,85 @@
+From 952be3663316f9b1f649df95b3892144902e1209 Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Wed, 14 Oct 2026 23:25:36 +0200
+Subject: [RFC PATCH 03/16] sparc64: capture candidate Oberon other-event
+ header logs
+
+The passive PEC snapshot reports primary and secondary RUC on both
+leaves. Capture both receive and transmit other-event headers when
+primary RUC or WUC is set, preserving raw values and a second sample.
+
+These offsets lie within the already checked leaf aperture. Keep reads
+before printk and leave masks, routing and latches untouched. Log
+stability does not establish attribution, especially for secondary events.
+
+Reference: FreeBSD 9aed7107bbfb, sys/sparc64/pci/fire.c:fire_dmc_pec.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/pci_fire.c | 29 +++++++++++++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+diff --git a/arch/sparc/kernel/pci_fire.c b/arch/sparc/kernel/pci_fire.c
+index 7fa8e49d1a5e..d5a64d50c733 100644
+--- a/arch/sparc/kernel/pci_fire.c
++++ b/arch/sparc/kernel/pci_fire.c
+@@ -561,6 +561,11 @@ early_param("oberon_diag", oberon_diag_setup);
+ #define OBERON_DIAG_ILU_STATUS	0x51010UL
+ #define OBERON_DIAG_PEC_STATUS	0x51808UL
+ #define OBERON_DIAG_OE_STATUS	0x81010UL
++#define OBERON_DIAG_OE_RX1	0x81028UL
++#define OBERON_DIAG_OE_RX2	0x81030UL
++#define OBERON_DIAG_OE_TX1	0x81038UL
++#define OBERON_DIAG_OE_TX2	0x81040UL
++#define OBERON_DIAG_OE_RUC_WUC	(BIT_ULL(16) | BIT_ULL(17))
+ #define OBERON_DIAG_UE_STATUS	0x91010UL
+ #define OBERON_DIAG_CE_STATUS	0xa1010UL
+ 
+@@ -576,6 +581,9 @@ static void __init oberon_diag_snapshot(struct pci_pbm_info *pbm)
+ 	u64 pec = 0, pec_after = 0, ilu = 0, ilu_after = 0;
+ 	u64 oe = 0, oe_after = 0, ue = 0, ue_after = 0;
+ 	u64 ce = 0, ce_after = 0;
++	u64 rx1 = 0, rx2 = 0, tx1 = 0, tx2 = 0;
++	u64 rx1_after = 0, rx2_after = 0, tx1_after = 0, tx2_after = 0;
++	bool headers_read = false;
+ 	bool pec_read;
+ 	u64 dmc_enable, mmu_enable, log_enable, imap;
+ 	bool logs_read;
+@@ -620,6 +628,18 @@ static void __init oberon_diag_snapshot(struct pci_pbm_info *pbm)
+ 		ce = upa_readq(base + OBERON_DIAG_CE_STATUS);
+ 		ue = upa_readq(base + OBERON_DIAG_UE_STATUS);
+ 		ilu = upa_readq(base + OBERON_DIAG_ILU_STATUS);
++		/* Primary RUC/WUC gates candidate logs; secondary events lack attribution. */
++		headers_read = !!(oe & OBERON_DIAG_OE_RUC_WUC);
++		if (headers_read) {
++			rx1 = upa_readq(base + OBERON_DIAG_OE_RX1);
++			rx2 = upa_readq(base + OBERON_DIAG_OE_RX2);
++			tx1 = upa_readq(base + OBERON_DIAG_OE_TX1);
++			tx2 = upa_readq(base + OBERON_DIAG_OE_TX2);
++			tx2_after = upa_readq(base + OBERON_DIAG_OE_TX2);
++			tx1_after = upa_readq(base + OBERON_DIAG_OE_TX1);
++			rx2_after = upa_readq(base + OBERON_DIAG_OE_RX2);
++			rx1_after = upa_readq(base + OBERON_DIAG_OE_RX1);
++		}
+ 		ilu_after = upa_readq(base + OBERON_DIAG_ILU_STATUS);
+ 		ue_after = upa_readq(base + OBERON_DIAG_UE_STATUS);
+ 		ce_after = upa_readq(base + OBERON_DIAG_CE_STATUS);
+@@ -652,6 +672,15 @@ static void __init oberon_diag_snapshot(struct pci_pbm_info *pbm)
+ 		dp, ue_after, ilu_after,
+ 		pec != pec_after || oe != oe_after || ce != ce_after ||
+ 		ue != ue_after || ilu != ilu_after);
++	pr_info("Oberon diag %pOF: headers_read=%u headers_changed=%u\n",
++		dp, headers_read, rx1 != rx1_after || rx2 != rx2_after ||
++		tx1 != tx1_after || tx2 != tx2_after);
++	pr_info("Oberon diag %pOF: rx1=%016llx rx2=%016llx\n", dp, rx1, rx2);
++	pr_info("Oberon diag %pOF: tx1=%016llx tx2=%016llx\n", dp, tx1, tx2);
++	pr_info("Oberon diag %pOF: rx1_after=%016llx rx2_after=%016llx\n",
++		dp, rx1_after, rx2_after);
++	pr_info("Oberon diag %pOF: tx1_after=%016llx tx2_after=%016llx\n",
++		dp, tx1_after, tx2_after);
+ }
+ 
+ static int __init oberon_diag_init(void)
+-- 
+2.43.0
+

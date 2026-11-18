@@ -143,3 +143,12 @@ release-ready. Retain old snapshots and publish later revisions separately.
 archive/2026-11-18/fujitsu/m3000-error-interrupts-experimental
   Original 15 error-interrupt commits on exact M3000 v4, plus signed
   dependency/limitations documentation. See series/fujitsu/m3000-error-interrupts/.
+
+Current v5 error-interrupt port
+------------------------------
+archive/2026-11-18/fujitsu/m3000-error-interrupts-v5
+  15 original implementation commits ported onto M3000 v5, plus signed
+  dependency notes. Applied without conflicts; patch IDs and complete
+  foundation delta verified. Not newly built or booted. The historical v4
+  branch and all prior snapshots remain intact. See
+  series/fujitsu/m3000-error-interrupts-v5/ and its cover letter.

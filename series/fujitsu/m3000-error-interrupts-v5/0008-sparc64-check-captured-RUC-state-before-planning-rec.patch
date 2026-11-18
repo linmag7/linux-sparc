@@ -1,0 +1,136 @@
+From a9b45424741ef7798669094a1495158b68eb906c Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Thu, 15 Oct 2026 12:51:08 +0200
+Subject: [RFC PATCH 08/16] sparc64: check captured RUC state before planning
+ recovery
+
+Expose a root-only read-only check for the selected capture route.
+Require a completed capture, unchanged disabled mapping, matching
+RUC-only status and stable candidate headers before reporting eligibility.
+
+The check neither clears status nor acknowledges the controller. Matching
+samples do not exclude a concurrent same-bit event or establish firmware
+ownership; write-bearing recovery needs its own serialized checks.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/irq_64.h |  1 +
+ arch/sparc/kernel/irq_64.c      | 18 ++++++++++++
+ arch/sparc/kernel/pci_fire.c    | 52 ++++++++++++++++++++++++++++++++-
+ 3 files changed, 70 insertions(+), 1 deletion(-)
+
+diff --git a/arch/sparc/include/asm/irq_64.h b/arch/sparc/include/asm/irq_64.h
+index f7448c40de5a..e4ca603460cd 100644
+--- a/arch/sparc/include/asm/irq_64.h
++++ b/arch/sparc/include/asm/irq_64.h
+@@ -65,6 +65,7 @@ void sun4u_destroy_msi(unsigned int irq);
+ unsigned int irq_alloc(unsigned int dev_handle, unsigned int dev_ino);
+ void irq_free(unsigned int irq);
+ 
++bool oberon_capture_quarantined(unsigned int irq);
+ int oberon_arm_capture(unsigned int irq);
+ int oberon_disarm_capture(unsigned int irq);
+ 
+diff --git a/arch/sparc/kernel/irq_64.c b/arch/sparc/kernel/irq_64.c
+index 1501df3b1c8d..4fdf0b201ac6 100644
+--- a/arch/sparc/kernel/irq_64.c
++++ b/arch/sparc/kernel/irq_64.c
+@@ -775,6 +775,24 @@ int oberon_prepare_capture(unsigned int irq, unsigned long imap,
+ 	return ret;
+ }
+ 
++bool oberon_capture_quarantined(unsigned int irq)
++{
++	struct irq_desc *desc = irq_to_desc(irq);
++	struct irq_handler_data *data;
++	unsigned long flags;
++	bool ready = false;
++
++	if (!desc)
++		return false;
++	raw_spin_lock_irqsave(&desc->lock, flags);
++	data = irq_desc_get_handler_data(desc);
++	if (desc->irq_data.chip == &oberon_capture_chip && data &&
++	    data->capture_live && data->captured && !data->capture_armed)
++		ready = upa_readq(data->imap) == data->capture_baseline;
++	raw_spin_unlock_irqrestore(&desc->lock, flags);
++	return ready;
++}
++
+ int oberon_arm_capture(unsigned int irq)
+ {
+ 	struct irq_desc *desc = irq_to_desc(irq);
+diff --git a/arch/sparc/kernel/pci_fire.c b/arch/sparc/kernel/pci_fire.c
+index 12f220b8e8bf..4d5bf9036bd2 100644
+--- a/arch/sparc/kernel/pci_fire.c
++++ b/arch/sparc/kernel/pci_fire.c
+@@ -804,6 +804,50 @@ static const unsigned long oberon_capture_header_regs[] = {
+ 	OBERON_DIAG_OE_TX1, OBERON_DIAG_OE_TX2,
+ };
+ 
++/* A matching snapshot permits review of a clear, not automatic recovery. */
++static int oberon_capture_recovery_check(struct oberon_irq_capture *cap)
++{
++	const u64 expected[] = { 2, 0, 0, 1, BIT_ULL(16) | BIT_ULL(48), 0, 0, 0 };
++	unsigned long base = cap->pbm->pbm_regs;
++	int pass, i;
++
++	if (!oberon_capture_quarantined(cap->irq))
++		return -EBUSY;
++	for (i = 0; i < ARRAY_SIZE(expected); i++)
++		if (cap->status[i] != expected[i] ||
++		    cap->status_after[i] != expected[i])
++			return -EOPNOTSUPP;
++	if (!cap->headers_read)
++		return -EOPNOTSUPP;
++	for (i = 0; i < ARRAY_SIZE(cap->header); i++)
++		if (cap->header[i] != cap->header_after[i])
++			return -EAGAIN;
++	for (pass = 0; pass < 2; pass++) {
++		for (i = 0; i < ARRAY_SIZE(expected); i++)
++			if (upa_readq(base + oberon_capture_status_regs[i]) != expected[i])
++				return -EAGAIN;
++		for (i = 0; i < ARRAY_SIZE(cap->header); i++)
++			if (upa_readq(base + oberon_capture_header_regs[i]) != cap->header[i])
++				return -EAGAIN;
++	}
++	return oberon_capture_quarantined(cap->irq) ? 0 : -EBUSY;
++}
++
++static ssize_t oberon_capture_recovery_show(struct device *dev,
++					  struct device_attribute *attr,
++					  char *buf)
++{
++	struct oberon_irq_capture *cap = oberon_live_capture;
++	int ret;
++
++	if (!cap || dev != &cap->pbm->op->dev)
++		return -ENODEV;
++	ret = oberon_capture_recovery_check(cap);
++	return sysfs_emit(buf, "check=%d offset=0x81018 mask=0x0001000000010000 writes=0\n",
++			  ret);
++}
++static DEVICE_ATTR(oberon_capture_recovery, 0400, oberon_capture_recovery_show, NULL);
++
+ static void oberon_capture_report(struct work_struct *work)
+ {
+ 	struct oberon_irq_capture *cap = container_of(work,
+@@ -910,8 +954,14 @@ static int __init oberon_capture_init(void)
+ 		oberon_live_capture = selected;
+ 		ret = device_create_file(&selected->pbm->op->dev,
+ 					 &dev_attr_oberon_capture_arm);
+-		if (ret)
++		if (!ret)
++			ret = device_create_file(&selected->pbm->op->dev,
++						 &dev_attr_oberon_capture_recovery);
++		if (ret) {
++			device_remove_file(&selected->pbm->op->dev,
++					   &dev_attr_oberon_capture_arm);
+ 			oberon_live_capture = NULL;
++		}
+ 		pr_warn("Oberon capture %s: arm interface result=%d; ownership unverified, route unarmed\n",
+ 			selected->pbm->name, ret);
+ 	}
+-- 
+2.43.0
+

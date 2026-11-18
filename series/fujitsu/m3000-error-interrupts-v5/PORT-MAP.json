@@ -1,0 +1,92 @@
+[
+  {
+    "original_commit": "029bdee9d0872f18e08b48ef00d098abb333ddb9",
+    "ported_commit": "bbe6fa77e013d73c0f094b93c6284ee1db3e3a91",
+    "patch_id": "861627504916ffdc81a268f1a143a23dc0a2cff8",
+    "subject": "sparc64: add opt-in passive Oberon MMU snapshots"
+  },
+  {
+    "original_commit": "22b9d2930197ca733dbcda578aed7a866b71e390",
+    "ported_commit": "000cd5960f63663c0da3f2129ae8269f6968664d",
+    "patch_id": "4e755896c0ca275db76689d969006934039dfecf",
+    "subject": "sparc64: extend passive Oberon snapshots to PEC status"
+  },
+  {
+    "original_commit": "88a221935e498e6fe36746c86962608ab0942b14",
+    "ported_commit": "952be3663316f9b1f649df95b3892144902e1209",
+    "patch_id": "2d82d87b46f90a9154f96f308b3b5af0fd086715",
+    "subject": "sparc64: capture candidate Oberon other-event header logs"
+  },
+  {
+    "original_commit": "98cff5a46f75c27fc7f71ea4e8b4e262f0c34ec9",
+    "ported_commit": "a4b2c7ae0f60b3bb29b041694721abfa1b8fc2fe",
+    "patch_id": "a3bffb0b8c4475f4458e3a80d7bd50f2461e09ae",
+    "subject": "sparc64: compare early and runtime passive Oberon snapshots"
+  },
+  {
+    "original_commit": "1ed12b3ad58fcb2009d0c9a45f61def57aaade41",
+    "ported_commit": "1e87e533d239c98068e6f197a58482f09d7eb6ea",
+    "patch_id": "914e34ced06ee888b6478ea7c3bafe6bdfc51410",
+    "subject": "sparc64: prepare a disabled Oberon capture-once IRQ flow"
+  },
+  {
+    "original_commit": "55cd3a54db24180fde09721565913d4d8bbc21a3",
+    "ported_commit": "06912d268efa73c903d57134275843fc392519cd",
+    "patch_id": "08e0b6aafea8dc1aafc5b785b6e02086aa45fa49",
+    "subject": "sparc64: preserve bounded Oberon capture fault logs"
+  },
+  {
+    "original_commit": "6f6114549bde2cd4c49092052609b85d1b2fa677",
+    "ported_commit": "5e52d54216ab80c7a9f140bc29be50a38d8b0de9",
+    "patch_id": "137f8c13bae20af3f66811befba453fc5cd2b7cc",
+    "subject": "sparc64: add an opt-in Oberon single-route capture experiment"
+  },
+  {
+    "original_commit": "ebc704ee786eeeba4bd7a8b5bca0b15c8c82a57e",
+    "ported_commit": "a9b45424741ef7798669094a1495158b68eb906c",
+    "patch_id": "a6197006f10bde4905b029d49ad0e3370c61226d",
+    "subject": "sparc64: check captured RUC state before planning recovery"
+  },
+  {
+    "original_commit": "f753b1fb609c4e6901b799222b7d564c20b9d0ef",
+    "ported_commit": "6886f1701876dcadecb795958871ce24b5bfedbf",
+    "patch_id": "01b816d015c24eeb0de09adf648bf5d4e7ddb639",
+    "subject": "sparc64: add a one-shot captured RUC clear experiment"
+  },
+  {
+    "original_commit": "0c517a98ef565d3490fd64b766bc4c5dbf9e06fc",
+    "ported_commit": "e95b485a64f73fe596a326cafe6503d51ee2f61d",
+    "patch_id": "21eb19de95f324131665f241768789fdcaf87991",
+    "subject": "sparc64: add a masked one-shot Oberon acknowledgment experiment"
+  },
+  {
+    "original_commit": "f08799b864d1b3a80bd7037d9fdd75e49911afdb",
+    "ported_commit": "633c3676ab6c91e9783a7f6eff5d1b4273748e62",
+    "patch_id": "f125e77b0456e085cb2d3ba2172214906297369d",
+    "subject": "sparc64: add one bounded Oberon rearm generation"
+  },
+  {
+    "original_commit": "e465457acaaafdf530acbbf0e150dc1a5a4c0d63",
+    "ported_commit": "e0eb77a1c740659c8ba492951be91e8288851f9c",
+    "patch_id": "2da17930409d859e13d73092d176939c179905cd",
+    "subject": "sparc64: test masked Oberon routing to another CPU"
+  },
+  {
+    "original_commit": "982711d6fa33a9253f999ee47187048df14ccffc",
+    "ported_commit": "ad15f4cf2374391a94b73938590b006138bd5d53",
+    "patch_id": "48e5441c7c577d6701b0470684c3a679feca71a7",
+    "subject": "sparc64: permit Oberon target selection after acknowledgment"
+  },
+  {
+    "original_commit": "9663c938bcf75452170b16b82f56feeeba6ef416",
+    "ported_commit": "333668d31a23b00b04e4d61b951b5e4795373c8b",
+    "patch_id": "58467e6a27cc41909eac74323830e18c2d1bfcf6",
+    "subject": "sparc64: panic on terminal Oberon capture containment failure"
+  },
+  {
+    "original_commit": "6e75fedce50a17808e9737c629f8b630d0d7f4b8",
+    "ported_commit": "7f306d3d46a546bba6c02f99dee33ab436704fa5",
+    "patch_id": "f36322daee6a8ea9f851a8298f2f6578230b9e4a",
+    "subject": "sparc64: retain Oberon captures delivered after masking"
+  }
+]

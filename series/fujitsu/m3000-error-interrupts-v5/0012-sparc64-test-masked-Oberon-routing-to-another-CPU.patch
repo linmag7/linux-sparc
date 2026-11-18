@@ -1,0 +1,254 @@
+From e0eb77a1c740659c8ba492951be91e8288851f9c Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Thu, 15 Oct 2026 14:05:33 +0200
+Subject: [RFC PATCH 12/16] sparc64: test masked Oberon routing to another CPU
+
+Allow one destination selection before initial capture while IMAP is
+invalid and ICLR idle. Change only the ten-bit target field and verify
+readback; restore the disabled mapping on failure and prohibit arming.
+Record the receiving Linux CPU and hardware ITID in the deferred report.
+
+JPS2 Common Specification 9.3.3.1-2 defines destination Interrupt IDs.
+Oberon destination bits 30:21 follow the existing target helper; retain
+controller selection because the prepared interrupt bucket relies on it.
+Keep the experiment default-off with CPU hotplug disabled.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/irq_64.h |  1 +
+ arch/sparc/kernel/irq_64.c      | 59 +++++++++++++++++++++++++---
+ arch/sparc/kernel/pci_fire.c    | 68 +++++++++++++++++++++++++++++++--
+ 3 files changed, 120 insertions(+), 8 deletions(-)
+
+diff --git a/arch/sparc/include/asm/irq_64.h b/arch/sparc/include/asm/irq_64.h
+index 74634943b385..2a3fa756f8f6 100644
+--- a/arch/sparc/include/asm/irq_64.h
++++ b/arch/sparc/include/asm/irq_64.h
+@@ -73,6 +73,7 @@ int oberon_ack_capture(unsigned int irq, int (*check)(void *), void *arg,
+ 		       struct oberon_ack_result *result);
+ bool oberon_capture_quarantined(unsigned int irq);
+ int oberon_arm_capture(unsigned int irq);
++int oberon_target_capture(unsigned int irq, unsigned int cpu);
+ int oberon_rearm_capture(unsigned int irq, int (*check)(void *), void *arg);
+ int oberon_capture_state(unsigned int irq, bool *armed, bool *captured,
+ 			 unsigned long *imap, unsigned long *iclr);
+diff --git a/arch/sparc/kernel/irq_64.c b/arch/sparc/kernel/irq_64.c
+index c20955728d18..531c9cf2d41a 100644
+--- a/arch/sparc/kernel/irq_64.c
++++ b/arch/sparc/kernel/irq_64.c
+@@ -215,6 +215,9 @@ struct irq_handler_data {
+ 	bool capture_armed;
+ 	bool capture_ack_attempted;
+ 	bool capture_rearm_attempted;
++	bool capture_target_failed;
++	bool capture_target_attempted;
++	unsigned int capture_target;
+ 	unsigned long capture_baseline;
+ };
+ 
+@@ -831,6 +834,48 @@ int oberon_ack_capture(unsigned int irq, int (*check)(void *), void *arg,
+ 	return ret;
+ }
+ 
++int oberon_target_capture(unsigned int irq, unsigned int cpu)
++{
++	struct irq_desc *desc = irq_to_desc(irq);
++	struct irq_handler_data *data;
++	unsigned long flags, val, target;
++	int ret = -EBUSY;
++
++	if (!desc || IS_ENABLED(CONFIG_HOTPLUG_CPU) || cpu >= nr_cpu_ids ||
++	    cpu > 0x3ff || !cpu_online(cpu))
++		return -EINVAL;
++	raw_spin_lock_irqsave(&desc->lock, flags);
++	data = irq_desc_get_handler_data(desc);
++	if (!data || desc->irq_data.chip != &oberon_capture_chip ||
++	    desc->action || data->capture_live || data->captured ||
++	    data->capture_target_attempted)
++		goto out;
++	val = upa_readq(data->imap);
++	if (val != 0x40 || val != data->capture_baseline ||
++	    (upa_readq(data->iclr) & 3UL))
++		goto out;
++	/* CPU indices on sun4u use firmware physical IDs; preserve controller bits. */
++	target = oberon_imap_target(val, cpu);
++	data->capture_target_attempted = true;
++	upa_writeq(target, data->imap);
++	if (upa_readq(data->imap) != target) {
++		data->capture_target_failed = true;
++		upa_writeq(val, data->imap);
++		if (upa_readq(data->imap) != val)
++			oberon_capture_stop(5);
++		ret = -EIO;
++		goto out;
++	}
++	if (upa_readq(data->iclr) & 3UL)
++		oberon_capture_stop(5);
++	data->capture_baseline = target;
++	data->capture_target = cpu;
++	ret = 0;
++out:
++	raw_spin_unlock_irqrestore(&desc->lock, flags);
++	return ret;
++}
++
+ int oberon_arm_capture(unsigned int irq)
+ {
+ 	struct irq_desc *desc = irq_to_desc(irq);
+@@ -843,11 +888,13 @@ int oberon_arm_capture(unsigned int irq)
+ 	raw_spin_lock_irqsave(&desc->lock, flags);
+ 	data = irq_desc_get_handler_data(desc);
+ 	if (desc->irq_data.chip != &oberon_capture_chip || !data ||
+-	    desc->action || data->captured || data->capture_live)
++	    desc->action || data->captured || data->capture_live ||
++	    data->capture_target_failed)
+ 		goto out;
+-	/* This first experiment accepts only the observed CPU-0/controller-0 route. */
++	/* Keep the prepared controller selection and disabled route intact. */
+ 	val = upa_readq(data->imap);
+-	if (val != 0x40 || val != data->capture_baseline || !cpu_online(0))
++	if ((val & ~OBERON_IMAP_TID_MASK) != 0x40 ||
++	    val != data->capture_baseline || !cpu_online(data->capture_target))
+ 		goto out;
+ 	data->capture_live = true;
+ 	data->capture_armed = true;
+@@ -876,10 +923,12 @@ int oberon_rearm_capture(unsigned int irq, int (*check)(void *), void *arg)
+ 	if (desc->irq_data.chip != &oberon_capture_chip || !data ||
+ 	    desc->action || !data->capture_live || !data->captured ||
+ 	    data->capture_armed || !data->capture_ack_attempted ||
+-	    data->capture_rearm_attempted || !cpu_online(0))
++	    data->capture_rearm_attempted || data->capture_target_failed ||
++	    !cpu_online(data->capture_target))
+ 		goto out;
+ 	val = upa_readq(data->imap);
+-	if (val != 0x40 || val != data->capture_baseline ||
++	if ((val & ~OBERON_IMAP_TID_MASK) != 0x40 ||
++	    val != data->capture_baseline ||
+ 	    (upa_readq(data->iclr) & 3UL))
+ 		goto out;
+ 	data->capture_rearm_attempted = true;
+diff --git a/arch/sparc/kernel/pci_fire.c b/arch/sparc/kernel/pci_fire.c
+index f66618232ede..05b570bbcc6c 100644
+--- a/arch/sparc/kernel/pci_fire.c
++++ b/arch/sparc/kernel/pci_fire.c
+@@ -4,6 +4,7 @@
+  * Copyright (C) 2007 David S. Miller (davem@davemloft.net)
+  */
+ #include <linux/workqueue.h>
++#include <linux/smp.h>
+ #include <linux/timer.h>
+ #include <linux/kernel.h>
+ #include <linux/pci.h>
+@@ -20,6 +21,7 @@
+ #include <asm/prom.h>
+ #include <asm/irq.h>
+ #include <asm/upa.h>
++#include <asm/trap_block.h>
+ 
+ #include "pci_impl.h"
+ 
+@@ -753,6 +755,11 @@ struct oberon_irq_capture {
+ 	bool rearm_requested;
+ 	int rearm_result;
+ 	unsigned int generation;
++	unsigned int received_cpu;
++	unsigned long received_hard_id;
++	bool target_requested;
++	unsigned int target_cpu;
++	int target_result;
+ 	struct oberon_irq_capture *next;
+ };
+ 
+@@ -1000,8 +1007,9 @@ static void oberon_capture_report(struct work_struct *work)
+ 		struct oberon_irq_capture, report);
+ 	int i;
+ 
+-	pr_warn("Oberon capture %s: generation=%u candidate samples\n",
+-		cap->pbm->name, cap->generation);
++	pr_warn("Oberon capture %s: generation=%u cpu=%u hard_id=%lu candidate samples\n",
++		cap->pbm->name, cap->generation, cap->received_cpu,
++		cap->received_hard_id);
+ 	for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++)
+ 		pr_warn("Oberon capture %s: reg=%lx before=%016llx after=%016llx\n",
+ 			cap->pbm->name, oberon_capture_status_regs[i],
+@@ -1022,7 +1030,9 @@ static void oberon_capture_event(void *arg)
+ 	unsigned long base = cap->pbm->pbm_regs;
+ 	int i;
+ 
+-	/* At most 26 reads; equal samples do not prove an atomic snapshot. */
++	cap->received_cpu = raw_smp_processor_id();
++	cap->received_hard_id = real_hard_smp_processor_id();
++	/* At most 26 CSR reads; equal samples do not prove an atomic snapshot. */
+ 	for (i = 0; i < ARRAY_SIZE(oberon_capture_status_regs); i++)
+ 		cap->status[i] = upa_readq(base + oberon_capture_status_regs[i]);
+ 	cap->fault_read = cap->status[2] != 0;
+@@ -1108,6 +1118,48 @@ static ssize_t oberon_capture_rearm_result_show(struct device *dev,
+ static DEVICE_ATTR(oberon_capture_rearm_result, 0400,
+ 		   oberon_capture_rearm_result_show, NULL);
+ 
++static ssize_t oberon_capture_target_store(struct device *dev,
++					 struct device_attribute *attr,
++					 const char *buf, size_t count)
++{
++	struct oberon_irq_capture *cap = oberon_live_capture;
++	unsigned int cpu;
++
++	if (!cap || dev != &cap->pbm->op->dev || kstrtouint(buf, 0, &cpu))
++		return -EINVAL;
++	guard(mutex)(&oberon_diag_lock);
++	if (cap->target_requested)
++		return -EBUSY;
++	cap->target_requested = true;
++	cap->target_cpu = cpu;
++	cap->target_result = oberon_target_capture(cap->irq, cpu);
++	return cap->target_result ? cap->target_result : count;
++}
++static DEVICE_ATTR_WO(oberon_capture_target);
++
++static ssize_t oberon_capture_target_result_show(struct device *dev,
++					       struct device_attribute *attr,
++					       char *buf)
++{
++	struct oberon_irq_capture *cap = oberon_live_capture;
++	unsigned long imap, iclr;
++	bool armed, captured;
++	int ret;
++
++	if (!cap || dev != &cap->pbm->op->dev)
++		return -ENODEV;
++	guard(mutex)(&oberon_diag_lock);
++	ret = oberon_capture_state(cap->irq, &armed, &captured, &imap, &iclr);
++	if (ret)
++		return ret;
++	return sysfs_emit(buf,
++		"requested=%u cpu=%u result=%d armed=%u captured=%u imap=%lx iclr=%lx\n",
++		cap->target_requested, cap->target_cpu, cap->target_result,
++		armed, captured, imap, iclr);
++}
++static DEVICE_ATTR(oberon_capture_target_result, 0400,
++		   oberon_capture_target_result_show, NULL);
++
+ static int __init oberon_capture_init(void)
+ {
+ 	struct pci_pbm_info *pbm;
+@@ -1187,7 +1239,17 @@ static int __init oberon_capture_init(void)
+ 		if (!ret)
+ 			ret = device_create_file(&selected->pbm->op->dev,
+ 						 &dev_attr_oberon_capture_rearm_result);
++		if (!ret)
++			ret = device_create_file(&selected->pbm->op->dev,
++						 &dev_attr_oberon_capture_target);
++		if (!ret)
++			ret = device_create_file(&selected->pbm->op->dev,
++						 &dev_attr_oberon_capture_target_result);
+ 		if (ret) {
++			device_remove_file(&selected->pbm->op->dev,
++					   &dev_attr_oberon_capture_target);
++			device_remove_file(&selected->pbm->op->dev,
++					   &dev_attr_oberon_capture_rearm_result);
+ 			device_remove_file(&selected->pbm->op->dev,
+ 					   &dev_attr_oberon_capture_rearm);
+ 			device_remove_file(&selected->pbm->op->dev,
+-- 
+2.43.0
+

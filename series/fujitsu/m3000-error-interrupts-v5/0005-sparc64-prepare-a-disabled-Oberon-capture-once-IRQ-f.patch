@@ -1,0 +1,240 @@
+From 1e87e533d239c98068e6f197a58482f09d7eb6ea Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Thu, 15 Oct 2026 07:16:31 +0200
+Subject: [RFC PATCH 05/16] sparc64: prepare a disabled Oberon capture-once IRQ
+ flow
+
+Keep experimental DMC/PEC capture outside the normal fasteoi path,
+whose activation and completion write ICLR. Accept only an unused,
+disabled Oberon descriptor with the expected IMAP and VALID clear.
+
+Capture status once into persistent storage and defer reporting to a
+worker. The dedicated chip has inert startup, mask and EOI callbacks;
+no hardware arm, clear or rearm operation is provided. Software
+quarantine does not establish hardware containment or firmware ownership.
+
+The default-off oberon_capture_prepare option prepares software only.
+Keep this capture scaffolding separate from the base M3000 support.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/include/asm/irq_64.h |  3 ++
+ arch/sparc/kernel/irq_64.c      | 69 +++++++++++++++++++++++++
+ arch/sparc/kernel/pci_fire.c    | 89 +++++++++++++++++++++++++++++++++
+ 3 files changed, 161 insertions(+)
+
+diff --git a/arch/sparc/include/asm/irq_64.h b/arch/sparc/include/asm/irq_64.h
+index c3e88f2f8e80..9f5cf9d2548f 100644
+--- a/arch/sparc/include/asm/irq_64.h
++++ b/arch/sparc/include/asm/irq_64.h
+@@ -46,6 +46,9 @@ void irq_install_pre_handler(int irq,
+ #define irq_canonicalize(irq)	(irq)
+ unsigned int build_irq(int inofixup, unsigned long iclr, unsigned long imap);
+ unsigned int oberon_build_irq(int inofixup, unsigned long iclr, unsigned long imap);
++/* The callback and argument must remain valid for the life of the IRQ. */
++int oberon_prepare_capture(unsigned int irq, unsigned long imap,
++			   void (*capture)(void *arg), void *arg);
+ unsigned int sun4v_build_irq(u32 devhandle, unsigned int devino);
+ unsigned int sun4v_build_virq(u32 devhandle, unsigned int devino);
+ unsigned int sun4v_build_msi(u32 devhandle, unsigned int *irq_p,
+diff --git a/arch/sparc/kernel/irq_64.c b/arch/sparc/kernel/irq_64.c
+index 338f58246feb..3fb63043e180 100644
+--- a/arch/sparc/kernel/irq_64.c
++++ b/arch/sparc/kernel/irq_64.c
+@@ -22,6 +22,7 @@
+ #include <linux/seq_file.h>
+ #include <linux/ftrace.h>
+ #include <linux/irq.h>
++#include <linux/irqdesc.h>
+ #include <linux/string_choices.h>
+ 
+ #include <asm/ptrace.h>
+@@ -207,6 +208,9 @@ struct irq_handler_data {
+ 	unsigned long	iclr;
+ 	unsigned long	imap;
+ 	bool		oberon;
++	void (*capture)(void *arg);
++	void *capture_arg;
++	bool captured;
+ };
+ 
+ static inline unsigned int irq_data_to_handle(struct irq_data *data)
+@@ -676,6 +680,71 @@ unsigned int oberon_build_irq(int inofixup, unsigned long iclr,
+ 	return irq;
+ }
+ 
++/* This prepared-only flow never acknowledges or rearms the hardware. */
++static void oberon_capture_irq(struct irq_desc *desc)
++{
++	struct irq_handler_data *data;
++
++	guard(raw_spinlock)(&desc->lock);
++	data = irq_desc_get_handler_data(desc);
++	if (!data->captured) {
++		data->captured = true;
++		data->capture(data->capture_arg);
++	}
++}
++
++static void oberon_capture_noop(struct irq_data *data)
++{
++}
++
++static unsigned int oberon_capture_startup(struct irq_data *data)
++{
++	return 0;
++}
++
++static struct irq_chip oberon_capture_chip = {
++	.name = "oberon-capture",
++	.irq_startup = oberon_capture_startup,
++	.irq_shutdown = oberon_capture_noop,
++	.irq_enable = oberon_capture_noop,
++	.irq_disable = oberon_capture_noop,
++	.irq_mask = oberon_capture_noop,
++	.irq_unmask = oberon_capture_noop,
++	.irq_eoi = oberon_capture_noop,
++};
++
++int oberon_prepare_capture(unsigned int irq, unsigned long imap,
++			   void (*capture)(void *arg), void *arg)
++{
++	struct irq_desc *desc = irq_to_desc(irq);
++	struct irq_handler_data *data;
++	unsigned long flags;
++	int ret = -EINVAL;
++
++	if (!desc || !capture)
++		return ret;
++	raw_spin_lock_irqsave(&desc->lock, flags);
++	data = irq_desc_get_handler_data(desc);
++	if (!data || !data->oberon || data->imap != imap ||
++	    desc->irq_data.chip != &sun4u_irq)
++		goto out;
++	ret = -EBUSY;
++	if (desc->action || !irqd_irq_disabled(&desc->irq_data) ||
++	    (upa_readq(imap) & IMAP_VALID))
++		goto out;
++	data->capture = capture;
++	data->capture_arg = arg;
++	data->captured = false;
++	desc->status_use_accessors |= IRQ_NOREQUEST | IRQ_NOPROBE |
++		IRQ_NOAUTOEN | IRQ_NO_BALANCING;
++	desc->irq_data.chip = &oberon_capture_chip;
++	desc->handle_irq = oberon_capture_irq;
++	ret = 0;
++out:
++	raw_spin_unlock_irqrestore(&desc->lock, flags);
++	return ret;
++}
++
+ static unsigned int sun4v_build_common(u32 devhandle, unsigned int devino,
+ 		void (*handler_data_init)(struct irq_handler_data *data,
+ 		u32 devhandle, unsigned int devino),
+diff --git a/arch/sparc/kernel/pci_fire.c b/arch/sparc/kernel/pci_fire.c
+index a132651bb8e3..e6a9a150d4fe 100644
+--- a/arch/sparc/kernel/pci_fire.c
++++ b/arch/sparc/kernel/pci_fire.c
+@@ -3,6 +3,7 @@
+  *
+  * Copyright (C) 2007 David S. Miller (davem@davemloft.net)
+  */
++#include <linux/workqueue.h>
+ #include <linux/kernel.h>
+ #include <linux/pci.h>
+ #include <linux/slab.h>
+@@ -732,3 +733,91 @@ static int __init fire_init(void)
+ }
+ 
+ subsys_initcall(fire_init);
++
++struct oberon_irq_capture {
++	struct work_struct report;
++	struct pci_pbm_info *pbm;
++	u64 status[8];
++};
++
++static bool oberon_capture_prepare;
++
++static int __init oberon_capture_setup(char *str)
++{
++	return kstrtobool(str, &oberon_capture_prepare);
++}
++early_param("oberon_capture_prepare", oberon_capture_setup);
++
++static void oberon_capture_report(struct work_struct *work)
++{
++	struct oberon_irq_capture *cap = container_of(work,
++		struct oberon_irq_capture, report);
++
++	pr_warn("Oberon capture %s: multi=%016llx dmc=%016llx mmu=%016llx pec=%016llx oe=%016llx ue=%016llx ce=%016llx ilu=%016llx; no ack or rearm\n",
++		cap->pbm->name, cap->status[0], cap->status[1], cap->status[2],
++		cap->status[3], cap->status[4], cap->status[5], cap->status[6],
++		cap->status[7]);
++}
++
++static void oberon_capture_event(void *arg)
++{
++	struct oberon_irq_capture *cap = arg;
++	unsigned long base = cap->pbm->pbm_regs;
++
++	cap->status[0] = upa_readq(base + OBERON_DIAG_MULTI_STATUS);
++	cap->status[1] = upa_readq(base + OBERON_DIAG_DMC_STATUS);
++	cap->status[2] = upa_readq(base + OBERON_DIAG_MMU_STATUS);
++	cap->status[3] = upa_readq(base + OBERON_DIAG_PEC_STATUS);
++	cap->status[4] = upa_readq(base + OBERON_DIAG_OE_STATUS);
++	cap->status[5] = upa_readq(base + OBERON_DIAG_UE_STATUS);
++	cap->status[6] = upa_readq(base + OBERON_DIAG_CE_STATUS);
++	cap->status[7] = upa_readq(base + OBERON_DIAG_ILU_STATUS);
++	schedule_work(&cap->report);
++}
++
++static int __init oberon_capture_init(void)
++{
++	struct pci_pbm_info *pbm;
++
++	if (!oberon_capture_prepare)
++		return 0;
++	for (pbm = pci_pbm_root; pbm; pbm = pbm->next) {
++		const struct linux_prom64_registers *regs;
++		const __be32 *intr;
++		struct oberon_irq_capture *cap;
++		int len, irq, ret;
++
++		if (!pbm->is_oberon)
++			continue;
++		regs = of_get_property(pbm->op->dev.of_node, "reg", &len);
++		if (!regs || len < sizeof(*regs) ||
++		    regs[0].phys_addr != pbm->pbm_regs ||
++		    regs[0].reg_size < OBERON_DIAG_CE_STATUS + sizeof(u64) ||
++		    pbm->pbm_regs > ~0UL - OBERON_DIAG_CE_STATUS - sizeof(u64))
++			continue;
++		intr = of_get_property(pbm->op->dev.of_node, "interrupts", &len);
++		if (!intr || len < 2 * sizeof(*intr) ||
++		    be32_to_cpup(intr + 1) != 0x3e)
++			continue;
++		irq = platform_get_irq(pbm->op, 1);
++		if (irq <= 0)
++			continue;
++		cap = kzalloc_obj(*cap, GFP_KERNEL);
++		if (!cap)
++			return -ENOMEM;
++		cap->pbm = pbm;
++		INIT_WORK(&cap->report, oberon_capture_report);
++		ret = oberon_prepare_capture(irq, pbm->pbm_regs + 0x11f0,
++					     oberon_capture_event, cap);
++		if (ret) {
++			kfree(cap);
++			pr_warn("Oberon capture %s: preparation rejected: %d\n",
++				pbm->name, ret);
++		} else {
++			pr_info("Oberon capture %s: prepared only, IRQ remains unarmed\n",
++				pbm->name);
++		}
++	}
++	return 0;
++}
++late_initcall(oberon_capture_init);
+-- 
+2.43.0
+

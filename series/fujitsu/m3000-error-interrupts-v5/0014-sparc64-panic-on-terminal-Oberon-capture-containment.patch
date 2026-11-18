@@ -1,0 +1,100 @@
+From 333668d31a23b00b04e4d61b951b5e4795373c8b Mon Sep 17 00:00:00 2001
+From: Magnus Lindholm <linmag7@gmail.com>
+Date: Fri, 16 Oct 2026 00:24:11 +0200
+Subject: [RFC PATCH 14/16] sparc64: panic on terminal Oberon capture
+ containment failure
+
+An IRQ-disabled spin while holding the descriptor lock can stall other
+CPUs and IRQ readers indefinitely. Release the descriptor lock and enter
+the system panic path instead of silently stopping the calling CPU.
+
+This remains a fatal containment failure. Panic may use the firmware
+console; it does not guarantee recovery or a successful reboot.
+
+Signed-off-by: Magnus Lindholm <linmag7@gmail.com>
+---
+ arch/sparc/kernel/irq_64.c | 24 ++++++++++++------------
+ 1 file changed, 12 insertions(+), 12 deletions(-)
+
+diff --git a/arch/sparc/kernel/irq_64.c b/arch/sparc/kernel/irq_64.c
+index cc7c05a35035..d781afc0fe45 100644
+--- a/arch/sparc/kernel/irq_64.c
++++ b/arch/sparc/kernel/irq_64.c
+@@ -688,15 +688,15 @@ unsigned int oberon_build_irq(int inofixup, unsigned long iclr,
+ 	return irq;
+ }
+ 
+-/* A terminal experiment failure deliberately avoids firmware console entry. */
++/* Preserve the failure reason before entering the system panic path. */
+ static unsigned int oberon_capture_failure;
+ 
+-static void __noreturn oberon_capture_stop(unsigned int reason)
++static void __noreturn oberon_capture_stop(struct irq_desc *desc, unsigned int reason)
+ {
+ 	WRITE_ONCE(oberon_capture_failure, reason);
+-	local_irq_disable();
+-	for (;;)
+-		cpu_relax();
++	/* Do not strand readers of this descriptor behind the failed experiment. */
++	raw_spin_unlock(&desc->lock);
++	panic("Oberon capture containment failed: reason=%u", reason);
+ }
+ 
+ static bool oberon_capture_mask(struct irq_handler_data *data)
+@@ -716,9 +716,9 @@ static void oberon_capture_irq(struct irq_desc *desc)
+ 	data = irq_desc_get_handler_data(desc);
+ 	if (data->capture_live) {
+ 		if (!data->capture_armed || data->captured)
+-			oberon_capture_stop(3);
++			oberon_capture_stop(desc, 3);
+ 		if (!oberon_capture_mask(data))
+-			oberon_capture_stop(2);
++			oberon_capture_stop(desc, 2);
+ 		data->capture_armed = false;
+ 	}
+ 	if (!data->captured) {
+@@ -868,12 +868,12 @@ int oberon_target_capture(unsigned int irq, unsigned int cpu)
+ 		data->capture_target_failed = true;
+ 		upa_writeq(val, data->imap);
+ 		if (upa_readq(data->imap) != val)
+-			oberon_capture_stop(5);
++			oberon_capture_stop(desc, 5);
+ 		ret = -EIO;
+ 		goto out;
+ 	}
+ 	if (upa_readq(data->iclr) & 3UL)
+-		oberon_capture_stop(5);
++		oberon_capture_stop(desc, 5);
+ 	data->capture_baseline = target;
+ 	data->capture_target = cpu;
+ 	ret = 0;
+@@ -907,7 +907,7 @@ int oberon_arm_capture(unsigned int irq)
+ 	upa_writeq(val | IMAP_VALID, data->imap);
+ 	if (upa_readq(data->imap) != (val | IMAP_VALID)) {
+ 		oberon_capture_mask(data);
+-		oberon_capture_stop(1);
++		oberon_capture_stop(desc, 1);
+ 	}
+ 	ret = 0;
+ out:
+@@ -952,7 +952,7 @@ int oberon_rearm_capture(unsigned int irq, int (*check)(void *), void *arg)
+ 	upa_writeq(val | IMAP_VALID, data->imap);
+ 	if (upa_readq(data->imap) != (val | IMAP_VALID)) {
+ 		oberon_capture_mask(data);
+-		oberon_capture_stop(1);
++		oberon_capture_stop(desc, 1);
+ 	}
+ 	ret = 0;
+ out:
+@@ -999,7 +999,7 @@ int oberon_disarm_capture(unsigned int irq)
+ 		goto out;
+ 	if (data->capture_armed) {
+ 		if (!oberon_capture_mask(data))
+-			oberon_capture_stop(4);
++			oberon_capture_stop(desc, 4);
+ 		data->capture_armed = false;
+ 	}
+ 	ret = data->captured;
+-- 
+2.43.0
+
